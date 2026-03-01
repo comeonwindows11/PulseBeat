@@ -1,0 +1,51 @@
+{% extends "layout/base.jinja" %}
+{% block title %}{{ t('nav.manage_account') }} - {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="grid two-cols">
+  <div class="card">
+    <h1>{{ t('account.manage_title') }}</h1>
+    <p><strong>{{ me.username }}</strong> ({{ me.email }})</p>
+    <p class="muted">{{ t('account.my_song_count', count=my_songs_count) }}</p>
+  </div>
+
+  <div class="card">
+    <h2>{{ t('account.change_password') }}</h2>
+    <form method="post" action="{{ url_for('accounts.change_password') }}" class="stack">
+      <label>{{ t('account.current_password') }}
+        <input type="password" name="current_password" required>
+      </label>
+      <label>{{ t('account.new_password') }}
+        <input type="password" name="new_password" required>
+      </label>
+      <label>{{ t('account.confirm_password') }}
+        <input type="password" name="confirm_password" required>
+      </label>
+      <button type="submit">{{ t('account.change_password') }}</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>{{ t('account.delete_my_songs') }}</h2>
+    <form method="post" action="{{ url_for('accounts.delete_my_songs') }}">
+      <button type="submit" class="btn-danger">{{ t('account.delete_my_songs') }}</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>{{ t('account.delete_account') }}</h2>
+    <form method="post" action="{{ url_for('accounts.delete_account') }}" class="stack">
+      <label>{{ t('auth.password') }}
+        <input type="password" name="password" required>
+      </label>
+      <label>{{ t('account.delete_songs_on_delete') }}
+        <select name="delete_songs">
+          <option value="yes">{{ t('yes') }}</option>
+          <option value="no">{{ t('no') }}</option>
+        </select>
+      </label>
+      <button type="submit" class="btn-danger">{{ t('account.delete_account') }}</button>
+    </form>
+  </div>
+</section>
+{% endblock %}

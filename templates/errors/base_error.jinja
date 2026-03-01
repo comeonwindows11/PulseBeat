@@ -1,0 +1,17 @@
+{% extends "layout/base.jinja" %}
+
+{% block content %}
+<section class="auth-wrap">
+  <div class="card auth-card">
+    <h1>{{ t('errors.title', code=error_code) }}</h1>
+    <h2>{{ t('errors.' ~ error_code ~ '.title') }}</h2>
+    <p>{{ t('errors.' ~ error_code ~ '.msg') }}</p>
+    <div class="row-actions">
+      <a class="btn" href="{{ url_for('main.index') }}">{{ t('errors.back_home') }}</a>
+      {% if not current_user %}
+        <a class="btn secondary" href="{{ url_for('accounts.login') }}">{{ t('nav.login') }}</a>
+      {% endif %}
+    </div>
+  </div>
+</section>
+{% endblock %}

@@ -1,0 +1,26 @@
+{% extends "layout/base.jinja" %}
+{% block title %}{{ t('auth.register') }} - {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="auth-wrap">
+  <div class="card auth-card">
+    <h1>{{ t('auth.register') }}</h1>
+    <form method="post" class="stack">
+      <label>{{ t('auth.username') }}
+        <input type="text" name="username" required>
+      </label>
+      <label>{{ t('auth.email') }}
+        <input type="email" name="email" required>
+      </label>
+      <label>{{ t('auth.password') }}
+        <input type="password" name="password" required>
+      </label>
+      <label>{{ t('account.confirm_password') }}
+        <input type="password" name="confirm_password" required>
+      </label>
+      <button type="submit">{{ t('auth.submit_register') }}</button>
+    </form>
+    <p>{{ t('auth.have_account') }} <a href="{{ url_for('accounts.login') }}">{{ t('auth.login') }}</a></p>
+  </div>
+</section>
+{% endblock %}

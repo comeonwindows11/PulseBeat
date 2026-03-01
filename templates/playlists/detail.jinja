@@ -1,0 +1,83 @@
+{% extends "layout/base.jinja" %}
+{% block title %}{{ playlist.name }} - {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="grid two-cols">
+  <div class="card">
+    <h1>{{ playlist.name }}</h1>
+    {% if songs %}
+      <ul class="song-list">
+        {% for song in songs %}
+          <li>
+            <div>
+              <a href="{{ url_for('songs.song_detail', song_id=song.id) }}"><strong>{{ song.title }}</strong></a>
+              <p>{{ song.artist }}</p>
+            </div>
+            <div class="row-actions">
+              <button
+                type="button"
+                class="play-one"
+                data-song='{{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url}|tojson|safe }}'
+              >{{ t('main.play') }}</button>
+              <form method="post" action="{{ url_for('playlists.remove_song_from_playlist', playlist_id=playlist.id, song_id=song.id) }}">
+                <button type="submit" class="btn-danger">{{ t('playlist.remove') }}</button>
+              </form>
+              {% if song.can_delete %}
+                <form method="post" action="{{ url_for('songs.delete_song', song_id=song.id) }}" class="delete-song-form">
+                  <button type="submit" class="btn-danger">{{ t('main.delete') }}</button>
+                </form>
+              {% endif %}
+            </div>
+          </li>
+        {% endfor %}
+      </ul>
+      <div class="pagination">
+        {% if songs_page > 1 %}
+          <a class="btn secondary" href="{{ url_for('playlists.playlist_detail', playlist_id=playlist.id, songs_page=songs_page-1, add_page=add_page) }}">{{ t('main.prev') }}</a>
+        {% endif %}
+        <span>{{ t('main.page', page=songs_page, pages=songs_pages) }}</span>
+        {% if songs_page < songs_pages %}
+          <a class="btn secondary" href="{{ url_for('playlists.playlist_detail', playlist_id=playlist.id, songs_page=songs_page+1, add_page=add_page) }}">{{ t('main.next') }}</a>
+        {% endif %}
+      </div>
+    {% else %}
+      <p>{{ t('playlist.empty') }}</p>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>{{ t('playlist.add_song') }}</h2>
+    <form method="post" action="{{ url_for('playlists.add_song_to_playlist', playlist_id=playlist.id) }}" class="stack">
+      <label>{{ t('playlist.add_song') }}
+        <select name="song_id" required>
+          <option value="">{{ t('playlist.choose_song') }}</option>
+          {% for s in all_songs %}
+            <option value="{{ s.id }}">{{ s.title }} - {{ s.artist }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <button type="submit">{{ t('main.add') }}</button>
+    </form>
+    <div class="pagination">
+      {% if add_page > 1 %}
+        <a class="btn secondary" href="{{ url_for('playlists.playlist_detail', playlist_id=playlist.id, songs_page=songs_page, add_page=add_page-1) }}">{{ t('main.prev') }}</a>
+      {% endif %}
+      <span>{{ t('main.page', page=add_page, pages=add_pages) }}</span>
+      {% if add_page < add_pages %}
+        <a class="btn secondary" href="{{ url_for('playlists.playlist_detail', playlist_id=playlist.id, songs_page=songs_page, add_page=add_page+1) }}">{{ t('main.next') }}</a>
+      {% endif %}
+    </div>
+    {% if songs %}
+      <button type="button" class="queue-all" data-source="playlist">{{ t('playlist.queue') }}</button>
+    {% endif %}
+  </div>
+</section>
+
+<script>
+  window.PAGE_SONG_OBJECTS = [
+    {% for song in songs %}
+      {{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url}|tojson|safe }}{% if not loop.last %},{% endif %}
+    {% endfor %}
+  ];
+</script>
+{% endblock %}

@@ -1,0 +1,38 @@
+{% extends "layout/base.jinja" %}
+{% block title %}{{ t('nav.playlists') }} - {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="grid two-cols">
+  <div class="card">
+    <h1>{{ t('playlist.mine') }}</h1>
+    {% if playlists %}
+      <ul class="playlist-list">
+        {% for p in playlists %}
+          <li><a href="{{ url_for('playlists.playlist_detail', playlist_id=p.id) }}">{{ p.name }}</a></li>
+        {% endfor %}
+      </ul>
+      <div class="pagination">
+        {% if page > 1 %}
+          <a class="btn secondary" href="{{ url_for('playlists.list_playlists', page=page-1) }}">{{ t('main.prev') }}</a>
+        {% endif %}
+        <span>{{ t('main.page', page=page, pages=pages) }}</span>
+        {% if page < pages %}
+          <a class="btn secondary" href="{{ url_for('playlists.list_playlists', page=page+1) }}">{{ t('main.next') }}</a>
+        {% endif %}
+      </div>
+    {% else %}
+      <p>{{ t('playlist.none') }}</p>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>{{ t('playlist.create') }}</h2>
+    <form method="post" class="stack">
+      <label>{{ t('playlist.name') }}
+        <input type="text" name="name" required>
+      </label>
+      <button type="submit">{{ t('playlist.create') }}</button>
+    </form>
+  </div>
+</section>
+{% endblock %}

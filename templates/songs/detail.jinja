@@ -1,0 +1,104 @@
+{% extends "layout/base.jinja" %}
+{% block title %}{{ song.title }} - {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="grid two-cols">
+  <div class="card">
+    <h1>{{ song.title }}</h1>
+    <p>{{ song.artist }}</p>
+    <span class="badge">{{ t('main.visibility.' ~ song.visibility) }}</span>
+    <div class="row-actions top-gap">
+      <button type="button" class="play-one" data-song='{{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url}|tojson|safe }}'>{{ t('main.play') }}</button>
+      <form method="post" action="{{ url_for('songs.vote_song', song_id=song.id) }}">
+        <input type="hidden" name="vote" value="1">
+        <button type="submit" class="vote-btn {% if user_vote == 1 %}btn{% else %}btn secondary{% endif %}" aria-label="{{ t('song.like') }}">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 21h4V9H2v12zM22 10c0-1.1-.9-2-2-2h-6l1-4v-.7c0-.4-.2-.8-.4-1.1L13.6 1 7.7 6.9C7.3 7.3 7 7.8 7 8.4V19c0 1.1.9 2 2 2h8c.8 0 1.5-.5 1.8-1.2l3-7c.1-.2.2-.5.2-.8v-2z"/></svg>
+          <span>{{ likes }}</span>
+        </button>
+      </form>
+      <form method="post" action="{{ url_for('songs.vote_song', song_id=song.id) }}">
+        <input type="hidden" name="vote" value="-1">
+        <button type="submit" class="vote-btn {% if user_vote == -1 %}btn{% else %}btn secondary{% endif %}" aria-label="{{ t('song.dislike') }}">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M22 3h-4v12h4V3zM2 14c0 1.1.9 2 2 2h6l-1 4v.7c0 .4.2.8.4 1.1l1 1 5.9-5.9c.4-.4.7-.9.7-1.5V5c0-1.1-.9-2-2-2H7c-.8 0-1.5.5-1.8 1.2l-3 7c-.1.2-.2.5-.2.8v2z"/></svg>
+          <span>{{ dislikes }}</span>
+        </button>
+      </form>
+      {% if user_vote != 0 %}
+      <form method="post" action="{{ url_for('songs.vote_song', song_id=song.id) }}">
+        <input type="hidden" name="vote" value="0">
+        <button type="submit" class="btn secondary">{{ t('song.remove_reaction') }}</button>
+      </form>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>{{ t('song.comments') }}</h2>
+    {% if can_comment %}
+      <form method="post" action="{{ url_for('songs.add_comment', song_id=song.id) }}" class="stack">
+        <label>{{ t('song.add_comment') }}
+          <textarea name="content" required rows="3"></textarea>
+        </label>
+        <button type="submit">{{ t('song.add_comment') }}</button>
+      </form>
+    {% else %}
+      <p>{{ t('song.login_to_comment') }}</p>
+    {% endif %}
+
+    {% if comments %}
+      <ul class="comment-list">
+        {% for c in comments %}
+          <li>
+            <p><strong>{{ c.username }}</strong></p>
+            <p>{{ c.content }}</p>
+            <div class="row-actions">
+              {% if can_comment %}
+                <form method="post" action="{{ url_for('songs.add_comment', song_id=song.id) }}" class="inline-reply">
+                  <input type="hidden" name="parent_comment_id" value="{{ c.id }}">
+                  <input type="text" name="content" placeholder="{{ t('song.reply') }}" required>
+                  <button type="submit">{{ t('song.reply') }}</button>
+                </form>
+              {% endif %}
+              {% if c.is_owner %}
+                <form method="post" action="{{ url_for('songs.delete_comment', song_id=song.id, comment_id=c.id) }}">
+                  <button type="submit" class="btn-danger">{{ t('main.delete') }}</button>
+                </form>
+              {% endif %}
+            </div>
+            {% if c.replies %}
+              <ul class="reply-list">
+                {% for r in c.replies %}
+                  <li>
+                    <p><strong>{{ r.username }}</strong></p>
+                    <p>{{ r.content }}</p>
+                    {% if r.is_owner %}
+                      <form method="post" action="{{ url_for('songs.delete_comment', song_id=song.id, comment_id=r.id) }}">
+                        <button type="submit" class="btn-danger">{{ t('main.delete') }}</button>
+                      </form>
+                    {% endif %}
+                  </li>
+                {% endfor %}
+              </ul>
+            {% endif %}
+          </li>
+        {% endfor %}
+      </ul>
+      <div class="pagination">
+        {% if comments_page > 1 %}
+          <a class="btn secondary" href="{{ url_for('songs.song_detail', song_id=song.id, comments_page=comments_page-1) }}">{{ t('main.prev') }}</a>
+        {% endif %}
+        <span>{{ t('main.page', page=comments_page, pages=comments_pages) }}</span>
+        {% if comments_page < comments_pages %}
+          <a class="btn secondary" href="{{ url_for('songs.song_detail', song_id=song.id, comments_page=comments_page+1) }}">{{ t('main.next') }}</a>
+        {% endif %}
+      </div>
+    {% else %}
+      <p>{{ t('song.no_comments') }}</p>
+    {% endif %}
+  </div>
+</section>
+
+<script>
+  window.PAGE_SONG_OBJECTS = [{{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url}|tojson|safe }}];
+</script>
+{% endblock %}

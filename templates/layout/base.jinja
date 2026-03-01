@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="{{ current_lang }}">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}{{ app_name }}{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <a href="{{ url_for('main.index') }}" class="logo">{{ app_name }}</a>
+    <button id="menu-toggle" class="menu-toggle" type="button" aria-label="{{ t('lang.switch') }}" aria-expanded="false">
+      <span></span><span></span><span></span>
+    </button>
+    <form method="post" action="{{ url_for('main.set_language') }}" class="lang-form">
+      <input type="hidden" name="next" value="{{ request.full_path }}">
+      <label for="lang-select" class="small muted">{{ t('lang.switch') }}</label>
+      <select id="lang-select" name="lang" onchange="this.form.submit()">
+        <option value="fr" {% if current_lang == "fr" %}selected{% endif %}>{{ t('lang.fr') }}</option>
+        <option value="en" {% if current_lang == "en" %}selected{% endif %}>{{ t('lang.en') }}</option>
+      </select>
+    </form>
+    <nav id="main-nav" class="main-nav">
+      {% if current_user %}
+        <a href="{{ url_for('main.index') }}">{{ t('nav.home') }}</a>
+        <a href="{{ url_for('songs.my_songs') }}">{{ t('nav.my_songs') }}</a>
+        <a href="{{ url_for('playlists.list_playlists') }}">{{ t('nav.playlists') }}</a>
+        <a href="{{ url_for('accounts.manage_account') }}">{{ t('nav.manage_account') }}</a>
+        {% if current_user.is_admin %}
+          <a href="{{ url_for('admin.dashboard') }}">{{ t('nav.admin') }}</a>
+        {% endif %}
+        <a href="{{ url_for('accounts.logout') }}">{{ t('nav.logout') }}</a>
+      {% else %}
+        <a href="{{ url_for('accounts.login') }}">{{ t('nav.login') }}</a>
+        <a href="{{ url_for('accounts.register') }}">{{ t('nav.register') }}</a>
+      {% endif %}
+    </nav>
+  </header>
+
+  <main class="page-container">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        <div class="flash-list">
+          {% for category, message in messages %}
+            <div class="flash {{ category }}">{{ message }}</div>
+          {% endfor %}
+        </div>
+      {% endif %}
+    {% endwith %}
+
+    {% block content %}{% endblock %}
+  </main>
+
+  <div id="confirm-modal" class="modal hidden" aria-hidden="true" role="dialog" aria-modal="true">
+    <div class="modal-card">
+      <h3>{{ t('modal.delete.title') }}</h3>
+      <p>{{ t('modal.delete.body') }}</p>
+      <div class="row-actions">
+        <button id="modal-cancel" type="button" class="btn secondary">{{ t('modal.cancel') }}</button>
+        <button id="modal-confirm" type="button" class="btn-danger">{{ t('modal.delete') }}</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="player-shell">
+    <audio id="global-audio" preload="metadata"></audio>
+    <div class="player-bar">
+      <div class="song-meta">
+        <strong id="player-title">{{ t('player.none') }}</strong>
+        <span id="player-artist">-</span>
+      </div>
+      <div class="controls">
+        <button id="prev-btn" type="button" aria-label="{{ t('player.previous') }}">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M6 6h2v12H6zM9 12l9 6V6z"></path>
+          </svg>
+        </button>
+        <button id="play-pause-btn" class="primary-control" type="button" aria-label="{{ t('player.play') }}" data-state="paused">
+          <svg class="icon icon-play" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M8 5v14l11-7z"></path>
+          </svg>
+          <svg class="icon icon-pause" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M7 5h4v14H7zm6 0h4v14h-4z"></path>
+          </svg>
+        </button>
+        <button id="next-btn" type="button" aria-label="{{ t('player.next') }}">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M16 6h2v12h-2zM6 18l9-6-9-6z"></path>
+          </svg>
+        </button>
+        <button id="play-mode-btn" class="mode-btn" type="button" aria-label="{{ t('player.mode.normal') }}" data-mode="normal">
+          <svg class="icon mode-normal" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 4h2v16H4zm14 0h2v16h-2zM8 11h8v2H8z"></path>
+          </svg>
+          <svg class="icon mode-shuffle" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M16 3h5v5h-2V6.41l-4.29 4.3-1.42-1.42L17.59 5H16V3zM4 6h4.59l9.7 9.71L19 15v2h-1.41l-9.7-9.71L7 8H4V6zm9.29 7.29l1.42 1.42-2.59 2.59H8v-2h3.29l2-2.01z"></path>
+          </svg>
+          <svg class="icon mode-repeat-one" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M7 7h10v3l4-4-4-4v3H7c-2.21 0-4 1.79-4 4v2h2V9c0-1.1.9-2 2-2zm10 10H7v-3l-4 4 4 4v-3h10c2.21 0 4-1.79 4-4v-2h-2v2c0 1.1-.9 2-2 2zm-5-8h-1v6h2v-5h-1z"></path>
+          </svg>
+        </button>
+      </div>
+      <div class="progress-wrap">
+        <input id="seek-range" type="range" min="0" max="100" value="0">
+      </div>
+    </div>
+  </div>
+
+  <script>
+    window.I18N = {
+      playerNoSong: {{ t('player.none')|tojson }},
+      playerUnknown: {{ t('player.unknown')|tojson }},
+      playerUntitled: {{ t('player.untitled')|tojson }},
+      playerPlay: {{ t('player.play')|tojson }},
+      playerPause: {{ t('player.pause')|tojson }},
+      playerModeNormal: {{ t('player.mode.normal')|tojson }},
+      playerModeShuffle: {{ t('player.mode.shuffle')|tojson }},
+      playerModeRepeatOne: {{ t('player.mode.repeat_one')|tojson }},
+      playerAlbum: {{ app_name|tojson }}
+    };
+  </script>
+  <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/player.js') }}"></script>
+</body>
+</html>

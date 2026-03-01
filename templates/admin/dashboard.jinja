@@ -1,0 +1,98 @@
+{% extends "admin/base.jinja" %}
+{% block title %}{{ t('nav.admin') }} - {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="grid two-cols">
+  <div class="card">
+    <h2>{{ t('admin.create_admin') }}</h2>
+    <form method="post" action="{{ url_for('admin.create_admin') }}" class="stack">
+      <label>{{ t('auth.username') }}
+        <input type="text" name="username" required>
+      </label>
+      <label>{{ t('auth.email') }}
+        <input type="email" name="email" required>
+      </label>
+      <label>{{ t('auth.password') }}
+        <input type="password" name="password" required>
+      </label>
+      <label>{{ t('account.confirm_password') }}
+        <input type="password" name="confirm_password" required>
+      </label>
+      <button type="submit">{{ t('admin.create_admin') }}</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>{{ t('admin.users') }}</h2>
+    <ul class="playlist-list">
+      {% for user in users %}
+        <li>
+          <span>{{ user.username }} ({{ user.email }}) {% if user.is_admin %}[admin]{% endif %}</span>
+          <form method="post" action="{{ url_for('admin.delete_user', user_id=user._id|string) }}">
+            <select name="delete_songs">
+              <option value="yes">{{ t('account.delete_songs_on_delete') }}: {{ t('yes') }}</option>
+              <option value="no">{{ t('account.delete_songs_on_delete') }}: {{ t('no') }}</option>
+            </select>
+            <button type="submit" class="btn-danger">{{ t('admin.delete_user') }}</button>
+          </form>
+        </li>
+      {% endfor %}
+    </ul>
+    <div class="pagination">
+      {% if users_page > 1 %}
+        <a class="btn secondary" href="{{ url_for('admin.dashboard', users_page=users_page-1, songs_page=songs_page, comments_page=comments_page) }}">{{ t('main.prev') }}</a>
+      {% endif %}
+      <span>{{ t('main.page', page=users_page, pages=users_pages) }}</span>
+      {% if users_page < users_pages %}
+        <a class="btn secondary" href="{{ url_for('admin.dashboard', users_page=users_page+1, songs_page=songs_page, comments_page=comments_page) }}">{{ t('main.next') }}</a>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>{{ t('admin.songs') }}</h2>
+    <ul class="playlist-list">
+      {% for song in songs %}
+        <li>
+          <span>{{ song.title }} - {{ song.artist }}</span>
+          <form method="post" action="{{ url_for('songs.admin_delete_song', song_id=song._id|string) }}">
+            <button type="submit" class="btn-danger">{{ t('main.delete') }}</button>
+          </form>
+        </li>
+      {% endfor %}
+    </ul>
+    <div class="pagination">
+      {% if songs_page > 1 %}
+        <a class="btn secondary" href="{{ url_for('admin.dashboard', users_page=users_page, songs_page=songs_page-1, comments_page=comments_page) }}">{{ t('main.prev') }}</a>
+      {% endif %}
+      <span>{{ t('main.page', page=songs_page, pages=songs_pages) }}</span>
+      {% if songs_page < songs_pages %}
+        <a class="btn secondary" href="{{ url_for('admin.dashboard', users_page=users_page, songs_page=songs_page+1, comments_page=comments_page) }}">{{ t('main.next') }}</a>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>{{ t('admin.comments') }}</h2>
+    <ul class="playlist-list">
+      {% for comment in comments %}
+        <li>
+          <span>{{ comment.content }}</span>
+          <form method="post" action="{{ url_for('admin.delete_comment', comment_id=comment._id|string) }}">
+            <button type="submit" class="btn-danger">{{ t('main.delete') }}</button>
+          </form>
+        </li>
+      {% endfor %}
+    </ul>
+    <div class="pagination">
+      {% if comments_page > 1 %}
+        <a class="btn secondary" href="{{ url_for('admin.dashboard', users_page=users_page, songs_page=songs_page, comments_page=comments_page-1) }}">{{ t('main.prev') }}</a>
+      {% endif %}
+      <span>{{ t('main.page', page=comments_page, pages=comments_pages) }}</span>
+      {% if comments_page < comments_pages %}
+        <a class="btn secondary" href="{{ url_for('admin.dashboard', users_page=users_page, songs_page=songs_page, comments_page=comments_page+1) }}">{{ t('main.next') }}</a>
+      {% endif %}
+    </div>
+  </div>
+</section>
+{% endblock %}

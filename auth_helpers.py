@@ -1,6 +1,12 @@
+import hashlib
 import os
-from datetime import datetime
+import re
+import smtplib
+from datetime import datetime, timedelta
+from email.message import EmailMessage
 from functools import wraps
+
+import requests
 from bson import ObjectId
 from flask import current_app, flash, redirect, session, url_for
 from werkzeug.utils import secure_filename
@@ -10,6 +16,15 @@ from i18n import tr
 
 ALLOWED_EXTENSIONS = {"mp3", "wav", "ogg", "m4a"}
 VISIBILITY_VALUES = {"public", "private", "unlisted"}
+PASSWORD_POLICY_RE = re.compile(r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{6,}$")
+
+FEATURE_DEFAULTS_FULL = {
+    "usage_mode": "full",
+    "enable_password_reset": True,
+    "enable_advanced_moderation": True,
+    "enable_google_oauth": True,
+    "enable_email_notifications": True,
+}
 
 
 def parse_object_id(value: str):
@@ -23,6 +38,173 @@ def get_session_user_oid():
     return parse_object_id(session.get("user_id", ""))
 
 
+def get_app_settings():
+    return dict(FEATURE_DEFAULTS_FULL)
+
+
+def save_app_settings(settings: dict):
+    return
+
+
+def is_feature_enabled(flag_name: str, default=True):
+    return True
+
+
+def password_policy_ok(password: str) -> bool:
+    return bool(PASSWORD_POLICY_RE.match(password or ""))
+
+
+def _mail_configured():
+    host = current_app.config.get("MAIL_HOST", "")
+    sender = current_app.config.get("MAIL_FROM", "")
+    return bool(current_app.config.get("MAIL_ENABLED", False) and host and sender)
+
+
+def send_email_message(to_email: str, subject: str, text_body: str, html_body: str | None = None):
+    if not to_email or not _mail_configured() or not is_feature_enabled("enable_email_notifications", True):
+        return False
+
+    host = current_app.config.get("MAIL_HOST", "")
+    port = int(current_app.config.get("MAIL_PORT", 587))
+    mail_from = current_app.config.get("MAIL_FROM", "")
+    mail_user = current_app.config.get("MAIL_USERNAME", "")
+    mail_pass = current_app.config.get("MAIL_PASSWORD", "")
+    use_tls = bool(current_app.config.get("MAIL_USE_TLS", True))
+    use_ssl = bool(current_app.config.get("MAIL_USE_SSL", False))
+
+    msg = EmailMessage()
+    msg["From"] = mail_from
+    msg["To"] = to_email
+    msg["Subject"] = subject
+    msg.set_content(text_body or "")
+    if html_body:
+        msg.add_alternative(html_body, subtype="html")
+
+    try:
+        if use_ssl:
+            with smtplib.SMTP_SSL(host, port, timeout=10) as server:
+                if mail_user and mail_pass:
+                    server.login(mail_user, mail_pass)
+                server.send_message(msg)
+        else:
+            with smtplib.SMTP(host, port, timeout=10) as server:
+                server.ehlo()
+                if use_tls:
+                    server.starttls()
+                    server.ehlo()
+                if mail_user and mail_pass:
+                    server.login(mail_user, mail_pass)
+                server.send_message(msg)
+        return True
+    except Exception:
+        return False
+
+
+def notify_admins(subject_key: str, body_key: str, **kwargs):
+    if not is_feature_enabled("enable_email_notifications", True):
+        return
+
+    admins = list(extensions.users_col.find({"is_admin": True}, {"email": 1, "username": 1}))
+    for admin in admins:
+        email = admin.get("email", "")
+        if not email:
+            continue
+        text_body = tr(body_key, **kwargs)
+        send_email_message(email, tr(subject_key), text_body)
+
+
+def set_password_check_status(ok: bool, message: str | None = None):
+    if extensions.system_status_col is None:
+        return
+    now = datetime.utcnow()
+    if ok:
+        extensions.system_status_col.update_one(
+            {"key": "password_leak_service"},
+            {
+                "$set": {
+                    "key": "password_leak_service",
+                    "status": "up",
+                    "last_ok_at": now,
+                    "message": "",
+                }
+            },
+            upsert=True,
+        )
+    else:
+        doc = extensions.system_status_col.find_one({"key": "password_leak_service"}) or {}
+        last_notified_at = doc.get("last_notified_at")
+        should_notify = not last_notified_at or (now - last_notified_at) > timedelta(minutes=30)
+
+        update_payload = {
+            "key": "password_leak_service",
+            "status": "down",
+            "last_failed_at": now,
+            "message": message or "Password leak check unavailable",
+        }
+        if should_notify:
+            update_payload["last_notified_at"] = now
+
+        extensions.system_status_col.update_one(
+            {"key": "password_leak_service"},
+            {"$set": update_payload},
+            upsert=True,
+        )
+
+        if should_notify:
+            notify_admins(
+                "email.admin_alert_subject",
+                "email.admin_alert_body",
+                message=update_payload["message"],
+            )
+
+
+def password_pwned_status(password: str, timeout_seconds: int = 10):
+    sha1 = hashlib.sha1((password or "").encode("utf-8")).hexdigest().upper()
+    prefix = sha1[:5]
+    suffix = sha1[5:]
+    url = f"https://api.pwnedpasswords.com/range/{prefix}"
+    try:
+        response = requests.get(
+            url,
+            timeout=timeout_seconds,
+            headers={"User-Agent": "PulseBeat/1.0", "Add-Padding": "true"},
+        )
+        if response.status_code != 200:
+            set_password_check_status(False, f"HTTP {response.status_code}")
+            return "unavailable", 0
+
+        set_password_check_status(True)
+        for line in response.text.splitlines():
+            parts = line.strip().split(":")
+            if len(parts) != 2:
+                continue
+            if parts[0].upper() == suffix:
+                try:
+                    count = int(parts[1].strip())
+                except Exception:
+                    count = 1
+                return "pwned", count
+        return "safe", 0
+    except Exception:
+        set_password_check_status(False, "timeout_or_network_error")
+        return "unavailable", 0
+
+
+def is_user_banned(user):
+    banned_until = user.get("banned_until")
+    if not banned_until:
+        return False
+    return banned_until > datetime.utcnow()
+
+
+def is_email_verified(user):
+    if not user:
+        return False
+    if user.get("auth_provider") == "google":
+        return True
+    return bool(user.get("email_verified", False))
+
+
 def current_user():
     user_oid = get_session_user_oid()
     if not user_oid:
@@ -31,20 +213,45 @@ def current_user():
     if not user:
         session.clear()
         return None
+    if is_user_banned(user):
+        session.clear()
+        return None
+    if not is_email_verified(user):
+        session.clear()
+        return None
     return {
         "id": str(user["_id"]),
         "username": user.get("username", "user"),
         "email": user.get("email", ""),
         "is_admin": bool(user.get("is_admin", False)),
+        "is_root_admin": bool(user.get("is_root_admin", False)),
+        "require_password_change": bool(user.get("require_password_change", False)),
+        "email_verified": bool(is_email_verified(user)),
     }
 
 
 def login_required(fn):
     @wraps(fn)
     def wrapped(*args, **kwargs):
-        if not get_session_user_oid():
+        user_oid = get_session_user_oid()
+        if not user_oid:
             session.clear()
             flash(tr("flash.auth.required"), "warning")
+            return redirect(url_for("accounts.login"))
+
+        user = extensions.users_col.find_one({"_id": user_oid})
+        if not user:
+            session.clear()
+            flash(tr("flash.auth.required"), "warning")
+            return redirect(url_for("accounts.login"))
+        if is_user_banned(user):
+            session.clear()
+            flash(tr("flash.accounts.banned"), "danger")
+            return redirect(url_for("accounts.login"))
+        if not is_email_verified(user):
+            session.clear()
+            session["pending_verification_email"] = user.get("email", "")
+            flash(tr("flash.accounts.email_not_verified"), "warning")
             return redirect(url_for("accounts.login"))
         return fn(*args, **kwargs)
 
@@ -63,6 +270,15 @@ def admin_required(fn):
         if not user or not user.get("is_admin", False):
             flash(tr("flash.admin.forbidden"), "danger")
             return redirect(url_for("main.index"))
+        if is_user_banned(user):
+            session.clear()
+            flash(tr("flash.accounts.banned"), "danger")
+            return redirect(url_for("accounts.login"))
+        if not is_email_verified(user):
+            session.clear()
+            session["pending_verification_email"] = user.get("email", "")
+            flash(tr("flash.accounts.email_not_verified"), "warning")
+            return redirect(url_for("accounts.login"))
         return fn(*args, **kwargs)
 
     return wrapped
@@ -102,10 +318,16 @@ def cleanup_song(song):
     extensions.playlists_col.update_many({}, {"$pull": {"song_ids": song_oid}})
     extensions.song_votes_col.delete_many({"song_id": song_oid})
     extensions.song_comments_col.delete_many({"song_id": song_oid})
+    extensions.listening_history_col.delete_many({"song_id": song_oid})
+    extensions.song_reports_col.delete_many({"$or": [{"target_song_id": song_oid}, {"song_id": song_oid}]})
     extensions.songs_col.delete_one({"_id": song_oid})
 
 
 def cleanup_user(user_oid, delete_songs=False):
+    user = extensions.users_col.find_one({"_id": user_oid})
+    if user and user.get("is_root_admin", False):
+        return False
+
     if delete_songs:
         songs = list(extensions.songs_col.find({"created_by": user_oid}))
         for song in songs:
@@ -119,8 +341,11 @@ def cleanup_user(user_oid, delete_songs=False):
     extensions.songs_col.update_many({}, {"$pull": {"shared_with": user_oid}})
     extensions.song_votes_col.delete_many({"user_id": user_oid})
     extensions.song_comments_col.delete_many({"user_id": user_oid})
+    extensions.listening_history_col.delete_many({"user_id": user_oid})
+    extensions.song_reports_col.delete_many({"reporter_id": user_oid})
     extensions.playlists_col.delete_many({"user_id": user_oid})
     extensions.users_col.delete_one({"_id": user_oid})
+    return True
 
 
 def normalize_visibility(song):
@@ -168,6 +393,7 @@ def serialize_song(song, user_oid):
         "id": str(song["_id"]),
         "title": song.get("title") or tr("defaults.untitled"),
         "artist": song.get("artist") or tr("defaults.unknown_artist"),
+        "genre": song.get("genre", "").strip(),
         "visibility": normalize_visibility(song),
         "shared_count": len(song.get("shared_with", [])),
         "can_delete": song_owner_matches(song, user_oid),

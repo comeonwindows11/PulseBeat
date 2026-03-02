@@ -6,6 +6,9 @@
     <h1>{{ t('errors.title', code=error_code) }}</h1>
     <h2>{{ t('errors.' ~ error_code ~ '.title') }}</h2>
     <p>{{ t('errors.' ~ error_code ~ '.msg') }}</p>
+    <p>{{ t('errors.dino_intro') }}</p>
+    <canvas id="dino-game" width="720" height="180" class="dino-canvas"></canvas>
+    <p class="muted small">{{ t('errors.dino_help') }}</p>
     <div class="row-actions">
       <a class="btn" href="{{ url_for('main.index') }}">{{ t('errors.back_home') }}</a>
       {% if not current_user %}
@@ -14,4 +17,115 @@
     </div>
   </div>
 </section>
+
+<script>
+(function () {
+  const canvas = document.getElementById('dino-game');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width;
+  const h = canvas.height;
+
+  const groundY = h - 26;
+  const dino = { x: 56, y: groundY - 40, w: 28, h: 40, vy: 0, jump: false };
+  const obstacles = [];
+  let speed = 5;
+  let score = 0;
+  let over = false;
+
+  function spawn() {
+    if (Math.random() < 0.02) {
+      obstacles.push({ x: w + 20, y: groundY - 28, w: 14 + Math.random() * 10, h: 28 });
+    }
+  }
+
+  function reset() {
+    obstacles.length = 0;
+    dino.y = groundY - dino.h;
+    dino.vy = 0;
+    dino.jump = false;
+    speed = 5;
+    score = 0;
+    over = false;
+  }
+
+  function jump() {
+    if (over) {
+      reset();
+      return;
+    }
+    if (!dino.jump) {
+      dino.jump = true;
+      dino.vy = -11.5;
+    }
+  }
+
+  function update() {
+    if (!over) {
+      dino.vy += 0.55;
+      dino.y += dino.vy;
+      if (dino.y >= groundY - dino.h) {
+        dino.y = groundY - dino.h;
+        dino.vy = 0;
+        dino.jump = false;
+      }
+
+      spawn();
+      for (let i = obstacles.length - 1; i >= 0; i--) {
+        const o = obstacles[i];
+        o.x -= speed;
+        if (o.x + o.w < 0) obstacles.splice(i, 1);
+
+        const hit = dino.x < o.x + o.w && dino.x + dino.w > o.x && dino.y < o.y + o.h && dino.y + dino.h > o.y;
+        if (hit) over = true;
+      }
+
+      score += 1;
+      if (score % 450 === 0) speed += 0.2;
+    }
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = '#0b1830';
+    ctx.fillRect(0, 0, w, h);
+
+    ctx.strokeStyle = '#4a6da8';
+    ctx.beginPath();
+    ctx.moveTo(0, groundY);
+    ctx.lineTo(w, groundY);
+    ctx.stroke();
+
+    ctx.fillStyle = '#ffd8b4';
+    ctx.fillRect(dino.x, dino.y, dino.w, dino.h);
+
+    ctx.fillStyle = '#ff7a18';
+    obstacles.forEach((o) => ctx.fillRect(o.x, o.y, o.w, o.h));
+
+    ctx.fillStyle = '#dce7ff';
+    ctx.font = '14px sans-serif';
+    ctx.fillText('Score: ' + score, 12, 18);
+    if (over) {
+      ctx.fillText('Game Over - Space/Click to restart', 240, 18);
+    }
+  }
+
+  function loop() {
+    update();
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  window.addEventListener('keydown', (e) => {
+    if (e.code === 'Space' || e.code === 'ArrowUp') {
+      e.preventDefault();
+      jump();
+    }
+  });
+  canvas.addEventListener('click', jump);
+  canvas.addEventListener('touchstart', (e) => { e.preventDefault(); jump(); }, { passive: false });
+
+  loop();
+})();
+</script>
 {% endblock %}

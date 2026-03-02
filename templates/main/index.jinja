@@ -6,7 +6,7 @@
   <div class="card">
     <h1>{{ t('main.title') }}</h1>
     <form method="get" action="{{ url_for('main.index') }}" class="search-form">
-      <input type="text" name="q" placeholder="{{ t('main.search_placeholder') }}" value="{{ q }}">
+      <input type="text" name="q" placeholder="{{ t('main.search_placeholder') }}" value="{{ q }}" data-autocomplete-url="{{ url_for('songs.search_suggest') }}" autocomplete="off">
       <select name="sort">
         <option value="date" {% if sort == "date" %}selected{% endif %}>{{ t('main.sort.date') }}</option>
         <option value="title" {% if sort == "title" %}selected{% endif %}>{{ t('main.sort.title') }}</option>
@@ -22,7 +22,7 @@
           <li>
             <div>
               <a href="{{ song.detail_url }}"><strong>{{ song.title }}</strong></a>
-              <p>{{ song.artist }}</p>
+              <p>{{ song.artist }}{% if song.genre %} - {{ song.genre }}{% endif %}</p>
               <span class="badge">{{ t('main.visibility.' ~ song.visibility) }}</span>
               {% if song.visibility == "private" %}
                 <span class="muted small">{{ t('main.shared_count', count=song.shared_count) }}</span>
@@ -32,10 +32,11 @@
               <button
                 type="button"
                 class="play-one"
-                data-song='{{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url}|tojson|safe }}'
+                data-context="auto"
+                data-song='{{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url, "detail_url": song.detail_url}|tojson|safe }}'
               >{{ t('main.play') }}</button>
               <a class="btn secondary" href="{{ song.detail_url }}">{{ t('song.details') }}</a>
-              <button type="button" class="queue-all" data-source="all">{{ t('main.queue_all') }}</button>
+              <button type="button" class="queue-all" data-source="all" data-context="auto">{{ t('main.queue_all') }}</button>
               {% if song.can_delete %}
                 <form method="post" action="{{ url_for('songs.delete_song', song_id=song.id) }}" class="delete-song-form">
                   <button type="submit" class="btn-danger">{{ t('main.delete') }}</button>
@@ -59,21 +60,52 @@
     {% endif %}
   </div>
 
+  <div class="card">
+    <h2>{{ t('main.recommended') }}</h2>
+    {% if recommended_songs %}
+      <ul class="song-list">
+        {% for song in recommended_songs %}
+          <li>
+            <div>
+              <a href="{{ song.detail_url }}"><strong>{{ song.title }}</strong></a>
+              <p>{{ song.artist }}{% if song.genre %} - {{ song.genre }}{% endif %}</p>
+            </div>
+            <div class="row-actions">
+              <button
+                type="button"
+                class="play-one"
+                data-context="auto"
+                data-song='{{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url, "detail_url": song.detail_url}|tojson|safe }}'
+              >{{ t('main.play') }}</button>
+              <a class="btn secondary" href="{{ song.detail_url }}">{{ t('song.details') }}</a>
+            </div>
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p>{{ t('main.no_recommendations') }}</p>
+    {% endif %}
+  </div>
+
   {% if current_user %}
   <div class="card">
     <h2>{{ t('main.add_song') }}</h2>
-    <form method="post" action="{{ url_for('songs.add_song') }}" enctype="multipart/form-data" class="stack">
+    <form method="post" action="{{ url_for('songs.add_song') }}" enctype="multipart/form-data" class="stack" id="add-song-form">
       <label>{{ t('main.field.title') }}
-        <input type="text" name="title" required>
+        <input type="text" name="title" id="song-title-input" required>
       </label>
       <label>{{ t('main.field.artist') }}
-        <input type="text" name="artist">
+        <input type="text" name="artist" id="song-artist-input">
+      </label>
+      <label>{{ t('main.field.genre') }}
+        <input type="text" name="genre" id="song-genre-input">
       </label>
       <label>{{ t('main.field.url') }}
         <input type="url" name="song_url" placeholder="https://.../audio.mp3">
       </label>
       <label>{{ t('main.field.file') }}
-        <input type="file" name="song_file" accept=".mp3,.wav,.ogg,.m4a">
+        <input type="file" name="song_file" id="song-file-input" accept=".mp3,.wav,.ogg,.m4a">
+        <span id="id3-status" class="muted small"></span>
       </label>
       <label>{{ t('main.field.visibility') }}
         <select name="visibility" id="visibility-select">
@@ -82,15 +114,20 @@
           <option value="unlisted">{{ t('main.visibility.unlisted') }}</option>
         </select>
       </label>
-      <label id="shared-with-wrap" class="hidden">
-        {{ t('main.share_with') }}
-        <select name="shared_with" multiple size="5">
-          {% for user in shareable_users %}
-            <option value="{{ user.id }}">{{ user.username }} ({{ user.email }})</option>
-          {% endfor %}
-        </select>
-      </label>
-      <button type="submit">{{ t('main.add') }}</button>
+
+      <div id="shared-with-wrap" class="hidden stack">
+        <button
+          type="button"
+          class="btn secondary open-user-picker"
+          data-target-inputs="song-shared-inputs"
+          data-target-list="song-shared-list"
+          data-picker-title="{{ t('main.share_with') }}" data-input-name="shared_with"
+        >{{ t('main.share_with_add') }}</button>
+        <div id="song-shared-list" class="selected-users"></div>
+        <div id="song-shared-inputs"></div>
+      </div>
+
+      <button type="submit" id="add-song-submit">{{ t('main.add') }}</button>
     </form>
   </div>
   {% else %}
@@ -108,8 +145,14 @@
 <script>
   window.PAGE_SONG_OBJECTS = [
   {% for song in songs %}
-    {{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url}|tojson|safe }}{% if not loop.last %},{% endif %}
+    {{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url, "detail_url": song.detail_url}|tojson|safe }}{% if not loop.last %},{% endif %}
+  {% endfor %}
+  ];
+  window.PAGE_RECOMMENDED_SONGS = [
+  {% for song in recommended_songs %}
+    {{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url, "detail_url": song.detail_url}|tojson|safe }}{% if not loop.last %},{% endif %}
   {% endfor %}
   ];
 </script>
 {% endblock %}
+

@@ -10,11 +10,11 @@
         <li>
           <div>
             <a href="{{ song.detail_url }}"><strong>{{ song.title }}</strong></a>
-            <p>{{ song.artist }}</p>
+            <p>{{ song.artist }}{% if song.genre %} - {{ song.genre }}{% endif %}</p>
             <span class="badge">{{ t('main.visibility.' ~ song.visibility) }}</span>
           </div>
           <div class="row-actions">
-            <button type="button" class="play-one" data-song='{{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url}|tojson|safe }}'>{{ t('main.play') }}</button>
+            <button type="button" class="play-one" data-context="auto" data-song='{{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url, "detail_url": song.detail_url}|tojson|safe }}'>{{ t('main.play') }}</button>
             <a class="btn secondary" href="{{ song.detail_url }}">{{ t('song.details') }}</a>
             <form method="post" action="{{ url_for('songs.delete_song', song_id=song.id) }}" class="delete-song-form">
               <button type="submit" class="btn-danger">{{ t('main.delete') }}</button>
@@ -40,8 +40,9 @@
 <script>
   window.PAGE_SONG_OBJECTS = [
   {% for song in songs %}
-    {{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url}|tojson|safe }}{% if not loop.last %},{% endif %}
+    {{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url, "detail_url": song.detail_url}|tojson|safe }}{% if not loop.last %},{% endif %}
   {% endfor %}
   ];
 </script>
 {% endblock %}
+

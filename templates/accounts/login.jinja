@@ -5,16 +5,31 @@
 <section class="auth-wrap">
   <div class="card auth-card">
     <h1>{{ t('auth.login') }}</h1>
-    <form method="post" class="stack">
-      <label>{{ t('auth.email') }}
-        <input type="email" name="email" required>
-      </label>
-      <label>{{ t('auth.password') }}
-        <input type="password" name="password" required>
-      </label>
-      <button type="submit">{{ t('auth.submit_login') }}</button>
+    <div class="auth-actions">
+      <form method="post" class="stack auth-form-stack">
+        <label>{{ t('auth.email') }}
+          <input type="email" name="email" required>
+        </label>
+        <label>{{ t('auth.password') }}
+          <input type="password" name="password" required>
+        </label>
+        <button type="submit">{{ t('auth.submit_login') }}</button>
+      </form>
+
+      <a class="btn secondary auth-google-btn" href="{{ url_for('accounts.google_login') }}">{{ t('auth.google_login') }}</a>
+    </div>
+
+    <p><a href="{{ url_for('accounts.forgot_password') }}">{{ t('auth.forgot_password') }}</a></p>
+
+    {% if pending_verification_email %}
+    <form method="post" action="{{ url_for('accounts.resend_verification') }}" class="stack top-gap">
+      <input type="hidden" name="email" value="{{ pending_verification_email }}">
+      <button type="submit" class="btn secondary">{{ t('auth.resend_verification') }}</button>
     </form>
+    {% endif %}
+
     <p>{{ t('auth.no_account') }} <a href="{{ url_for('accounts.register') }}">{{ t('auth.register') }}</a></p>
   </div>
 </section>
 {% endblock %}
+

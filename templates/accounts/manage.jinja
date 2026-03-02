@@ -5,26 +5,40 @@
 <section class="grid two-cols">
   <div class="card">
     <h1>{{ t('account.manage_title') }}</h1>
-    <p><strong>{{ me.username }}</strong> ({{ me.email }})</p>
+    <p>
+      <strong>{{ me.username }}</strong> ({{ me.email }})
+      {% if me.is_root_admin %}<span class="badge root-badge">Root admin</span>{% endif %}
+      {% if me.require_password_change %}<span class="badge">{{ t('account.password_change_required') }}</span>{% endif %}
+      {% if me.email_verified %}<span class="badge">{{ t('auth.email_verified') }}</span>{% else %}<span class="badge">{{ t('auth.email_not_verified') }}</span>{% endif %}
+    </p>
     <p class="muted">{{ t('account.my_song_count', count=my_songs_count) }}</p>
+    {% if me.require_password_change %}
+    <p class="muted">{{ t('account.password_change_required') }}</p>
+    {% else %}
+    <a class="btn secondary" href="{{ url_for('accounts.listening_history') }}">{{ t('nav.history') }}</a>
+    {% endif %}
   </div>
 
   <div class="card">
     <h2>{{ t('account.change_password') }}</h2>
+    <p class="muted small">{{ t('auth.password_policy') }}</p>
     <form method="post" action="{{ url_for('accounts.change_password') }}" class="stack">
+      {% if not me.require_password_change %}
       <label>{{ t('account.current_password') }}
         <input type="password" name="current_password" required>
       </label>
+      {% endif %}
       <label>{{ t('account.new_password') }}
-        <input type="password" name="new_password" required>
+        <input type="password" name="new_password" minlength="6" required>
       </label>
       <label>{{ t('account.confirm_password') }}
-        <input type="password" name="confirm_password" required>
+        <input type="password" name="confirm_password" minlength="6" required>
       </label>
       <button type="submit">{{ t('account.change_password') }}</button>
     </form>
   </div>
 
+  {% if not me.require_password_change %}
   <div class="card">
     <h2>{{ t('account.delete_my_songs') }}</h2>
     <form method="post" action="{{ url_for('accounts.delete_my_songs') }}">
@@ -34,6 +48,9 @@
 
   <div class="card">
     <h2>{{ t('account.delete_account') }}</h2>
+    {% if me.is_root_admin %}
+      <p>{{ t('account.root_admin_not_deletable') }}</p>
+    {% else %}
     <form method="post" action="{{ url_for('accounts.delete_account') }}" class="stack">
       <label>{{ t('auth.password') }}
         <input type="password" name="password" required>
@@ -46,6 +63,10 @@
       </label>
       <button type="submit" class="btn-danger">{{ t('account.delete_account') }}</button>
     </form>
+    {% endif %}
   </div>
+  {% endif %}
 </section>
 {% endblock %}
+
+

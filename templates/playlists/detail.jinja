@@ -5,23 +5,71 @@
 <section class="grid two-cols">
   <div class="card">
     <h1>{{ playlist.name }}</h1>
+    <p class="muted small">{{ t('main.visibility.' ~ playlist.visibility) }}</p>
+
+    {% if playlist.is_owner %}
+    <form method="post" action="{{ url_for('playlists.update_playlist', playlist_id=playlist.id) }}" class="stack">
+      <label>{{ t('playlist.rename') }}
+        <input type="text" name="name" value="{{ playlist.name }}" required>
+      </label>
+      <label>{{ t('main.field.visibility') }}
+        <select name="visibility">
+          <option value="public" {% if playlist.visibility == 'public' %}selected{% endif %}>{{ t('main.visibility.public') }}</option>
+          <option value="private" {% if playlist.visibility == 'private' %}selected{% endif %}>{{ t('main.visibility.private') }}</option>
+          <option value="unlisted" {% if playlist.visibility == 'unlisted' %}selected{% endif %}>{{ t('main.visibility.unlisted') }}</option>
+        </select>
+      </label>
+      <button type="submit">{{ t('playlist.save') }}</button>
+    </form>
+
+    <form method="post" action="{{ url_for('playlists.update_playlist_collaborators', playlist_id=playlist.id) }}" class="stack top-gap" id="playlist-collab-form">
+      <button
+        type="button"
+        class="btn secondary open-user-picker"
+        data-target-inputs="detail-collab-inputs"
+        data-target-list="detail-collab-list"
+        data-picker-title="{{ t('playlist.add_collaborators') }}" data-input-name="collaborator_ids"
+      >{{ t('playlist.add_collaborators') }}</button>
+      <div id="detail-collab-list" class="selected-users">
+        {% for c in collaborators %}
+          <span class="selected-user-pill" data-user-id="{{ c.id }}">{{ c.username }} ({{ c.email }})</span>
+        {% endfor %}
+      </div>
+      <div id="detail-collab-inputs">
+        {% for c in collaborators %}
+          <input type="hidden" name="collaborator_ids" value="{{ c.id }}">
+        {% endfor %}
+      </div>
+      <button type="submit">{{ t('playlist.save_collaborators') }}</button>
+    </form>
+    {% endif %}
+
+    <form method="get" action="{{ url_for('playlists.playlist_detail', playlist_id=playlist.id) }}" class="search-form top-gap">
+      <input type="text" name="songs_q" value="{{ songs_q }}" placeholder="{{ t('main.search_placeholder') }}" autocomplete="off" data-autocomplete-url="{{ url_for('playlists.playlist_search_suggest', playlist_id=playlist.id) }}" data-submit-on-select="1">
+      <input type="hidden" name="songs_page" value="1">
+      <input type="hidden" name="add_page" value="{{ add_page }}">
+    </form>
+
     {% if songs %}
-      <ul class="song-list">
+      <ul class="song-list top-gap">
         {% for song in songs %}
           <li>
             <div>
               <a href="{{ url_for('songs.song_detail', song_id=song.id) }}"><strong>{{ song.title }}</strong></a>
-              <p>{{ song.artist }}</p>
+              <p>{{ song.artist }}{% if song.genre %} - {{ song.genre }}{% endif %}</p>
             </div>
             <div class="row-actions">
               <button
                 type="button"
                 class="play-one"
-                data-song='{{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url}|tojson|safe }}'
+                data-context="playlist"
+                data-song='{{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url, "detail_url": url_for('songs.song_detail', song_id=song.id)}|tojson|safe }}'
               >{{ t('main.play') }}</button>
+              {% if playlist.is_owner or playlist.is_collaborator %}
               <form method="post" action="{{ url_for('playlists.remove_song_from_playlist', playlist_id=playlist.id, song_id=song.id) }}">
                 <button type="submit" class="btn-danger">{{ t('playlist.remove') }}</button>
               </form>
+              {% endif %}
               {% if song.can_delete %}
                 <form method="post" action="{{ url_for('songs.delete_song', song_id=song.id) }}" class="delete-song-form">
                   <button type="submit" class="btn-danger">{{ t('main.delete') }}</button>
@@ -33,11 +81,11 @@
       </ul>
       <div class="pagination">
         {% if songs_page > 1 %}
-          <a class="btn secondary" href="{{ url_for('playlists.playlist_detail', playlist_id=playlist.id, songs_page=songs_page-1, add_page=add_page) }}">{{ t('main.prev') }}</a>
+          <a class="btn secondary" href="{{ url_for('playlists.playlist_detail', playlist_id=playlist.id, songs_page=songs_page-1, add_page=add_page, songs_q=songs_q) }}">{{ t('main.prev') }}</a>
         {% endif %}
         <span>{{ t('main.page', page=songs_page, pages=songs_pages) }}</span>
         {% if songs_page < songs_pages %}
-          <a class="btn secondary" href="{{ url_for('playlists.playlist_detail', playlist_id=playlist.id, songs_page=songs_page+1, add_page=add_page) }}">{{ t('main.next') }}</a>
+          <a class="btn secondary" href="{{ url_for('playlists.playlist_detail', playlist_id=playlist.id, songs_page=songs_page+1, add_page=add_page, songs_q=songs_q) }}">{{ t('main.next') }}</a>
         {% endif %}
       </div>
     {% else %}
@@ -47,28 +95,37 @@
 
   <div class="card">
     <h2>{{ t('playlist.add_song') }}</h2>
+    {% if playlist.is_owner or playlist.is_collaborator %}
     <form method="post" action="{{ url_for('playlists.add_song_to_playlist', playlist_id=playlist.id) }}" class="stack">
       <label>{{ t('playlist.add_song') }}
-        <select name="song_id" required>
-          <option value="">{{ t('playlist.choose_song') }}</option>
-          {% for s in all_songs %}
-            <option value="{{ s.id }}">{{ s.title }} - {{ s.artist }}</option>
-          {% endfor %}
-        </select>
+        <input
+          type="text"
+          name="song_search"
+          id="playlist-song-search"
+          autocomplete="off"
+          data-autocomplete-url="{{ url_for('songs.search_suggest') }}"
+          data-target-hidden="playlist-song-id"
+          placeholder="{{ t('playlist.search_song_placeholder') }}"
+          required
+        >
       </label>
+      <input type="hidden" name="song_id" id="playlist-song-id" required>
       <button type="submit">{{ t('main.add') }}</button>
     </form>
+    {% endif %}
+
     <div class="pagination">
       {% if add_page > 1 %}
-        <a class="btn secondary" href="{{ url_for('playlists.playlist_detail', playlist_id=playlist.id, songs_page=songs_page, add_page=add_page-1) }}">{{ t('main.prev') }}</a>
+        <a class="btn secondary" href="{{ url_for('playlists.playlist_detail', playlist_id=playlist.id, songs_page=songs_page, add_page=add_page-1, songs_q=songs_q) }}">{{ t('main.prev') }}</a>
       {% endif %}
       <span>{{ t('main.page', page=add_page, pages=add_pages) }}</span>
       {% if add_page < add_pages %}
-        <a class="btn secondary" href="{{ url_for('playlists.playlist_detail', playlist_id=playlist.id, songs_page=songs_page, add_page=add_page+1) }}">{{ t('main.next') }}</a>
+        <a class="btn secondary" href="{{ url_for('playlists.playlist_detail', playlist_id=playlist.id, songs_page=songs_page, add_page=add_page+1, songs_q=songs_q) }}">{{ t('main.next') }}</a>
       {% endif %}
     </div>
+
     {% if songs %}
-      <button type="button" class="queue-all" data-source="playlist">{{ t('playlist.queue') }}</button>
+      <button type="button" class="queue-all" data-source="playlist" data-context="playlist">{{ t('playlist.queue') }}</button>
     {% endif %}
   </div>
 </section>
@@ -76,8 +133,9 @@
 <script>
   window.PAGE_SONG_OBJECTS = [
     {% for song in songs %}
-      {{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url}|tojson|safe }}{% if not loop.last %},{% endif %}
+      {{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url, "detail_url": url_for('songs.song_detail', song_id=song.id)}|tojson|safe }}{% if not loop.last %},{% endif %}
     {% endfor %}
   ];
 </script>
 {% endblock %}
+

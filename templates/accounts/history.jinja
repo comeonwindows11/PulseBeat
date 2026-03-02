@@ -1,0 +1,49 @@
+{% extends "layout/base.jinja" %}
+{% block title %}{{ t('nav.history') }} - {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="card">
+  <h1>{{ t('history.title') }}</h1>
+  {% if items %}
+    <ul class="song-list">
+      {% for song in items %}
+        <li>
+          <div>
+            <a href="{{ song.detail_url }}"><strong>{{ song.title }}</strong></a>
+            <p>{{ song.artist }}</p>
+            <p class="muted small">{{ t('history.play_count', count=song.play_count) }}</p>
+          </div>
+          <div class="row-actions">
+            <button
+              type="button"
+              class="play-one"
+              data-context="auto"
+              data-song='{{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url, "detail_url": song.detail_url, "resume_at": song.last_position}|tojson|safe }}'
+            >{{ t('history.play_now') }}</button>
+            <a class="btn secondary" href="{{ song.detail_url }}">{{ t('song.details') }}</a>
+          </div>
+        </li>
+      {% endfor %}
+    </ul>
+    <div class="pagination">
+      {% if page > 1 %}
+        <a class="btn secondary" href="{{ url_for('accounts.listening_history', page=page-1) }}">{{ t('main.prev') }}</a>
+      {% endif %}
+      <span>{{ t('main.page', page=page, pages=pages) }}</span>
+      {% if page < pages %}
+        <a class="btn secondary" href="{{ url_for('accounts.listening_history', page=page+1) }}">{{ t('main.next') }}</a>
+      {% endif %}
+    </div>
+  {% else %}
+    <p>{{ t('history.empty') }}</p>
+  {% endif %}
+</section>
+
+<script>
+  window.PAGE_SONG_OBJECTS = [
+  {% for song in items %}
+    {{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url, "detail_url": song.detail_url, "resume_at": song.last_position}|tojson|safe }}{% if not loop.last %},{% endif %}
+  {% endfor %}
+  ];
+</script>
+{% endblock %}

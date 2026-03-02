@@ -20,6 +20,68 @@ SORT_MAP = {
 }
 
 
+def song_to_public(song, user_oid):
+    item = serialize_song(song, user_oid)
+    item["url"] = song_stream_url(item["id"])
+    item["detail_url"] = url_for("songs.song_detail", song_id=item["id"])
+    return item
+
+
+def build_recommendations(user_oid, exclude_song_ids=None, limit=20):
+    exclude_song_ids = exclude_song_ids or set()
+    if not user_oid:
+        return []
+
+    artist_scores = {}
+
+    votes = list(extensions.song_votes_col.find({"user_id": user_oid, "vote": 1}, {"song_id": 1}).limit(200))
+    vote_song_ids = [row.get("song_id") for row in votes if row.get("song_id")]
+    for song in extensions.songs_col.find({"_id": {"$in": vote_song_ids}}, {"artist": 1}):
+        artist = (song.get("artist") or "").strip()
+        if artist:
+            artist_scores[artist] = artist_scores.get(artist, 0) + 3
+
+    history = list(
+        extensions.listening_history_col.find({"user_id": user_oid}, {"song_id": 1, "play_count": 1})
+        .sort("updated_at", -1)
+        .limit(250)
+    )
+    history_song_ids = [row.get("song_id") for row in history if row.get("song_id")]
+    history_map = {row.get("song_id"): int(row.get("play_count", 0) or 0) for row in history if row.get("song_id")}
+    for song in extensions.songs_col.find({"_id": {"$in": history_song_ids}}, {"artist": 1}):
+        song_id = song.get("_id")
+        artist = (song.get("artist") or "").strip()
+        if artist:
+            artist_scores[artist] = artist_scores.get(artist, 0) + max(1, history_map.get(song_id, 0))
+
+    top_artists = [k for k, _ in sorted(artist_scores.items(), key=lambda x: x[1], reverse=True)[:6]]
+
+    recs = []
+    picked = set(exclude_song_ids)
+    if top_artists:
+        query = {"$and": [visible_song_filter(user_oid), {"artist": {"$in": top_artists}}]}
+        for song in extensions.songs_col.find(query).sort("created_at", -1).limit(200):
+            sid = str(song["_id"])
+            if sid in picked:
+                continue
+            recs.append(song_to_public(song, user_oid))
+            picked.add(sid)
+            if len(recs) >= limit:
+                return recs
+
+    query = visible_song_filter(user_oid)
+    for song in extensions.songs_col.find(query).sort("created_at", -1).limit(300):
+        sid = str(song["_id"])
+        if sid in picked:
+            continue
+        recs.append(song_to_public(song, user_oid))
+        picked.add(sid)
+        if len(recs) >= limit:
+            break
+
+    return recs
+
+
 @bp.route("/")
 def index():
     q = request.args.get("q", "").strip()
@@ -57,18 +119,17 @@ def index():
     cursor = extensions.songs_col.find(query).sort(SORT_MAP[sort])
     raw_songs = list(cursor.skip(skip).limit(per_page))
 
-    songs = []
-    for song in raw_songs:
-        item = serialize_song(song, user_oid)
-        item["url"] = song_stream_url(item["id"])
-        item["detail_url"] = url_for("songs.song_detail", song_id=item["id"])
-        songs.append(item)
+    songs = [song_to_public(song, user_oid) for song in raw_songs]
+
+    exclude_ids = {song["id"] for song in songs}
+    recommended_songs = build_recommendations(user_oid, exclude_ids, limit=20)
 
     shareable_users = user_choice_list(user_oid) if user_oid else []
 
     return render_template(
         "main/index.jinja",
         songs=songs,
+        recommended_songs=recommended_songs,
         shareable_users=shareable_users,
         q=q,
         sort=sort,

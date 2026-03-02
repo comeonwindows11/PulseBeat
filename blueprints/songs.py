@@ -1,7 +1,7 @@
 import os
 from datetime import datetime
 from math import ceil
-from flask import Blueprint, abort, current_app, flash, redirect, render_template, request, send_from_directory, url_for
+from flask import Blueprint, abort, current_app, flash, jsonify, redirect, render_template, request, send_from_directory, url_for
 
 from auth_helpers import (
     VISIBILITY_VALUES,
@@ -15,6 +15,7 @@ from auth_helpers import (
     save_uploaded_file,
     serialize_song,
     song_owner_matches,
+    visible_song_filter,
 )
 import extensions
 from i18n import tr
@@ -77,11 +78,110 @@ def build_comments(song_oid, user_oid, page=1, per_page=50):
     return comments, pages
 
 
+def build_basic_recommendations(user_oid, current_song_oid=None, limit=20):
+    artist_scores = {}
+
+    if user_oid:
+        votes = list(extensions.song_votes_col.find({"user_id": user_oid, "vote": 1}, {"song_id": 1}).limit(200))
+        liked_song_ids = [row.get("song_id") for row in votes if row.get("song_id")]
+        for song in extensions.songs_col.find({"_id": {"$in": liked_song_ids}}, {"artist": 1}):
+            artist = (song.get("artist") or "").strip()
+            if artist:
+                artist_scores[artist] = artist_scores.get(artist, 0) + 3
+
+        history = list(
+            extensions.listening_history_col.find({"user_id": user_oid}, {"song_id": 1, "play_count": 1})
+            .sort("updated_at", -1)
+            .limit(250)
+        )
+        history_song_ids = [row.get("song_id") for row in history if row.get("song_id")]
+        history_counts = {row.get("song_id"): int(row.get("play_count", 0) or 0) for row in history if row.get("song_id")}
+        for song in extensions.songs_col.find({"_id": {"$in": history_song_ids}}, {"artist": 1}):
+            artist = (song.get("artist") or "").strip()
+            if artist:
+                artist_scores[artist] = artist_scores.get(artist, 0) + max(1, history_counts.get(song.get("_id"), 0))
+
+    if current_song_oid:
+        current = extensions.songs_col.find_one({"_id": current_song_oid}, {"artist": 1})
+        if current and current.get("artist"):
+            artist = (current.get("artist") or "").strip()
+            if artist:
+                artist_scores[artist] = artist_scores.get(artist, 0) + 5
+
+    top_artists = [artist for artist, _score in sorted(artist_scores.items(), key=lambda x: x[1], reverse=True)[:6]]
+
+    recs = []
+    picked = set()
+    if current_song_oid:
+        picked.add(str(current_song_oid))
+
+    if top_artists:
+        query = {"$and": [visible_song_filter(user_oid), {"artist": {"$in": top_artists}}]}
+        for song in extensions.songs_col.find(query).sort("created_at", -1).limit(200):
+            sid = str(song["_id"])
+            if sid in picked:
+                continue
+            recs.append(song_public_data(song, user_oid))
+            picked.add(sid)
+            if len(recs) >= limit:
+                return recs
+
+    for song in extensions.songs_col.find(visible_song_filter(user_oid)).sort("created_at", -1).limit(300):
+        sid = str(song["_id"])
+        if sid in picked:
+            continue
+        recs.append(song_public_data(song, user_oid))
+        picked.add(sid)
+        if len(recs) >= limit:
+            break
+
+    return recs
+
+
+def create_audit_log(admin_user_id, action, target_type, target_id=None, details=None):
+    extensions.admin_audit_col.insert_one(
+        {
+            "admin_user_id": admin_user_id,
+            "action": action,
+            "target_type": target_type,
+            "target_id": target_id,
+            "details": details or {},
+            "created_at": datetime.utcnow(),
+        }
+    )
+
+
+@bp.route("/search-suggest")
+def search_suggest():
+    q = request.args.get("q", "").strip()
+    if not q:
+        return jsonify({"items": []})
+    user_oid = get_session_user_oid()
+    regex = {"$regex": q, "$options": "i"}
+    query = {"$and": [visible_song_filter(user_oid), {"$or": [{"title": regex}, {"artist": regex}, {"genre": regex}]}]}
+    rows = list(extensions.songs_col.find(query, {"title": 1, "artist": 1}).sort("created_at", -1).limit(15))
+    return jsonify(
+        {
+            "items": [
+                {
+                    "value": f"{r.get('title', '')} - {r.get('artist', '')}".strip(" -"),
+                    "title": r.get("title", ""),
+                    "artist": r.get("artist", ""),
+                    "song_id": str(r["_id"]),
+                    "detail_url": url_for("songs.song_detail", song_id=str(r["_id"])),
+                }
+                for r in rows
+            ]
+        }
+    )
+
+
 @bp.route("/add", methods=["POST"])
 @login_required
 def add_song():
     title = request.form.get("title", "").strip()
     artist = request.form.get("artist", "").strip() or tr("defaults.unknown_artist")
+    genre = request.form.get("genre", "").strip()
     song_url = request.form.get("song_url", "").strip()
     visibility = request.form.get("visibility", "public").strip().lower()
     file = request.files.get("song_file")
@@ -131,6 +231,7 @@ def add_song():
         {
             "title": title,
             "artist": artist,
+            "genre": genre,
             "source_type": source_type,
             "source_url": source_url,
             "file_name": file_name,
@@ -142,6 +243,38 @@ def add_song():
     )
     flash(tr("flash.songs.added"), "success")
     return redirect(url_for("main.index"))
+
+
+@bp.route("/<song_id>/edit", methods=["POST"])
+@login_required
+def edit_song(song_id):
+    song_oid = parse_object_id(song_id)
+    user_oid = get_session_user_oid()
+    if not song_oid:
+        flash(tr("flash.songs.invalid_request"), "danger")
+        return redirect(url_for("main.index"))
+
+    song = extensions.songs_col.find_one({"_id": song_oid})
+    if not song:
+        flash(tr("flash.songs.not_found"), "danger")
+        return redirect(url_for("main.index"))
+    if not song_owner_matches(song, user_oid):
+        flash(tr("flash.songs.delete_forbidden"), "danger")
+        return redirect(url_for("songs.song_detail", song_id=song_id))
+
+    title = request.form.get("title", "").strip()
+    artist = request.form.get("artist", "").strip() or tr("defaults.unknown_artist")
+    genre = request.form.get("genre", "").strip()
+    if not title:
+        flash(tr("flash.songs.title_required"), "danger")
+        return redirect(url_for("songs.song_detail", song_id=song_id))
+
+    extensions.songs_col.update_one(
+        {"_id": song_oid},
+        {"$set": {"title": title, "artist": artist, "genre": genre, "updated_at": datetime.utcnow()}},
+    )
+    flash(tr("flash.songs.updated"), "success")
+    return redirect(url_for("songs.song_detail", song_id=song_id))
 
 
 @bp.route("/my")
@@ -180,6 +313,7 @@ def song_detail(song_id):
 
     likes, dislikes, user_vote = get_vote_stats(song_oid, user_oid)
     comments, comments_pages = build_comments(song_oid, user_oid, comments_page, per_page)
+    recommended_songs = build_basic_recommendations(user_oid, current_song_oid=song_oid, limit=20)
     return render_template(
         "songs/detail.jinja",
         song=song_public_data(song, user_oid),
@@ -190,7 +324,69 @@ def song_detail(song_id):
         comments_page=comments_page,
         comments_pages=comments_pages,
         can_comment=bool(user_oid),
+        recommended_songs=recommended_songs,
     )
+
+
+@bp.route("/recommendations")
+def recommendations_api():
+    user_oid = get_session_user_oid()
+    current_song_oid = parse_object_id(request.args.get("song_id", ""))
+    limit_raw = request.args.get("limit", "20").strip()
+    limit = 20
+    if limit_raw.isdigit():
+        limit = max(1, min(int(limit_raw), 50))
+    items = build_basic_recommendations(user_oid, current_song_oid=current_song_oid, limit=limit)
+    return jsonify({"items": items})
+
+
+@bp.route("/<song_id>/progress", methods=["POST"])
+def update_progress(song_id):
+    user_oid = get_session_user_oid()
+    if not user_oid:
+        return jsonify({"ok": False}), 200
+
+    song_oid = parse_object_id(song_id)
+    if not song_oid:
+        return jsonify({"ok": False}), 400
+    song = extensions.songs_col.find_one({"_id": song_oid})
+    if not song or not can_access_song(song, user_oid):
+        return jsonify({"ok": False}), 404
+
+    payload = request.get_json(silent=True) or {}
+    position = float(payload.get("position", 0) or 0)
+    duration = float(payload.get("duration", 0) or 0)
+    completed = bool(payload.get("completed", False))
+    started = bool(payload.get("started", False))
+
+    now = datetime.utcnow()
+    existing = extensions.listening_history_col.find_one({"user_id": user_oid, "song_id": song_oid}, {"_id": 1})
+    update_doc = {
+        "$set": {
+            "last_position": max(0.0, position),
+            "last_duration": max(0.0, duration),
+            "updated_at": now,
+        },
+        "$setOnInsert": {
+            "created_at": now,
+            "play_count": 0,
+            "last_completed_at": None,
+        },
+    }
+
+    should_inc = started or existing is None
+    if should_inc:
+        update_doc.setdefault("$inc", {})["play_count"] = 1
+    if completed:
+        update_doc["$set"]["last_completed_at"] = now
+        update_doc["$set"]["last_position"] = 0
+
+    extensions.listening_history_col.update_one(
+        {"user_id": user_oid, "song_id": song_oid},
+        update_doc,
+        upsert=True,
+    )
+    return jsonify({"ok": True})
 
 
 @bp.route("/<song_id>/vote", methods=["POST"])
@@ -219,6 +415,67 @@ def vote_song(song_id):
             {"$set": {"vote": vote_val, "updated_at": datetime.utcnow()}},
             upsert=True,
         )
+    return redirect(url_for("songs.song_detail", song_id=song_id))
+
+
+@bp.route("/<song_id>/report", methods=["POST"])
+@login_required
+def report_song(song_id):
+    song_oid = parse_object_id(song_id)
+    user_oid = get_session_user_oid()
+    reason = request.form.get("reason", "").strip()
+    if not song_oid or not reason:
+        flash(tr("flash.songs.invalid_request"), "danger")
+        return redirect(url_for("songs.song_detail", song_id=song_id))
+
+    song = extensions.songs_col.find_one({"_id": song_oid})
+    if not song or not can_access_song(song, user_oid):
+        abort(404)
+
+    extensions.song_reports_col.insert_one(
+        {
+            "reporter_id": user_oid,
+            "song_id": song_oid,
+            "target_type": "song",
+            "target_song_id": song_oid,
+            "reason": reason,
+            "status": "open",
+            "created_at": datetime.utcnow(),
+        }
+    )
+    flash(tr("flash.songs.reported"), "success")
+    return redirect(url_for("songs.song_detail", song_id=song_id))
+
+
+@bp.route("/<song_id>/comment/<comment_id>/report", methods=["POST"])
+@login_required
+def report_comment(song_id, comment_id):
+    song_oid = parse_object_id(song_id)
+    comment_oid = parse_object_id(comment_id)
+    user_oid = get_session_user_oid()
+    reason = request.form.get("reason", "").strip()
+    if not song_oid or not comment_oid or not reason:
+        flash(tr("flash.songs.invalid_request"), "danger")
+        return redirect(url_for("songs.song_detail", song_id=song_id))
+
+    comment = extensions.song_comments_col.find_one({"_id": comment_oid, "song_id": song_oid})
+    song = extensions.songs_col.find_one({"_id": song_oid})
+    if not song or not comment or not can_access_song(song, user_oid):
+        abort(404)
+
+    extensions.song_reports_col.insert_one(
+        {
+            "reporter_id": user_oid,
+            "song_id": song_oid,
+            "target_type": "comment",
+            "target_comment_id": comment_oid,
+            "target_song_id": song_oid,
+            "reason": reason,
+            "status": "open",
+            "created_at": datetime.utcnow(),
+        }
+    )
+    flash(tr("flash.songs.reported"), "success")
     return redirect(url_for("songs.song_detail", song_id=song_id))
 
 
@@ -340,11 +597,16 @@ def delete_song(song_id):
 @admin_required
 def admin_delete_song(song_id):
     song_oid = parse_object_id(song_id)
+    admin_user_oid = get_session_user_oid()
     if not song_oid:
         flash(tr("flash.songs.invalid_request"), "danger")
         return redirect(url_for("admin.dashboard"))
     song = extensions.songs_col.find_one({"_id": song_oid})
     if song:
         cleanup_song(song)
+        create_audit_log(admin_user_oid, "delete_song", "song", song_oid, {"title": song.get("title", "")})
     flash(tr("flash.songs.deleted"), "success")
     return redirect(url_for("admin.dashboard"))
+
+
+

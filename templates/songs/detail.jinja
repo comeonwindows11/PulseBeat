@@ -5,10 +5,10 @@
 <section class="grid two-cols">
   <div class="card">
     <h1>{{ song.title }}</h1>
-    <p>{{ song.artist }}</p>
+    <p>{{ song.artist }}{% if song.genre %} - {{ song.genre }}{% endif %}</p>
     <span class="badge">{{ t('main.visibility.' ~ song.visibility) }}</span>
     <div class="row-actions top-gap">
-      <button type="button" class="play-one" data-song='{{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url}|tojson|safe }}'>{{ t('main.play') }}</button>
+      <button type="button" class="play-one" data-context="auto" data-song='{{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url, "detail_url": song.detail_url}|tojson|safe }}'>{{ t('main.play') }}</button>
       <form method="post" action="{{ url_for('songs.vote_song', song_id=song.id) }}">
         <input type="hidden" name="vote" value="1">
         <button type="submit" class="vote-btn {% if user_vote == 1 %}btn{% else %}btn secondary{% endif %}" aria-label="{{ t('song.like') }}">
@@ -29,7 +29,30 @@
         <button type="submit" class="btn secondary">{{ t('song.remove_reaction') }}</button>
       </form>
       {% endif %}
+      {% if current_user %}
+      <button
+        type="button"
+        class="btn secondary open-report-modal"
+        data-report-action="{{ url_for('songs.report_song', song_id=song.id) }}"
+        data-report-title="{{ t('song.report_song_title') }}"
+      >{{ t('song.report') }}</button>
+      {% endif %}
     </div>
+
+    {% if song.can_delete %}
+      <form method="post" action="{{ url_for('songs.edit_song', song_id=song.id) }}" class="stack top-gap">
+        <label>{{ t('main.field.title') }}
+          <input type="text" name="title" value="{{ song.title }}" required>
+        </label>
+        <label>{{ t('main.field.artist') }}
+          <input type="text" name="artist" value="{{ song.artist }}">
+        </label>
+        <label>{{ t('main.field.genre') }}
+          <input type="text" name="genre" value="{{ song.genre }}">
+        </label>
+        <button type="submit">{{ t('song.update') }}</button>
+      </form>
+    {% endif %}
   </div>
 
   <div class="card">
@@ -64,6 +87,14 @@
                   <button type="submit" class="btn-danger">{{ t('main.delete') }}</button>
                 </form>
               {% endif %}
+              {% if current_user %}
+                <button
+                  type="button"
+                  class="btn secondary open-report-modal"
+                  data-report-action="{{ url_for('songs.report_comment', song_id=song.id, comment_id=c.id) }}"
+                  data-report-title="{{ t('song.report_comment_title') }}"
+                >{{ t('song.report') }}</button>
+              {% endif %}
             </div>
             {% if c.replies %}
               <ul class="reply-list">
@@ -71,11 +102,21 @@
                   <li>
                     <p><strong>{{ r.username }}</strong></p>
                     <p>{{ r.content }}</p>
-                    {% if r.is_owner %}
-                      <form method="post" action="{{ url_for('songs.delete_comment', song_id=song.id, comment_id=r.id) }}">
-                        <button type="submit" class="btn-danger">{{ t('main.delete') }}</button>
-                      </form>
-                    {% endif %}
+                    <div class="row-actions">
+                      {% if r.is_owner %}
+                        <form method="post" action="{{ url_for('songs.delete_comment', song_id=song.id, comment_id=r.id) }}">
+                          <button type="submit" class="btn-danger">{{ t('main.delete') }}</button>
+                        </form>
+                      {% endif %}
+                      {% if current_user %}
+                        <button
+                          type="button"
+                          class="btn secondary open-report-modal"
+                          data-report-action="{{ url_for('songs.report_comment', song_id=song.id, comment_id=r.id) }}"
+                          data-report-title="{{ t('song.report_comment_title') }}"
+                        >{{ t('song.report') }}</button>
+                      {% endif %}
+                    </div>
                   </li>
                 {% endfor %}
               </ul>
@@ -96,9 +137,34 @@
       <p>{{ t('song.no_comments') }}</p>
     {% endif %}
   </div>
+
+  <div class="card">
+    <h2>{{ t('main.recommended') }}</h2>
+    {% if recommended_songs %}
+      <ul class="song-list">
+        {% for rs in recommended_songs %}
+          <li>
+            <div>
+              <a href="{{ rs.detail_url }}"><strong>{{ rs.title }}</strong></a>
+              <p>{{ rs.artist }}{% if rs.genre %} - {{ rs.genre }}{% endif %}</p>
+            </div>
+            <button type="button" class="play-one" data-context="auto" data-song='{{ {"id": rs.id, "title": rs.title, "artist": rs.artist, "url": rs.url, "detail_url": rs.detail_url}|tojson|safe }}'>{{ t('main.play') }}</button>
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p>{{ t('main.no_recommendations') }}</p>
+    {% endif %}
+  </div>
 </section>
 
 <script>
-  window.PAGE_SONG_OBJECTS = [{{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url}|tojson|safe }}];
+  window.PAGE_SONG_OBJECTS = [{{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url, "detail_url": song.detail_url}|tojson|safe }}];
+  window.PAGE_RECOMMENDED_SONGS = [
+    {% for rs in recommended_songs %}
+      {{ {"id": rs.id, "title": rs.title, "artist": rs.artist, "url": rs.url, "detail_url": rs.detail_url}|tojson|safe }}{% if not loop.last %},{% endif %}
+    {% endfor %}
+  ];
 </script>
 {% endblock %}
+

@@ -495,6 +495,16 @@
     if (state.playlistModalOpen) return;
     if (!state.queue.length) return;
 
+    if ((audio.currentTime || 0) >= 5) {
+      audio.currentTime = 0;
+      state.time = 0;
+      saveState();
+      if (audio.paused) {
+        updateMeta(currentSong());
+      }
+      return;
+    }
+
     if (state.queueContext === "playlist") {
       if (state.playMode === "shuffle" && state.shuffleHistory.length) {
         state.index = state.shuffleHistory.pop();
@@ -508,6 +518,12 @@
         state.index -= 1;
       } else {
         audio.currentTime = 0;
+        state.time = 0;
+        saveState();
+        if (audio.paused) {
+          updateMeta(currentSong());
+        }
+        return;
       }
     }
 

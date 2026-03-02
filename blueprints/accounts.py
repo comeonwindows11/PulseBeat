@@ -395,7 +395,10 @@ def login():
             flash(tr("flash.accounts.email_not_verified"), "warning")
             return redirect(url_for("accounts.login"))
 
-        status, _count = password_pwned_status(password, timeout_seconds=10)
+        if user.get("auth_provider") != "google":
+            status, _count = password_pwned_status(password, timeout_seconds=10)
+        else:
+            status, _count = ("safe", 0)
         if status == "pwned":
             extensions.users_col.update_one(
                 {"_id": user["_id"]},
@@ -515,7 +518,7 @@ def google_callback():
     else:
         extensions.users_col.update_one(
             {"_id": existing["_id"]},
-            {"$set": {"email_verified": True, "email_verified_at": existing.get("email_verified_at") or datetime.utcnow(), "auth_provider": "google"}},
+            {"$set": {"email_verified": True, "email_verified_at": existing.get("email_verified_at") or datetime.utcnow(), "auth_provider": "google", "require_password_change": False}, "$unset": {"password_compromised_at": ""}},
         )
         session["user_id"] = str(existing["_id"])
 
@@ -653,6 +656,8 @@ def manage_account():
             "is_root_admin": bool(user.get("is_root_admin", False)),
             "require_password_change": bool(user.get("require_password_change", False)),
             "email_verified": bool(is_email_verified(user)),
+            "auth_provider": user.get("auth_provider", "local"),
+            "is_google_account": user.get("auth_provider") == "google",
         },
         my_songs_count=my_songs_count,
     )
@@ -706,6 +711,10 @@ def change_password():
     new_password = request.form.get("new_password", "")
     confirm_password = request.form.get("confirm_password", "")
     user = extensions.users_col.find_one({"_id": user_oid})
+
+    if user.get("auth_provider") == "google":
+        flash(tr("flash.accounts.google_password_managed"), "warning")
+        return redirect(url_for("accounts.manage_account"))
 
     force_change = bool(user.get("require_password_change", False))
 

@@ -7,12 +7,14 @@ Application de streaming musical en `Flask` + `Jinja`, inspirée de YouTube Musi
 - Comptes utilisateurs locaux avec confirmation du mot de passe
 - Vérification d'adresse e-mail obligatoire avant connexion
 - Connexion Google OAuth
+- Les comptes Google ne gèrent pas leur mot de passe dans PulseBeat : pas de changement de mot de passe local, pas de lockout lié aux mots de passe compromis
 - Réinitialisation de mot de passe par e-mail
 - Vérification des mots de passe compromis
 - Changement de mot de passe et lock de sécurité si mot de passe compromis
 - Ajout de chansons par URL ou upload (avec détection automatique des balises ID3)
 - Lecture audio réelle avec lecteur flottant persistant entre les pages
 - Contrôles lecture/pause/suivant/précédent
+- Bouton `previous` type lecteur moderne : avant 5 secondes il revient à la chanson précédente, à partir de 5 secondes il redémarre la chanson courante
 - Historique d'écoute
 - Page de détail par chanson
 - Like / dislike / commentaires / réponses
@@ -35,6 +37,19 @@ Comportement actuel :
 - un bouton permet de renvoyer l'e-mail depuis la page de connexion
 - les comptes existants avant cette mise à jour sont automatiquement marqués comme déjà vérifiés au démarrage de l'application
 - les comptes Google sont considérés comme vérifiés automatiquement
+- les comptes Google ne passent pas par la logique locale de fuite de mot de passe ni par le changement de mot de passe PulseBeat
+
+## Lecteur audio
+
+Le lecteur flottant persiste entre les pages et conserve son état en local.
+
+Comportement notable :
+- en lecture de playlist : modes `normal`, `shuffle` et `repeat one` disponibles
+- hors playlist : lecture automatique avec recherche de recommandations
+- bouton `previous` :
+  - moins de 5 secondes de lecture : chanson précédente
+  - 5 secondes ou plus : redémarrage de la chanson courante
+- ce comportement s'applique aussi aux boutons média système compatibles (clavier, écouteurs, contrôles OS)
 
 ## Notifications e-mail
 
@@ -162,6 +177,14 @@ Vérifier la syntaxe Python :
 ```bash
 python -m py_compile app.py auth_helpers.py blueprints\accounts.py blueprints\admin.py blueprints\songs.py blueprints\playlists.py i18n.py
 ```
+
+## Comptes Google
+
+Les comptes connectés via Google OAuth ont un comportement spécifique :
+- l'adresse e-mail est considérée comme vérifiée par Google
+- PulseBeat ne gère pas leur mot de passe
+- le bloc de changement de mot de passe n'est pas affiché dans `Gérer mon compte`
+- la vérification de mot de passe compromis et le lockout associé ne s'appliquent pas à ces comptes
 
 ## Sécurité
 

@@ -19,6 +19,7 @@
     {% endif %}
   </div>
 
+  {% if not me.is_google_account %}
   <div class="card">
     <h2>{{ t('account.change_password') }}</h2>
     <p class="muted small">{{ t('auth.password_policy') }}</p>
@@ -37,6 +38,7 @@
       <button type="submit">{{ t('account.change_password') }}</button>
     </form>
   </div>
+  {% endif %}
 
   {% if not me.require_password_change %}
   <div class="card">

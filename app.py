@@ -63,6 +63,7 @@ def create_app():
     extensions.users_col.update_many({"email_verified": {"$exists": False}}, {"$set": {"email_verified": True, "email_verified_at": now}})
     extensions.users_col.update_many({"email_verification_sent_at": {"$exists": False}}, {"$set": {"email_verification_sent_at": None}})
     extensions.users_col.update_many({"auth_provider": {"$exists": False}}, {"$set": {"auth_provider": "local"}})
+    extensions.users_col.update_many({"auth_provider": "google"}, {"$set": {"require_password_change": False}, "$unset": {"password_compromised_at": ""}})
     os.makedirs(app.config["UPLOAD_DIR"], exist_ok=True)
 
     app.register_blueprint(accounts_bp)
@@ -85,8 +86,8 @@ def create_app():
         user_oid = get_session_user_oid()
         if not user_oid:
             return None
-        user = extensions.users_col.find_one({"_id": user_oid}, {"require_password_change": 1})
-        if not user or not user.get("require_password_change", False):
+        user = extensions.users_col.find_one({"_id": user_oid}, {"require_password_change": 1, "auth_provider": 1})
+        if not user or user.get("auth_provider") == "google" or not user.get("require_password_change", False):
             return None
 
         allowed_when_forced = {

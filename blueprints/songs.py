@@ -42,7 +42,10 @@ def get_vote_stats(song_oid, user_oid):
 
 
 def build_comments(song_oid, user_oid, page=1, per_page=50):
-    users = {str(u["_id"]): u.get("username", "user") for u in extensions.users_col.find({}, {"username": 1})}
+    users = {
+        str(u["_id"]): {"username": u.get("username", "user"), "profile_url": url_for("accounts.public_profile", username=u.get("username", "user"))}
+        for u in extensions.users_col.find({}, {"username": 1})
+    }
     raw = list(extensions.song_comments_col.find({"song_id": song_oid}).sort("created_at", 1))
     by_parent = {}
     for row in raw:
@@ -54,11 +57,13 @@ def build_comments(song_oid, user_oid, page=1, per_page=50):
         owner_id = row.get("user_id")
         owner_str = str(owner_id) if owner_id else ""
         is_owner = bool(user_oid and owner_str == str(user_oid))
+        user_meta = users.get(owner_str, {"username": tr("defaults.unnamed"), "profile_url": ""})
         item = {
             "id": comment_id,
             "content": row.get("content", ""),
             "created_at": row.get("created_at"),
-            "username": users.get(owner_str, tr("defaults.unnamed")),
+            "username": user_meta.get("username", tr("defaults.unnamed")),
+            "profile_url": user_meta.get("profile_url", ""),
             "is_owner": is_owner,
             "replies": [],
         }
@@ -190,11 +195,11 @@ def add_song():
 
     if not title:
         flash(tr("flash.songs.title_required"), "danger")
-        return redirect(url_for("main.index"))
+        return redirect(url_for("songs.new_song"))
 
     if not song_url and (not file or not file.filename):
         flash(tr("flash.songs.source_required"), "danger")
-        return redirect(url_for("main.index"))
+        return redirect(url_for("songs.new_song"))
 
     if visibility not in VISIBILITY_VALUES:
         visibility = "public"
@@ -213,7 +218,7 @@ def add_song():
             shared_with = existing_ids
         if not shared_with:
             flash(tr("flash.songs.private_need_users"), "danger")
-            return redirect(url_for("main.index"))
+            return redirect(url_for("songs.new_song"))
 
     source_type = "external"
     source_url = song_url
@@ -222,7 +227,7 @@ def add_song():
     if file and file.filename:
         if not allowed_file(file.filename):
             flash(tr("flash.songs.invalid_format"), "danger")
-            return redirect(url_for("main.index"))
+            return redirect(url_for("songs.new_song"))
         source_type = "upload"
         source_url = None
         file_name = save_uploaded_file(file)
@@ -242,7 +247,13 @@ def add_song():
         }
     )
     flash(tr("flash.songs.added"), "success")
-    return redirect(url_for("main.index"))
+    return redirect(url_for("songs.my_songs"))
+
+
+@bp.route("/new")
+@login_required
+def new_song():
+    return render_template("songs/new.jinja")
 
 
 @bp.route("/<song_id>/edit", methods=["POST"])
@@ -311,12 +322,23 @@ def song_detail(song_id):
     if not can_access_song(song, user_oid):
         abort(403)
 
+    uploader = None
+    created_by = song.get("created_by")
+    if created_by:
+        owner = extensions.users_col.find_one({"_id": created_by}, {"username": 1})
+        if owner and owner.get("username"):
+            uploader = {
+                "username": owner.get("username", "user"),
+                "profile_url": url_for("accounts.public_profile", username=owner.get("username", "user")),
+            }
+
     likes, dislikes, user_vote = get_vote_stats(song_oid, user_oid)
     comments, comments_pages = build_comments(song_oid, user_oid, comments_page, per_page)
     recommended_songs = build_basic_recommendations(user_oid, current_song_oid=song_oid, limit=20)
     return render_template(
         "songs/detail.jinja",
         song=song_public_data(song, user_oid),
+        uploader=uploader,
         likes=likes,
         dislikes=dislikes,
         user_vote=user_vote,

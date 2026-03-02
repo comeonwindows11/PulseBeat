@@ -1,0 +1,50 @@
+{% extends "layout/base.jinja" %}
+{% block title %}{{ profile.username }} - {{ app_name }}{% endblock %}
+{% block content %}
+<section class="page-stack">
+  <section class="card feature-hero compact-hero">
+    <div>
+      <p class="hero-kicker">{{ app_name }}</p>
+      <h1>{{ profile.username }}</h1>
+      <p class="hero-copy">{{ t('profile.subtitle', username=profile.username) }}</p>
+      {% if profile.is_self and profile.manage_url %}
+      <p class="muted">{{ t('profile.this_is_you') }} <a href="{{ profile.manage_url }}">{{ t('profile.manage_account_link') }}</a></p>
+      <div class="hero-actions">
+        <a class="btn secondary" href="{{ profile.manage_url }}">{{ t('nav.manage_account') }}</a>
+      </div>
+      {% endif %}
+    </div>
+    <div class="hero-panel">
+      <div class="hero-stat-card"><span class="hero-stat-label">{{ t('profile.visible_song_count_label') }}</span><strong>{{ visible_song_count }}</strong></div>
+      <div class="hero-stat-card"><span class="hero-stat-label">{{ t('profile.visible_playlist_count_label') }}</span><strong>{{ visible_playlist_count }}</strong></div>
+      <div class="hero-stat-card"><span class="hero-stat-label">{{ t('profile.comment_count_label') }}</span><strong>{{ comment_count }}</strong></div>
+    </div>
+  </section>
+  <section class="grid two-cols">
+    <div class="card">
+      <div class="shelf-head"><h2>{{ t('profile.songs') }}</h2></div>
+      {% if songs %}
+      <ul class="song-list media-list">
+        {% for song in songs %}
+        <li>
+          <div><a href="{{ song.detail_url }}"><strong>{{ song.title }}</strong></a><p>{{ song.artist }}{% if song.genre %} - {{ song.genre }}{% endif %}</p><span class="badge">{{ t('main.visibility.' ~ song.visibility) }}</span></div>
+          <div class="row-actions"><button type="button" class="play-one" data-context="auto" data-song='{{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url, "detail_url": song.detail_url}|tojson|safe }}'>{{ t('main.play') }}</button><a class="btn secondary" href="{{ song.detail_url }}">{{ t('song.details') }}</a></div>
+        </li>
+        {% endfor %}
+      </ul>
+      {% else %}<p>{{ t('profile.no_songs') }}</p>{% endif %}
+    </div>
+    <div class="card">
+      <div class="shelf-head"><h2>{{ t('profile.playlists') }}</h2></div>
+      {% if playlists %}
+      <ul class="playlist-list">
+        {% for playlist in playlists %}
+        <li><div><a href="{{ playlist.detail_url }}"><strong>{{ playlist.name }}</strong></a><p class="muted small">{{ t('main.visibility.' ~ playlist.visibility) }} - {{ t('playlist.count', count=playlist.song_count) }}</p></div><a class="btn secondary" href="{{ playlist.detail_url }}">{{ t('song.details') }}</a></li>
+        {% endfor %}
+      </ul>
+      {% else %}<p>{{ t('profile.no_playlists') }}</p>{% endif %}
+    </div>
+  </section>
+</section>
+<script>window.PAGE_SONG_OBJECTS=[{% for song in songs %}{{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url, "detail_url": song.detail_url}|tojson|safe }}{% if not loop.last %},{% endif %}{% endfor %}];</script>
+{% endblock %}

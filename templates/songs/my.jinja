@@ -3,7 +3,10 @@
 
 {% block content %}
 <section class="card">
-  <h1>{{ t('nav.my_songs') }}</h1>
+  <div class="shelf-head">
+    <h1>{{ t('nav.my_songs') }}</h1>
+    <a class="btn" href="{{ url_for('songs.new_song') }}">{{ t('main.add_song') }}</a>
+  </div>
   {% if songs %}
     <ul class="song-list">
       {% for song in songs %}

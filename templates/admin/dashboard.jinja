@@ -13,19 +13,19 @@
 <section class="grid two-cols">
   <div class="card">
     <h2>{{ t('admin.create_admin') }}</h2>
-    <form method="post" action="{{ url_for('admin.create_admin') }}" class="stack">
+    <form method="post" action="{{ url_for('admin.create_admin') }}" class="stack" data-validate-form="1">
       <label>{{ t('auth.username') }}
-        <input type="text" name="username" required>
+        <input type="text" id="admin-create-username" name="username" minlength="3" maxlength="32" pattern="[A-Za-z0-9_.-]{3,32}" data-remote-check="username" data-remote-url="{{ url_for('accounts.check_availability') }}" required>
       </label>
       <label>{{ t('auth.email') }}
-        <input type="email" name="email" required>
+        <input type="email" id="admin-create-email" name="email" data-remote-check="email" data-remote-url="{{ url_for('accounts.check_availability') }}" required>
       </label>
       <label>{{ t('auth.password') }}
-        <input type="password" name="password" minlength="6" required>
+        <input type="password" id="admin-create-password" name="password" minlength="6" data-password-policy="1" required>
       </label>
       <p class="muted small">{{ t('auth.password_policy') }}</p>
       <label>{{ t('account.confirm_password') }}
-        <input type="password" name="confirm_password" minlength="6" required>
+        <input type="password" name="confirm_password" minlength="6" data-match-target="admin-create-password" required>
       </label>
       <button type="submit">{{ t('admin.create_admin') }}</button>
     </form>

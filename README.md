@@ -14,6 +14,7 @@ Application de streaming musical en `Flask` + `Jinja`, inspirée de YouTube Musi
 - Ajout de chansons par URL ou upload (avec détection automatique des balises ID3)
 - Lecture audio réelle avec lecteur flottant persistant entre les pages
 - Contrôles lecture/pause/suivant/précédent
+- Lecteur avec vues `mini`, `normale` et `plein écran`
 - Bouton `previous` type lecteur moderne : avant 5 secondes il revient à la chanson précédente, à partir de 5 secondes il redémarre la chanson courante
 - Historique d'écoute
 - Page de détail par chanson
@@ -23,6 +24,10 @@ Application de streaming musical en `Flask` + `Jinja`, inspirée de YouTube Musi
 - Collaborateurs de playlist
 - Notifications e-mail lors des partages de playlist
 - Recherche, suggestions, tri et pagination
+- Profils publics utilisateurs avec chansons et playlists accessibles selon les permissions
+- Validations JavaScript en direct sur les formulaires, avec validation serveur conservée
+- Blocage complet du site si JavaScript est désactivé
+- Unicité des `username` et `email` garantie côté serveur et par index MongoDB
 - Zone admin séparée
 - Interface bilingue français / anglais
 - Pages d'erreur personnalisées
@@ -46,10 +51,46 @@ Le lecteur flottant persiste entre les pages et conserve son état en local.
 Comportement notable :
 - en lecture de playlist : modes `normal`, `shuffle` et `repeat one` disponibles
 - hors playlist : lecture automatique avec recherche de recommandations
+- vues disponibles : `mini`, `normale`, `plein écran`
+- le bouton de vue affiche le mode suivant, pas le mode actuel
+- un libellé d'état indique la vue actuellement active
 - bouton `previous` :
   - moins de 5 secondes de lecture : chanson précédente
   - 5 secondes ou plus : redémarrage de la chanson courante
 - ce comportement s'applique aussi aux boutons média système compatibles (clavier, écouteurs, contrôles OS)
+
+## Profils publics
+
+Chaque utilisateur possède une page publique accessible via `/users/<username>`.
+
+Contenu visible :
+- informations publiques du compte
+- chansons visibles selon les permissions réelles
+- playlists visibles selon les permissions réelles
+- activité publique pertinente
+
+Des liens vers ces profils sont disponibles :
+- depuis la page de détail d'une chanson pour voir le profil de l'uploadeur
+- depuis les commentaires et réponses
+- depuis `Gérer mon compte` pour ouvrir sa propre page publique
+
+## Validations et JavaScript
+
+PulseBeat applique deux niveaux de validation :
+- validation JavaScript en direct pour un retour immédiat sur les formulaires
+- validation serveur systématique pour empêcher tout contournement côté client
+
+Les validations en direct couvrent notamment :
+- format d'e-mail
+- politique de mot de passe
+- confirmation de mot de passe
+- unicité du nom d'utilisateur et de l'e-mail
+- champs requis dans les formulaires principaux
+- contraintes spécifiques comme les utilisateurs requis pour certaines ressources privées
+
+Si JavaScript est désactivé :
+- un écran bloquant s'affiche sur toutes les routes utilisant le layout principal
+- l'application reste volontairement inutilisable tant que JavaScript n'est pas réactivé
 
 ## Notifications e-mail
 
@@ -73,14 +114,15 @@ PulseBeat peut envoyer des e-mails pour :
 - `app.py` : création de l'application Flask, config, startup
 - `extensions.py` : connexion MongoDB et collections
 - `auth_helpers.py` : helpers auth, sécurité, mail, permissions
-- `blueprints/accounts.py` : auth, setup initial, reset password, vérification e-mail, Google OAuth
+- `blueprints/accounts.py` : auth, setup initial, reset password, vérification e-mail, Google OAuth, profils publics
 - `blueprints/main.py` : accueil et navigation principale
 - `blueprints/songs.py` : chansons, détails, votes, commentaires, signalements
 - `blueprints/playlists.py` : playlists, collaborateurs, recherche, partage
 - `blueprints/admin.py` : dashboard admin
 - `templates/` : vues Jinja
+- `templates/accounts/public_profile.jinja` : page publique utilisateur
 - `static/js/player.js` : lecteur audio flottant
-- `static/js/app.js` : interactions UI
+- `static/js/app.js` : interactions UI et validations côté client
 - `static/css/styles.css` : styles
 
 ## Installation
@@ -170,12 +212,18 @@ Le compte admin principal créé lors de ce setup :
 - ne peut pas être supprimé
 - doit lui aussi vérifier son e-mail avant la première connexion
 
+Au démarrage, l'application tente aussi de créer des index uniques sur :
+- `users.email_normalized`
+- `users.username_normalized`
+
+Si des doublons historiques existent déjà dans la base, il faut les corriger avant que ces index puissent être créés correctement.
+
 ## Développement
 
 Vérifier la syntaxe Python :
 
 ```bash
-python -m py_compile app.py auth_helpers.py blueprints\accounts.py blueprints\admin.py blueprints\songs.py blueprints\playlists.py i18n.py
+python -m py_compile app.py auth_helpers.py blueprints\accounts.py blueprints\admin.py blueprints\main.py blueprints\songs.py blueprints\playlists.py i18n.py
 ```
 
 ## Comptes Google

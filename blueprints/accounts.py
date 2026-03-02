@@ -6,8 +6,10 @@ from datetime import datetime
 from email.message import EmailMessage
 from math import ceil
 
+import re
+
 import requests
-from flask import Blueprint, current_app, flash, redirect, render_template, request, session, url_for
+from flask import Blueprint, abort, current_app, flash, jsonify, redirect, render_template, request, session, url_for
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -20,12 +22,15 @@ from auth_helpers import (
     is_email_verified,
     is_user_banned,
     login_required,
+    normalize_email,
+    normalize_username,
     parse_object_id,
     password_policy_ok,
     password_pwned_status,
     send_email_message,
     serialize_song,
     song_stream_url,
+    username_policy_ok,
 )
 from i18n import tr
 
@@ -34,6 +39,41 @@ bp = Blueprint("accounts", __name__)
 
 def root_admin_exists():
     return extensions.users_col.count_documents({"is_admin": True, "is_root_admin": True}, limit=1) > 0
+
+
+def find_user_by_email(email: str):
+    normalized = normalize_email(email)
+    if not normalized:
+        return None
+    return extensions.users_col.find_one({"email_normalized": normalized})
+
+
+def find_user_by_username(username: str):
+    normalized = normalize_username(username)
+    if not normalized:
+        return None
+    return extensions.users_col.find_one({"username_normalized": normalized})
+
+
+def validate_username_for_create(username: str):
+    if not username_policy_ok(username):
+        return False, tr("flash.accounts.username_invalid")
+    if find_user_by_username(username):
+        return False, tr("flash.accounts.username_exists")
+    return True, ""
+
+
+def build_google_username(name: str):
+    base = re.sub(r"[^A-Za-z0-9_.-]+", "", (name or "").strip())
+    if len(base) < 3:
+        base = "GoogleUser"
+    base = base[:24]
+    candidate = base
+    suffix = 1
+    while find_user_by_username(candidate):
+        suffix += 1
+        candidate = f"{base[: max(1, 24 - len(str(suffix)))]}{suffix}"
+    return candidate
 
 
 def validate_password_for_set(password: str, confirm_password: str, allow_unavailable=True):
@@ -283,14 +323,18 @@ def setup_admin():
 
     if request.method == "POST":
         username = request.form.get("username", "").strip()
-        email = request.form.get("email", "").strip().lower()
+        email = normalize_email(request.form.get("email", ""))
         password = request.form.get("password", "")
         confirm_password = request.form.get("confirm_password", "")
 
         if not username or not email or not password:
             flash(tr("flash.accounts.fields_required"), "danger")
             return redirect(url_for("accounts.setup_admin"))
-        if extensions.users_col.find_one({"email": email}):
+        ok_username, username_msg = validate_username_for_create(username)
+        if not ok_username:
+            flash(username_msg, "danger")
+            return redirect(url_for("accounts.setup_admin"))
+        if find_user_by_email(email):
             flash(tr("flash.accounts.email_exists"), "danger")
             return redirect(url_for("accounts.setup_admin"))
 
@@ -302,7 +346,9 @@ def setup_admin():
         admin_id = extensions.users_col.insert_one(
             {
                 "username": username,
+                "username_normalized": normalize_username(username),
                 "email": email,
+                "email_normalized": normalize_email(email),
                 "password_hash": generate_password_hash(password),
                 "is_admin": True,
                 "is_root_admin": True,
@@ -332,14 +378,18 @@ def register():
 
     if request.method == "POST":
         username = request.form.get("username", "").strip()
-        email = request.form.get("email", "").strip().lower()
+        email = normalize_email(request.form.get("email", ""))
         password = request.form.get("password", "")
         confirm_password = request.form.get("confirm_password", "")
 
         if not username or not email or not password:
             flash(tr("flash.accounts.fields_required"), "danger")
             return redirect(url_for("accounts.register"))
-        if extensions.users_col.find_one({"email": email}):
+        ok_username, username_msg = validate_username_for_create(username)
+        if not ok_username:
+            flash(username_msg, "danger")
+            return redirect(url_for("accounts.register"))
+        if find_user_by_email(email):
             flash(tr("flash.accounts.email_exists"), "danger")
             return redirect(url_for("accounts.register"))
 
@@ -351,7 +401,9 @@ def register():
         user_id = extensions.users_col.insert_one(
             {
                 "username": username,
+                "username_normalized": normalize_username(username),
                 "email": email,
+                "email_normalized": normalize_email(email),
                 "password_hash": generate_password_hash(password),
                 "is_admin": False,
                 "is_root_admin": False,
@@ -380,10 +432,10 @@ def login():
         return redirect(url_for("accounts.setup_admin"))
 
     if request.method == "POST":
-        email = request.form.get("email", "").strip().lower()
+        email = normalize_email(request.form.get("email", ""))
         password = request.form.get("password", "")
 
-        user = extensions.users_col.find_one({"email": email})
+        user = find_user_by_email(email)
         if not user or not check_password_hash(user.get("password_hash", ""), password):
             flash(tr("flash.accounts.invalid_credentials"), "danger")
             return redirect(url_for("accounts.login"))
@@ -481,15 +533,15 @@ def google_callback():
             timeout=10,
         )
         info = userinfo_resp.json() if userinfo_resp.ok else {}
-        email = (info.get("email") or "").strip().lower()
-        username = (info.get("name") or info.get("given_name") or "GoogleUser").strip()
+        email = normalize_email(info.get("email") or "")
+        username = build_google_username(info.get("name") or info.get("given_name") or "GoogleUser")
         if not email:
             raise ValueError("no_email")
     except Exception:
         flash(tr("flash.auth.google_failed"), "danger")
         return redirect(url_for("accounts.login"))
 
-    existing = extensions.users_col.find_one({"email": email})
+    existing = find_user_by_email(email)
     if existing and existing.get("auth_provider") != "google":
         flash(tr("flash.auth.google_email_exists"), "danger")
         return redirect(url_for("accounts.login"))
@@ -502,7 +554,9 @@ def google_callback():
         user_id = extensions.users_col.insert_one(
             {
                 "username": username,
+                "username_normalized": normalize_username(username),
                 "email": email,
+                "email_normalized": normalize_email(email),
                 "password_hash": generate_password_hash(secrets.token_hex(32)),
                 "is_admin": False,
                 "is_root_admin": False,
@@ -528,8 +582,8 @@ def google_callback():
 
 @bp.route("/resend-verification", methods=["POST"])
 def resend_verification():
-    email = request.form.get("email", "").strip().lower() or session.get("pending_verification_email", "")
-    user = extensions.users_col.find_one({"email": email}) if email else None
+    email = normalize_email(request.form.get("email", "") or session.get("pending_verification_email", ""))
+    user = find_user_by_email(email) if email else None
     if not user:
         flash(tr("flash.accounts.verification_email_sent"), "success")
         return redirect(url_for("accounts.login"))
@@ -569,8 +623,8 @@ def verify_email(token):
 @bp.route("/forgot-password", methods=["GET", "POST"])
 def forgot_password():
     if request.method == "POST":
-        email = request.form.get("email", "").strip().lower()
-        user = extensions.users_col.find_one({"email": email}) if email else None
+        email = normalize_email(request.form.get("email", ""))
+        user = find_user_by_email(email) if email else None
         sent = False
         if user:
             reset_link = _build_password_reset_link(user)
@@ -658,6 +712,7 @@ def manage_account():
             "email_verified": bool(is_email_verified(user)),
             "auth_provider": user.get("auth_provider", "local"),
             "is_google_account": user.get("auth_provider") == "google",
+            "profile_url": url_for("accounts.public_profile", username=user.get("username", "user")),
         },
         my_songs_count=my_songs_count,
     )
@@ -779,6 +834,73 @@ def delete_account():
     session.clear()
     flash(tr("flash.accounts.deleted"), "success")
     return redirect(url_for("accounts.register"))
+
+
+@bp.route("/users/check-availability")
+def check_availability():
+    field = request.args.get("field", "").strip().lower()
+    value = request.args.get("value", "")
+    if field == "email":
+        available = bool(normalize_email(value)) and find_user_by_email(value) is None
+        return jsonify({"available": available, "message": "" if available else tr("flash.accounts.email_exists")})
+    if field == "username":
+        if not username_policy_ok(value):
+            return jsonify({"available": False, "message": tr("flash.accounts.username_invalid")})
+        available = bool(normalize_username(value)) and find_user_by_username(value) is None
+        return jsonify({"available": available, "message": "" if available else tr("flash.accounts.username_exists")})
+    return jsonify({"available": False, "message": tr("flash.songs.invalid_request")}), 400
+
+
+@bp.route("/users/<username>")
+def public_profile(username):
+    from blueprints.playlists import can_access_playlist, normalize_playlist_visibility
+
+    viewer_oid = get_session_user_oid()
+    target = extensions.users_col.find_one({"username_normalized": normalize_username(username)})
+    if not target:
+        abort(404)
+
+    songs = []
+    for song in extensions.songs_col.find({"created_by": target["_id"]}).sort("created_at", -1).limit(250):
+        if not can_access_song(song, viewer_oid):
+            continue
+        item = serialize_song(song, viewer_oid)
+        item["url"] = song_stream_url(item["id"])
+        item["detail_url"] = url_for("songs.song_detail", song_id=item["id"])
+        songs.append(item)
+        if len(songs) >= 50:
+            break
+
+    playlists = []
+    for playlist in extensions.playlists_col.find({"user_id": target["_id"]}).sort("updated_at", -1).limit(250):
+        if not can_access_playlist(playlist, viewer_oid):
+            continue
+        playlists.append({
+            "id": str(playlist["_id"]),
+            "name": playlist.get("name") or tr("defaults.unnamed"),
+            "song_count": len(playlist.get("song_ids", [])),
+            "visibility": normalize_playlist_visibility(playlist),
+            "detail_url": url_for("playlists.playlist_detail", playlist_id=str(playlist["_id"])),
+        })
+        if len(playlists) >= 50:
+            break
+
+    return render_template(
+        "accounts/public_profile.jinja",
+        profile={
+            "username": target.get("username", "user"),
+            "created_at": target.get("created_at"),
+            "is_admin": bool(target.get("is_admin", False)),
+            "is_root_admin": bool(target.get("is_root_admin", False)),
+            "is_self": bool(viewer_oid and str(viewer_oid) == str(target["_id"])),
+            "manage_url": url_for("accounts.manage_account") if viewer_oid and str(viewer_oid) == str(target["_id"]) else "",
+        },
+        songs=songs,
+        playlists=playlists,
+        visible_song_count=len(songs),
+        visible_playlist_count=len(playlists),
+        comment_count=extensions.song_comments_col.count_documents({"user_id": target["_id"]}),
+    )
 
 
 @bp.route("/users/suggest")

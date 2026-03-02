@@ -10,10 +10,13 @@ from auth_helpers import (
     cleanup_song,
     cleanup_user,
     get_session_user_oid,
+    normalize_email,
+    normalize_username,
     notify_admins,
     parse_object_id,
     password_policy_ok,
     password_pwned_status,
+    username_policy_ok,
 )
 from i18n import tr
 
@@ -113,6 +116,13 @@ def create_admin():
     if not username or not email or not password:
         flash(tr("flash.accounts.fields_required"), "danger")
         return redirect(url_for("admin.dashboard"))
+    email = normalize_email(email)
+    if not username_policy_ok(username):
+        flash(tr("flash.accounts.username_invalid"), "danger")
+        return redirect(url_for("admin.dashboard"))
+    if extensions.users_col.find_one({"username_normalized": normalize_username(username)}):
+        flash(tr("flash.accounts.username_exists"), "danger")
+        return redirect(url_for("admin.dashboard"))
     if password != confirm_password:
         flash(tr("flash.accounts.password_mismatch"), "danger")
         return redirect(url_for("admin.dashboard"))
@@ -124,19 +134,24 @@ def create_admin():
     if status == "pwned":
         flash(tr("flash.accounts.password_compromised"), "danger")
         return redirect(url_for("admin.dashboard"))
-    if extensions.users_col.find_one({"email": email}):
+    if extensions.users_col.find_one({"email_normalized": normalize_email(email)}):
         flash(tr("flash.accounts.email_exists"), "danger")
         return redirect(url_for("admin.dashboard"))
 
     user_id = extensions.users_col.insert_one(
         {
             "username": username,
+            "username_normalized": normalize_username(username),
             "email": email,
+            "email_normalized": normalize_email(email),
             "password_hash": generate_password_hash(password),
             "is_admin": True,
             "is_root_admin": False,
             "require_password_change": False,
             "auth_provider": "local",
+            "email_verified": True,
+            "email_verified_at": datetime.utcnow(),
+            "email_verification_sent_at": None,
             "created_at": datetime.utcnow(),
         }
     ).inserted_id

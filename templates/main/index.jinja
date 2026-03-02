@@ -2,68 +2,115 @@
 {% block title %}{{ t('nav.home') }} - {{ app_name }}{% endblock %}
 
 {% block content %}
-<section class="grid two-cols">
-  <div class="card">
-    <h1>{{ t('main.title') }}</h1>
-    <form method="get" action="{{ url_for('main.index') }}" class="search-form">
-      <input type="text" name="q" placeholder="{{ t('main.search_placeholder') }}" value="{{ q }}" data-autocomplete-url="{{ url_for('songs.search_suggest') }}" autocomplete="off">
-      <select name="sort">
-        <option value="date" {% if sort == "date" %}selected{% endif %}>{{ t('main.sort.date') }}</option>
-        <option value="title" {% if sort == "title" %}selected{% endif %}>{{ t('main.sort.title') }}</option>
-        <option value="artist" {% if sort == "artist" %}selected{% endif %}>{{ t('main.sort.artist') }}</option>
-      </select>
-      <button type="submit">{{ t('main.apply') }}</button>
-    </form>
-    <p class="muted small">{{ t('main.results', count=total) }}</p>
-
-    {% if songs %}
-      <ul class="song-list">
-        {% for song in songs %}
-          <li>
-            <div>
-              <a href="{{ song.detail_url }}"><strong>{{ song.title }}</strong></a>
-              <p>{{ song.artist }}{% if song.genre %} - {{ song.genre }}{% endif %}</p>
-              <span class="badge">{{ t('main.visibility.' ~ song.visibility) }}</span>
-              {% if song.visibility == "private" %}
-                <span class="muted small">{{ t('main.shared_count', count=song.shared_count) }}</span>
-              {% endif %}
-            </div>
-            <div class="row-actions">
-              <button
-                type="button"
-                class="play-one"
-                data-context="auto"
-                data-song='{{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url, "detail_url": song.detail_url}|tojson|safe }}'
-              >{{ t('main.play') }}</button>
-              <a class="btn secondary" href="{{ song.detail_url }}">{{ t('song.details') }}</a>
-              <button type="button" class="queue-all" data-source="all" data-context="auto">{{ t('main.queue_all') }}</button>
-              {% if song.can_delete %}
-                <form method="post" action="{{ url_for('songs.delete_song', song_id=song.id) }}" class="delete-song-form">
-                  <button type="submit" class="btn-danger">{{ t('main.delete') }}</button>
-                </form>
-              {% endif %}
-            </div>
-          </li>
-        {% endfor %}
-      </ul>
-      <div class="pagination">
-        {% if page > 1 %}
-          <a class="btn secondary" href="{{ url_for('main.index', q=q, sort=sort, page=page-1) }}">{{ t('main.prev') }}</a>
-        {% endif %}
-        <span>{{ t('main.page', page=page, pages=pages) }}</span>
-        {% if page < pages %}
-          <a class="btn secondary" href="{{ url_for('main.index', q=q, sort=sort, page=page+1) }}">{{ t('main.next') }}</a>
+<section class="page-stack">
+  <section class="card feature-hero home-hero">
+    <div class="hero-copy-block">
+      <p class="hero-kicker">{{ app_name }}</p>
+      <h1>{{ t('home.hero_title') }}</h1>
+      <p class="hero-copy">{{ t('home.hero_subtitle') }}</p>
+      <form method="get" action="{{ url_for('main.index') }}" class="search-form hero-search-form">
+        <input type="text" id="home-search-input" name="q" placeholder="{{ t('main.search_placeholder') }}" value="{{ q }}" data-autocomplete-url="{{ url_for('songs.search_suggest') }}" data-target-hidden="home-search-song-id" autocomplete="off">
+        <input type="hidden" id="home-search-song-id" name="song_id" value="{{ request.args.get('song_id', '') }}">
+        <select name="sort">
+          <option value="date" {% if sort == "date" %}selected{% endif %}>{{ t('main.sort.date') }}</option>
+          <option value="title" {% if sort == "title" %}selected{% endif %}>{{ t('main.sort.title') }}</option>
+          <option value="artist" {% if sort == "artist" %}selected{% endif %}>{{ t('main.sort.artist') }}</option>
+        </select>
+        <button type="submit">{{ t('main.apply') }}</button>
+      </form>
+      <div class="hero-actions">
+        {% if current_user %}
+          <a class="btn" href="{{ url_for('songs.new_song') }}">{{ t('main.add_song') }}</a>
+          <a class="btn secondary" href="{{ url_for('playlists.list_playlists') }}">{{ t('nav.playlists') }}</a>
+          <a class="btn secondary" href="{{ url_for('accounts.listening_history') }}">{{ t('nav.history') }}</a>
+        {% else %}
+          <a class="btn" href="{{ url_for('accounts.register') }}">{{ t('nav.register') }}</a>
+          <a class="btn secondary" href="{{ url_for('accounts.login') }}">{{ t('nav.login') }}</a>
         {% endif %}
       </div>
-    {% else %}
-      <p>{{ t('main.no_songs') }}</p>
-    {% endif %}
-  </div>
+    </div>
+    <div class="hero-panel">
+      <div class="hero-stat-card">
+        <span class="hero-stat-label">{{ t('home.results_label') }}</span>
+        <strong>{{ total }}</strong>
+      </div>
+      <div class="hero-stat-card">
+        <span class="hero-stat-label">{{ t('home.page_label') }}</span>
+        <strong>{{ page }} / {{ pages }}</strong>
+      </div>
+      {% if current_user %}
+      <div class="hero-stat-card">
+        <span class="hero-stat-label">{{ t('nav.my_songs') }}</span>
+        <a class="btn secondary" href="{{ url_for('songs.my_songs') }}">{{ t('home.open_library') }}</a>
+      </div>
+      {% endif %}
+    </div>
+  </section>
 
-  <div class="card">
-    <h2>{{ t('main.recommended') }}</h2>
+  <section class="content-shelves">
+    <div class="card shelf-card shelf-primary">
+      <div class="shelf-head">
+        <div>
+          <h2>{{ t('home.latest_title') }}</h2>
+          <p class="muted small">{{ t('home.latest_subtitle') }}</p>
+        </div>
+        {% if songs %}
+        <button type="button" class="queue-all btn secondary" data-source="all" data-context="auto">{{ t('main.queue_all') }}</button>
+        {% endif %}
+      </div>
+
+      {% if songs %}
+        <ul class="song-list media-list">
+          {% for song in songs %}
+            <li>
+              <div>
+                <a href="{{ song.detail_url }}"><strong>{{ song.title }}</strong></a>
+                <p>{{ song.artist }}{% if song.genre %} - {{ song.genre }}{% endif %}</p>
+                <span class="badge">{{ t('main.visibility.' ~ song.visibility) }}</span>
+                {% if song.visibility == "private" %}
+                  <span class="muted small">{{ t('main.shared_count', count=song.shared_count) }}</span>
+                {% endif %}
+              </div>
+              <div class="row-actions">
+                <button
+                  type="button"
+                  class="play-one"
+                  data-context="auto"
+                  data-song='{{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url, "detail_url": song.detail_url}|tojson|safe }}'
+                >{{ t('main.play') }}</button>
+                <a class="btn secondary" href="{{ song.detail_url }}">{{ t('song.details') }}</a>
+                {% if song.can_delete %}
+                  <form method="post" action="{{ url_for('songs.delete_song', song_id=song.id) }}" class="delete-song-form">
+                    <button type="submit" class="btn-danger">{{ t('main.delete') }}</button>
+                  </form>
+                {% endif %}
+              </div>
+            </li>
+          {% endfor %}
+        </ul>
+        <div class="pagination">
+          {% if page > 1 %}
+            <a class="btn secondary" href="{{ url_for('main.index', q=q, sort=sort, page=page-1) }}">{{ t('main.prev') }}</a>
+          {% endif %}
+          <span>{{ t('main.page', page=page, pages=pages) }}</span>
+          {% if page < pages %}
+            <a class="btn secondary" href="{{ url_for('main.index', q=q, sort=sort, page=page+1) }}">{{ t('main.next') }}</a>
+          {% endif %}
+        </div>
+      {% else %}
+        <p>{{ t('main.no_songs') }}</p>
+      {% endif %}
+    </div>
+
     {% if recommended_songs %}
-      <ul class="song-list">
+    <div class="card shelf-card shelf-secondary">
+      <div class="shelf-head">
+        <div>
+          <h2>{{ t('main.recommended') }}</h2>
+          <p class="muted small">{{ t('home.recommended_subtitle') }}</p>
+        </div>
+      </div>
+      <ul class="song-list media-list compact-media-list">
         {% for song in recommended_songs %}
           <li>
             <div>
@@ -82,64 +129,9 @@
           </li>
         {% endfor %}
       </ul>
-    {% else %}
-      <p>{{ t('main.no_recommendations') }}</p>
-    {% endif %}
-  </div>
-
-  {% if current_user %}
-  <div class="card">
-    <h2>{{ t('main.add_song') }}</h2>
-    <form method="post" action="{{ url_for('songs.add_song') }}" enctype="multipart/form-data" class="stack" id="add-song-form">
-      <label>{{ t('main.field.title') }}
-        <input type="text" name="title" id="song-title-input" required>
-      </label>
-      <label>{{ t('main.field.artist') }}
-        <input type="text" name="artist" id="song-artist-input">
-      </label>
-      <label>{{ t('main.field.genre') }}
-        <input type="text" name="genre" id="song-genre-input">
-      </label>
-      <label>{{ t('main.field.url') }}
-        <input type="url" name="song_url" placeholder="https://.../audio.mp3">
-      </label>
-      <label>{{ t('main.field.file') }}
-        <input type="file" name="song_file" id="song-file-input" accept=".mp3,.wav,.ogg,.m4a">
-        <span id="id3-status" class="muted small"></span>
-      </label>
-      <label>{{ t('main.field.visibility') }}
-        <select name="visibility" id="visibility-select">
-          <option value="public">{{ t('main.visibility.public') }}</option>
-          <option value="private">{{ t('main.visibility.private') }}</option>
-          <option value="unlisted">{{ t('main.visibility.unlisted') }}</option>
-        </select>
-      </label>
-
-      <div id="shared-with-wrap" class="hidden stack">
-        <button
-          type="button"
-          class="btn secondary open-user-picker"
-          data-target-inputs="song-shared-inputs"
-          data-target-list="song-shared-list"
-          data-picker-title="{{ t('main.share_with') }}" data-input-name="shared_with"
-        >{{ t('main.share_with_add') }}</button>
-        <div id="song-shared-list" class="selected-users"></div>
-        <div id="song-shared-inputs"></div>
-      </div>
-
-      <button type="submit" id="add-song-submit">{{ t('main.add') }}</button>
-    </form>
-  </div>
-  {% else %}
-  <div class="card">
-    <h2>{{ t('main.start') }}</h2>
-    <p>{{ t('main.start_desc') }}</p>
-    <div class="row-actions">
-      <a class="btn" href="{{ url_for('accounts.register') }}">{{ t('nav.register') }}</a>
-      <a class="btn secondary" href="{{ url_for('accounts.login') }}">{{ t('nav.login') }}</a>
     </div>
-  </div>
-  {% endif %}
+    {% endif %}
+  </section>
 </section>
 
 <script>
@@ -155,4 +147,3 @@
   ];
 </script>
 {% endblock %}
-

@@ -15,7 +15,7 @@
     {% if me.require_password_change %}
     <p class="muted">{{ t('account.password_change_required') }}</p>
     {% else %}
-    <a class="btn secondary" href="{{ url_for('accounts.listening_history') }}">{{ t('nav.history') }}</a>
+    <div class="row-actions top-gap"><a class="btn secondary" href="{{ url_for('accounts.listening_history') }}">{{ t('nav.history') }}</a><a class="btn secondary" href="{{ me.profile_url }}">{{ t('profile.view_public') }}</a></div>
     {% endif %}
   </div>
 
@@ -23,17 +23,17 @@
   <div class="card">
     <h2>{{ t('account.change_password') }}</h2>
     <p class="muted small">{{ t('auth.password_policy') }}</p>
-    <form method="post" action="{{ url_for('accounts.change_password') }}" class="stack">
+    <form method="post" action="{{ url_for('accounts.change_password') }}" class="stack" data-validate-form="1">
       {% if not me.require_password_change %}
       <label>{{ t('account.current_password') }}
         <input type="password" name="current_password" required>
       </label>
       {% endif %}
       <label>{{ t('account.new_password') }}
-        <input type="password" name="new_password" minlength="6" required>
+        <input type="password" id="manage-new-password" name="new_password" minlength="6" data-password-policy="1" required>
       </label>
       <label>{{ t('account.confirm_password') }}
-        <input type="password" name="confirm_password" minlength="6" required>
+        <input type="password" name="confirm_password" minlength="6" data-match-target="manage-new-password" required>
       </label>
       <button type="submit">{{ t('account.change_password') }}</button>
     </form>
@@ -53,7 +53,7 @@
     {% if me.is_root_admin %}
       <p>{{ t('account.root_admin_not_deletable') }}</p>
     {% else %}
-    <form method="post" action="{{ url_for('accounts.delete_account') }}" class="stack">
+    <form method="post" action="{{ url_for('accounts.delete_account') }}" class="stack" data-validate-form="1">
       <label>{{ t('auth.password') }}
         <input type="password" name="password" required>
       </label>

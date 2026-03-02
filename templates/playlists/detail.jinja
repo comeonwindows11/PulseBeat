@@ -8,9 +8,9 @@
     <p class="muted small">{{ t('main.visibility.' ~ playlist.visibility) }}</p>
 
     {% if playlist.is_owner %}
-    <form method="post" action="{{ url_for('playlists.update_playlist', playlist_id=playlist.id) }}" class="stack">
+    <form method="post" action="{{ url_for('playlists.update_playlist', playlist_id=playlist.id) }}" class="stack" data-validate-form="1">
       <label>{{ t('playlist.rename') }}
-        <input type="text" name="name" value="{{ playlist.name }}" required>
+        <input type="text" name="name" value="{{ playlist.name }}" minlength="2" maxlength="120" required>
       </label>
       <label>{{ t('main.field.visibility') }}
         <select name="visibility">
@@ -96,7 +96,7 @@
   <div class="card">
     <h2>{{ t('playlist.add_song') }}</h2>
     {% if playlist.is_owner or playlist.is_collaborator %}
-    <form method="post" action="{{ url_for('playlists.add_song_to_playlist', playlist_id=playlist.id) }}" class="stack">
+    <form method="post" action="{{ url_for('playlists.add_song_to_playlist', playlist_id=playlist.id) }}" class="stack" data-validate-form="1">
       <label>{{ t('playlist.add_song') }}
         <input
           type="text"
@@ -104,7 +104,7 @@
           id="playlist-song-search"
           autocomplete="off"
           data-autocomplete-url="{{ url_for('songs.search_suggest') }}"
-          data-target-hidden="playlist-song-id"
+          data-target-hidden="playlist-song-id" data-require-selection-target="playlist-song-id"
           placeholder="{{ t('playlist.search_song_placeholder') }}"
           required
         >

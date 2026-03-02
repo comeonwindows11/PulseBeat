@@ -4,6 +4,7 @@ from flask import Blueprint, current_app, make_response, redirect, render_templa
 
 from auth_helpers import (
     get_session_user_oid,
+    parse_object_id,
     serialize_song,
     song_stream_url,
     user_choice_list,
@@ -85,6 +86,7 @@ def build_recommendations(user_oid, exclude_song_ids=None, limit=20):
 @bp.route("/")
 def index():
     q = request.args.get("q", "").strip()
+    selected_song_id = request.args.get("song_id", "").strip()
     sort = request.args.get("sort", "date").strip().lower()
     if sort not in SORT_MAP:
         sort = "date"
@@ -95,18 +97,23 @@ def index():
         page = max(1, int(page_raw))
 
     user_oid = get_session_user_oid()
+    selected_song_oid = parse_object_id(selected_song_id)
     query_parts = [visible_song_filter(user_oid)]
+    text_filters = []
 
     if q:
         escaped = re.escape(q)
-        query_parts.append(
-            {
-                "$or": [
-                    {"title": {"$regex": escaped, "$options": "i"}},
-                    {"artist": {"$regex": escaped, "$options": "i"}},
-                ]
-            }
-        )
+        text_filters = [
+            {"title": {"$regex": escaped, "$options": "i"}},
+            {"artist": {"$regex": escaped, "$options": "i"}},
+        ]
+
+    if selected_song_oid and text_filters:
+        query_parts.append({"$or": [{"_id": selected_song_oid}, *text_filters]})
+    elif selected_song_oid:
+        query_parts.append({"_id": selected_song_oid})
+    elif text_filters:
+        query_parts.append({"$or": text_filters})
 
     query = {"$and": query_parts} if len(query_parts) > 1 else query_parts[0]
     per_page = int(current_app.config.get("PAGE_SIZE", 50))

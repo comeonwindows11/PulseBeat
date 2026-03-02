@@ -456,6 +456,145 @@
     attachAutocomplete(input);
   });
 
+  const passwordPolicyRe = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{6,}$/;
+
+  function fieldFeedbackNode(field) {
+    const host = field && (field.closest("label") || field.parentElement);
+    if (!host) return null;
+    let node = host.querySelector(".field-feedback");
+    if (!node) {
+      node = document.createElement("div");
+      node.className = "field-feedback";
+      host.appendChild(node);
+    }
+    return node;
+  }
+
+  function setFieldState(field, message) {
+    const node = fieldFeedbackNode(field);
+    if (field) field.classList.toggle("is-invalid", Boolean(message));
+    if (node) node.textContent = message || "";
+    return !message;
+  }
+
+  async function remoteAvailabilityCheck(field) {
+    const url = field.getAttribute("data-remote-url");
+    const fieldName = field.getAttribute("data-remote-check");
+    const value = field.value.trim();
+    if (!url || !fieldName || !value) return "";
+    const seq = String(Number(field.dataset.remoteSeq || "0") + 1);
+    field.dataset.remoteSeq = seq;
+    try {
+      const res = await fetch(`${url}?field=${encodeURIComponent(fieldName)}&value=${encodeURIComponent(value)}`, { credentials: "same-origin" });
+      const data = res.ok ? await res.json() : { available: false, message: i18n.validationRequired || "Invalid value." };
+      if (field.dataset.remoteSeq !== seq) return "";
+      return data.available ? "" : (data.message || i18n.validationRequired || "Invalid value.");
+    } catch (_e) {
+      return "";
+    }
+  }
+
+  async function validateField(field, form) {
+    if (!field || field.disabled || field.type === "hidden") return true;
+    field.setCustomValidity("");
+    let message = "";
+
+    if (!field.checkValidity()) {
+      if (field.validity.valueMissing) message = i18n.validationRequired || field.validationMessage;
+      else if (field.validity.typeMismatch && field.type === "email") message = i18n.validationEmail || field.validationMessage;
+      else if (field.validity.tooShort) message = i18n.validationTooShort || field.validationMessage;
+      else if (field.validity.patternMismatch && field.getAttribute("data-remote-check") === "username") message = i18n.validationUsernameInvalid || field.validationMessage;
+      else message = field.validationMessage;
+    }
+
+    if (!message && field.dataset.passwordPolicy === "1" && field.value && !passwordPolicyRe.test(field.value)) {
+      message = i18n.validationPasswordPolicy || "Invalid password.";
+    }
+
+    if (!message && field.dataset.matchTarget) {
+      const other = document.getElementById(field.dataset.matchTarget);
+      if (other && field.value !== other.value) {
+        message = i18n.validationPasswordMatch || "Values do not match.";
+      }
+    }
+
+    if (!message && field.dataset.requireSelectionTarget) {
+      const target = document.getElementById(field.dataset.requireSelectionTarget);
+      if (field.value.trim() && target && !target.value.trim()) {
+        message = i18n.validationSelectionRequired || "Select a valid suggestion.";
+      }
+    }
+
+    if (!message && field.dataset.remoteCheck && field.value.trim()) {
+      message = await remoteAvailabilityCheck(field);
+    }
+
+    if (!message && form && form.dataset.requireSource === "1") {
+      const urlField = document.getElementById(form.dataset.sourceUrl || "");
+      const fileField = document.getElementById(form.dataset.sourceFile || "");
+      if (field === urlField || field === fileField) {
+        const hasUrl = Boolean(urlField && urlField.value.trim());
+        const hasFile = Boolean(fileField && fileField.files && fileField.files.length);
+        if (!hasUrl && !hasFile) message = i18n.validationSourceRequired || "Provide a source.";
+      }
+    }
+
+    if (!message && form && form.dataset.privateVisibility && form.dataset.privateTarget) {
+      const visibility = document.getElementById(form.dataset.privateVisibility);
+      const targetWrap = document.getElementById(form.dataset.privateTarget);
+      if (field === visibility && visibility && visibility.value === "private") {
+        const selected = targetWrap ? targetWrap.querySelectorAll('input[name="shared_with"]').length : 0;
+        if (!selected) message = i18n.validationPrivateUsersRequired || "Select at least one user.";
+      }
+    }
+
+    return setFieldState(field, message);
+  }
+
+  async function validateForm(form) {
+    const fields = Array.from(form.querySelectorAll("input, textarea, select"));
+    let ok = true;
+    for (const field of fields) {
+      ok = (await validateField(field, form)) && ok;
+    }
+    if (form.dataset.privateVisibility) {
+      const visibility = document.getElementById(form.dataset.privateVisibility);
+      if (visibility) ok = (await validateField(visibility, form)) && ok;
+    }
+    if (form.dataset.requireSource === "1") {
+      const urlField = document.getElementById(form.dataset.sourceUrl || "");
+      if (urlField) ok = (await validateField(urlField, form)) && ok;
+    }
+    return ok;
+  }
+
+  document.querySelectorAll("form").forEach((form) => {
+    if (form.classList.contains("delete-song-form") || form.classList.contains("lang-form")) return;
+    const visibleFields = Array.from(form.querySelectorAll("input, textarea, select")).filter((field) => field.type !== "hidden");
+    if (!visibleFields.length) return;
+    form.setAttribute("novalidate", "novalidate");
+
+    visibleFields.forEach((field) => {
+      const handler = () => validateField(field, form).catch(() => {});
+      field.addEventListener("input", handler);
+      field.addEventListener("change", handler);
+      field.addEventListener("blur", handler);
+      if (field.dataset.matchTarget) {
+        const other = document.getElementById(field.dataset.matchTarget);
+        if (other) other.addEventListener("input", () => validateField(field, form).catch(() => {}));
+      }
+    });
+
+    form.addEventListener("submit", async (event) => {
+      const ok = await validateForm(form);
+      if (!ok) {
+        event.preventDefault();
+        const firstInvalid = form.querySelector(".is-invalid");
+        if (firstInvalid && typeof firstInvalid.focus === "function") firstInvalid.focus();
+      }
+    });
+  });
+
   [confirmModal, reportModal, userPickerModal].forEach((modal) => {
     if (!modal) return;
     modal.addEventListener("click", (event) => {

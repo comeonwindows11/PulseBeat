@@ -33,9 +33,9 @@
 
   <div class="card">
     <h2>{{ t('playlist.create') }}</h2>
-    <form method="post" class="stack">
+    <form method="post" class="stack" data-validate-form="1">
       <label>{{ t('playlist.name') }}
-        <input type="text" name="name" required>
+        <input type="text" name="name" minlength="2" maxlength="120" required>
       </label>
       <label>{{ t('main.field.visibility') }}
         <select name="visibility">

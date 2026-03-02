@@ -17,6 +17,7 @@ from i18n import tr
 ALLOWED_EXTENSIONS = {"mp3", "wav", "ogg", "m4a"}
 VISIBILITY_VALUES = {"public", "private", "unlisted"}
 PASSWORD_POLICY_RE = re.compile(r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{6,}$")
+USERNAME_POLICY_RE = re.compile(r"^[A-Za-z0-9_.-]{3,32}$")
 
 FEATURE_DEFAULTS_FULL = {
     "usage_mode": "full",
@@ -52,6 +53,18 @@ def is_feature_enabled(flag_name: str, default=True):
 
 def password_policy_ok(password: str) -> bool:
     return bool(PASSWORD_POLICY_RE.match(password or ""))
+
+
+def normalize_email(email: str) -> str:
+    return (email or "").strip().lower()
+
+
+def normalize_username(username: str) -> str:
+    return (username or "").strip().lower()
+
+
+def username_policy_ok(username: str) -> bool:
+    return bool(USERNAME_POLICY_RE.match((username or "").strip()))
 
 
 def _mail_configured():

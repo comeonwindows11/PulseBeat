@@ -12,10 +12,14 @@
     playerModeShuffle: "Lecture aléatoire",
     playerModeRepeatOne: "Répéter 1 chanson",
     playerAutoMode: "Lecture automatique",
+    playerViewMini: "Lecteur minimal",
+    playerViewNormal: "Lecteur normal",
+    playerViewFullscreen: "Lecteur plein écran",
     playerAlbum: "PulseBeat",
   };
 
   const audio = document.getElementById("global-audio");
+  const playerShell = document.querySelector(".player-shell");
   const titleEl = document.getElementById("player-title");
   const titleLinkEl = document.getElementById("player-title-link");
   const artistEl = document.getElementById("player-artist");
@@ -24,6 +28,8 @@
   const nextBtn = document.getElementById("next-btn");
   const modeBtn = document.getElementById("play-mode-btn");
   const addToPlaylistBtn = document.getElementById("add-to-playlist-btn");
+  const playerViewBtn = document.getElementById("player-view-btn");
+  const playerViewStatus = document.getElementById("player-view-status");
   const seek = document.getElementById("seek-range");
   const playlistModal = document.getElementById("player-playlist-modal");
   const playlistModalClose = document.getElementById("player-playlist-close");
@@ -64,6 +70,7 @@
     playbackRate: 1,
     startedSongId: null,
     playlistModalOpen: false,
+    viewMode: "normal",
   };
 
 
@@ -71,6 +78,58 @@
 
 
   let toastTimer = null;
+
+  function normalizeViewMode(mode) {
+    return ["mini", "normal", "fullscreen"].includes(mode) ? mode : "normal";
+  }
+
+  function viewModeLabel(mode) {
+    if (mode === "mini") return i18n.playerViewMini || "Mini player";
+    if (mode === "fullscreen") return i18n.playerViewFullscreen || "Fullscreen player";
+    return i18n.playerViewNormal || "Standard player";
+  }
+
+  function nextViewMode() {
+    if (state.viewMode === "normal") return "mini";
+    if (state.viewMode === "mini") return "fullscreen";
+    return "normal";
+  }
+
+  function syncPlayerOffset() {
+    const root = document.documentElement;
+    if (!root || !playerShell) return;
+    const offset = state.viewMode === "fullscreen" ? 0 : playerShell.offsetHeight || 0;
+    root.style.setProperty("--player-offset", `${offset}px`);
+  }
+
+  function updateViewModeUI() {
+    if (playerShell) playerShell.dataset.viewMode = state.viewMode;
+    if (playerViewBtn) {
+      const upcomingMode = nextViewMode();
+      playerViewBtn.dataset.viewMode = upcomingMode;
+      playerViewBtn.setAttribute("aria-label", viewModeLabel(upcomingMode));
+      playerViewBtn.title = viewModeLabel(upcomingMode);
+    }
+    if (playerViewStatus) playerViewStatus.textContent = viewModeLabel(state.viewMode);
+    document.body.classList.toggle("player-fullscreen-open", state.viewMode === "fullscreen");
+    syncPlayerOffset();
+  }
+
+  function setViewMode(mode, persist) {
+    state.viewMode = normalizeViewMode(mode);
+    updateViewModeUI();
+    if (persist) saveState();
+  }
+
+  function cycleViewMode() {
+    if (state.viewMode === "normal") {
+      setViewMode("mini", true);
+    } else if (state.viewMode === "mini") {
+      setViewMode("fullscreen", true);
+    } else {
+      setViewMode("normal", true);
+    }
+  }
 
   function showPlaylistToast(message, type) {
     if (!playlistToast || !message) return;
@@ -251,6 +310,7 @@
       if (![1, 1.25, 1.5].includes(Number(state.playbackRate))) {
         state.playbackRate = 1;
       }
+      state.viewMode = normalizeViewMode(state.viewMode);
     } catch (_e) {
       localStorage.removeItem(STORAGE_KEY);
     }
@@ -275,6 +335,7 @@
     }
 
     updateModeUI();
+    updateViewModeUI();
     updateMediaSession(song);
     document.title = song ? `${song.title} - ${i18n.playerAlbum || "PulseBeat"}` : DEFAULT_PAGE_TITLE;
   }
@@ -667,6 +728,9 @@
   nextBtn.addEventListener("click", () => next(true));
   prevBtn.addEventListener("click", prev);
   if (modeBtn) modeBtn.addEventListener("click", cycleMode);
+  if (playerViewBtn) playerViewBtn.addEventListener("click", cycleViewMode);
+
+  window.addEventListener("resize", syncPlayerOffset);
 
   audio.addEventListener("ended", () => {
     const song = currentSong();
@@ -762,4 +826,5 @@
     updateMeta(null);
   }
   updateModeUI();
+  updateViewModeUI();
 })();

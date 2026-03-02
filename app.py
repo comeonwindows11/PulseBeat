@@ -4,7 +4,7 @@ from flask import Flask, flash, redirect, render_template, request, url_for
 from dotenv import load_dotenv
 
 import extensions
-from auth_helpers import current_user, get_session_user_oid
+from auth_helpers import current_user, get_session_user_oid, normalize_email, normalize_username
 from blueprints.accounts import bp as accounts_bp
 from blueprints.admin import bp as admin_bp
 from blueprints.main import bp as main_bp
@@ -64,6 +64,13 @@ def create_app():
     extensions.users_col.update_many({"email_verification_sent_at": {"$exists": False}}, {"$set": {"email_verification_sent_at": None}})
     extensions.users_col.update_many({"auth_provider": {"$exists": False}}, {"$set": {"auth_provider": "local"}})
     extensions.users_col.update_many({"auth_provider": "google"}, {"$set": {"require_password_change": False}, "$unset": {"password_compromised_at": ""}})
+    for user in extensions.users_col.find({}, {"email": 1, "username": 1}):
+        extensions.users_col.update_one(
+            {"_id": user["_id"]},
+            {"$set": {"email_normalized": normalize_email(user.get("email", "")), "username_normalized": normalize_username(user.get("username", ""))}},
+        )
+    extensions.users_col.create_index("email_normalized", unique=True, name="uniq_users_email_normalized")
+    extensions.users_col.create_index("username_normalized", unique=True, name="uniq_users_username_normalized")
     os.makedirs(app.config["UPLOAD_DIR"], exist_ok=True)
 
     app.register_blueprint(accounts_bp)

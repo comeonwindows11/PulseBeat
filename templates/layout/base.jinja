@@ -7,6 +7,52 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
 </head>
 <body>
+  <noscript>
+    <style>
+      html, body {
+        height: 100%;
+        overflow: hidden !important;
+      }
+      header,
+      main,
+      .player-shell,
+      .modal,
+      .player-bottom-sheet {
+        display: none !important;
+      }
+      .nojs-blocker {
+        position: fixed !important;
+        inset: 0 !important;
+        z-index: 2147483647 !important;
+        display: grid !important;
+        place-items: center !important;
+        padding: 18px !important;
+        background: rgba(0, 0, 0, 0.92) !important;
+      }
+      .nojs-blocker__card {
+        width: min(96vw, 620px);
+        padding: 22px;
+        border: 1px solid #4567a7;
+        border-radius: 16px;
+        background: linear-gradient(180deg, #111c33, #1a2947);
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+        color: #ecf2ff;
+      }
+      .nojs-blocker__card h1 {
+        margin-top: 0;
+      }
+      .nojs-blocker__card p {
+        margin-bottom: 0;
+        line-height: 1.6;
+      }
+    </style>
+    <div class="nojs-blocker" aria-hidden="false" role="dialog" aria-modal="true">
+      <div class="nojs-blocker__card">
+        <h1>{{ t('nojs.title') }}</h1>
+        <p>{{ t('nojs.body') }}</p>
+      </div>
+    </div>
+  </noscript>
   <header class="topbar">
     <a href="{% if current_user and current_user.require_password_change %}{{ url_for('accounts.manage_account') }}{% elif current_user %}{{ url_for('main.index') }}{% else %}{{ url_for('accounts.login') }}{% endif %}" class="logo">{{ app_name }}</a>
     <button id="menu-toggle" class="menu-toggle" type="button" aria-label="{{ t('lang.switch') }}" aria-expanded="false">
@@ -27,6 +73,7 @@
         {% else %}
           <a href="{{ url_for('main.index') }}">{{ t('nav.home') }}</a>
           <a href="{{ url_for('songs.my_songs') }}">{{ t('nav.my_songs') }}</a>
+          <a href="{{ url_for('songs.new_song') }}">{{ t('main.add_song') }}</a>
           <a href="{{ url_for('playlists.list_playlists') }}">{{ t('nav.playlists') }}</a>
           <a href="{{ url_for('accounts.listening_history') }}">{{ t('nav.history') }}</a>
           <a href="{{ url_for('accounts.manage_account') }}">{{ t('nav.manage_account') }}</a>
@@ -105,6 +152,7 @@
           <strong id="player-title">{{ t('player.none') }}</strong>
         </a>
         <span id="player-artist">-</span>
+        <span id="player-view-status" class="player-view-status muted small">{{ t('player.view.normal') }}</span>
       </div>
       <div class="controls">
         <button id="prev-btn" type="button" aria-label="{{ t('player.previous') }}">
@@ -128,6 +176,17 @@
         <button id="add-to-playlist-btn" type="button" aria-label="{{ t('player.add_to_playlist') }}">
           <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M3 10h10v2H3v-2zm0-4h14v2H3V6zm0 8h10v2H3v-2zm16-1v-3h-2v3h-3v2h3v3h2v-3h3v-2h-3z"></path>
+          </svg>
+        </button>
+        <button id="player-view-btn" class="player-view-btn" type="button" aria-label="{{ t('player.view.normal') }}" data-view-mode="normal" title="{{ t('player.view.normal') }}">
+          <svg class="icon view-mini" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 7h16v10H4zM6 9h12v6H6z"></path>
+          </svg>
+          <svg class="icon view-normal" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M3 5h18v14H3zM6 8h12v8H6z"></path>
+          </svg>
+          <svg class="icon view-fullscreen" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M7 3H3v4h2V5h2V3zm14 0h-4v2h2v2h2V3zM5 17H3v4h4v-2H5v-2zm16 0h-2v2h-2v2h4v-4z"></path>
           </svg>
         </button>
         <button id="play-mode-btn" class="mode-btn" type="button" aria-label="{{ t('player.mode.normal') }}" data-mode="normal" title="{{ t('player.mode.normal') }}">
@@ -191,6 +250,18 @@
       playerPlaylistAdded: {{ t('player.playlist_added')|tojson }},
       playerPlaylistExists: {{ t('player.playlist_exists')|tojson }},
       playerPlaylistError: {{ t('player.playlist_error')|tojson }},
+      playerViewMini: {{ t('player.view.mini')|tojson }},
+      playerViewNormal: {{ t('player.view.normal')|tojson }},
+      playerViewFullscreen: {{ t('player.view.fullscreen')|tojson }},
+      validationRequired: {{ t('validation.required')|tojson }},
+      validationEmail: {{ t('validation.email')|tojson }},
+      validationPasswordPolicy: {{ t('validation.password_policy')|tojson }},
+      validationPasswordMatch: {{ t('validation.password_match')|tojson }},
+      validationSelectionRequired: {{ t('validation.selection_required')|tojson }},
+      validationSourceRequired: {{ t('validation.song_source')|tojson }},
+      validationPrivateUsersRequired: {{ t('validation.private_users_required')|tojson }},
+      validationTooShort: {{ t('validation.too_short')|tojson }},
+      validationUsernameInvalid: {{ t('flash.accounts.username_invalid')|tojson }},
       appLoadingTags: {{ t('song.id3_loading')|tojson }},
       appTagsDone: {{ t('song.id3_done')|tojson }},
       appTagsFail: {{ t('song.id3_fail')|tojson }}

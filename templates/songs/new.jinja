@@ -1,0 +1,73 @@
+{% extends "layout/base.jinja" %}
+{% block title %}{{ t('main.add_song') }} - {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="page-stack">
+  <div class="card feature-hero compact-hero">
+    <div>
+      <p class="hero-kicker">{{ app_name }}</p>
+      <h1>{{ t('main.add_song') }}</h1>
+      <p class="hero-copy">{{ t('songs.new_subtitle') }}</p>
+    </div>
+    <div class="hero-actions">
+      <a class="btn secondary" href="{{ url_for('songs.my_songs') }}">{{ t('nav.my_songs') }}</a>
+      <a class="btn secondary" href="{{ url_for('main.index') }}">{{ t('nav.home') }}</a>
+    </div>
+  </div>
+
+  <section class="grid two-cols">
+    <div class="card">
+      <h2>{{ t('main.add_song') }}</h2>
+      <form method="post" action="{{ url_for('songs.add_song') }}" enctype="multipart/form-data" class="stack" id="add-song-form" data-validate-form="1" data-require-source="1" data-source-url="song-url-input" data-source-file="song-file-input" data-private-visibility="visibility-select" data-private-target="song-shared-inputs">
+        <label>{{ t('main.field.title') }}
+          <input type="text" name="title" id="song-title-input" required>
+        </label>
+        <label>{{ t('main.field.artist') }}
+          <input type="text" name="artist" id="song-artist-input">
+        </label>
+        <label>{{ t('main.field.genre') }}
+          <input type="text" name="genre" id="song-genre-input">
+        </label>
+        <label>{{ t('main.field.url') }}
+          <input type="url" id="song-url-input" name="song_url" placeholder="https://.../audio.mp3">
+        </label>
+        <label>{{ t('main.field.file') }}
+          <input type="file" name="song_file" id="song-file-input" accept=".mp3,.wav,.ogg,.m4a">
+          <span id="id3-status" class="muted small"></span>
+        </label>
+        <label>{{ t('main.field.visibility') }}
+          <select name="visibility" id="visibility-select">
+            <option value="public">{{ t('main.visibility.public') }}</option>
+            <option value="private">{{ t('main.visibility.private') }}</option>
+            <option value="unlisted">{{ t('main.visibility.unlisted') }}</option>
+          </select>
+        </label>
+
+        <div id="shared-with-wrap" class="hidden stack">
+          <button
+            type="button"
+            class="btn secondary open-user-picker"
+            data-target-inputs="song-shared-inputs"
+            data-target-list="song-shared-list"
+            data-picker-title="{{ t('main.share_with') }}" data-input-name="shared_with"
+          >{{ t('main.share_with_add') }}</button>
+          <div id="song-shared-list" class="selected-users"></div>
+          <div id="song-shared-inputs"></div>
+        </div>
+
+        <button type="submit" id="add-song-submit">{{ t('main.add') }}</button>
+      </form>
+    </div>
+
+    <div class="card feature-notes">
+      <h2>{{ t('songs.new_tips_title') }}</h2>
+      <ul class="feature-list">
+        <li>{{ t('songs.new_tip_tags') }}</li>
+        <li>{{ t('songs.new_tip_visibility') }}</li>
+        <li>{{ t('songs.new_tip_private') }}</li>
+        <li>{{ t('songs.new_tip_redirect') }}</li>
+      </ul>
+    </div>
+  </section>
+</section>
+{% endblock %}

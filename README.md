@@ -10,7 +10,7 @@ Application de streaming musical en `Flask` + `Jinja`, inspirée de YouTube Musi
 - Réinitialisation de mot de passe par e-mail
 - Vérification des mots de passe compromis
 - Changement de mot de passe et lock de sécurité si mot de passe compromis
-- Ajout de chansons par URL ou upload
+- Ajout de chansons par URL ou upload (avec détection automatique des balises ID3)
 - Lecture audio réelle avec lecteur flottant persistant entre les pages
 - Contrôles lecture/pause/suivant/précédent
 - Historique d'écoute

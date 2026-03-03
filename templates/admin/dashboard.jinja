@@ -184,6 +184,7 @@
       <span>{{ t('main.page', page=logs_page, pages=logs_pages) }}</span>
       {% if logs_page < logs_pages %}
         <a class="btn secondary" href="{{ url_for('admin.dashboard', users_page=users_page, songs_page=songs_page, comments_page=comments_page, reports_page=reports_page, logs_page=logs_page+1) }}">{{ t('main.next') }}</a>
+      {% endif %}
     
     </div>
   </div>

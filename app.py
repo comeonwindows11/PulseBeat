@@ -137,5 +137,9 @@ app = create_app()
 
 
 if __name__ == "__main__":
+    # Render fournit un port via la variable d'environnement PORT
+    port = int(os.environ.get("PORT", 5000))
+    # On force l'hôte à 0.0.0.0 pour être accessible de l'extérieur
+    app.run(host="0.0.0.0", port=port)
     app.run(debug=True)
 

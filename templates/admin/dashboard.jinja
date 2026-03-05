@@ -10,6 +10,14 @@
 </div>
 {% endif %}
 
+{% if moderation_status and moderation_status.status == "alert" %}
+<div class="card alert-card">
+  <h3>{{ t('admin.moderation_alert') }}</h3>
+  <p>{{ moderation_status.message }}</p>
+  <p class="muted small">{{ moderation_status.updated_at }}</p>
+</div>
+{% endif %}
+
 <section class="grid two-cols">
   <div class="card">
     <h2>{{ t('admin.create_admin') }}</h2>

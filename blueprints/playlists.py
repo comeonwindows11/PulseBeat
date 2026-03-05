@@ -9,6 +9,7 @@ from auth_helpers import (
     get_session_user_oid,
     login_required,
     parse_object_id,
+    register_auto_moderation_violation,
     serialize_song,
     song_stream_url,
     send_email_message,
@@ -135,6 +136,12 @@ def list_playlists():
         collaborator_ids = parse_collaborator_ids(request.form.getlist("collaborator_ids"), user_oid)
         if not name:
             flash(tr("flash.playlists.name_required"), "danger")
+            return redirect(url_for("playlists.list_playlists"))
+        if contains_profanity(name):
+            moderation = register_auto_moderation_violation(user_oid, "playlist_create")
+            flash(tr("flash.moderation.blocked", remaining=moderation.get("remaining", 0)), "danger")
+            if moderation.get("banned"):
+                flash(tr("flash.moderation.auto_banned"), "danger")
             return redirect(url_for("playlists.list_playlists"))
         if visibility not in PLAYLIST_VISIBILITY_VALUES:
             visibility = "private"
@@ -382,6 +389,12 @@ def update_playlist(playlist_id):
     visibility = request.form.get("visibility", "private").strip().lower()
     if not name:
         flash(tr("flash.playlists.name_required"), "danger")
+        return redirect(url_for("playlists.playlist_detail", playlist_id=playlist_id))
+    if contains_profanity(name):
+        moderation = register_auto_moderation_violation(user_oid, "playlist_edit")
+        flash(tr("flash.moderation.blocked", remaining=moderation.get("remaining", 0)), "danger")
+        if moderation.get("banned"):
+            flash(tr("flash.moderation.auto_banned"), "danger")
         return redirect(url_for("playlists.playlist_detail", playlist_id=playlist_id))
     if visibility not in PLAYLIST_VISIBILITY_VALUES:
         visibility = "private"

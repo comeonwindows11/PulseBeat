@@ -1,6 +1,25 @@
 (function () {
   const i18n = window.I18N || {};
 
+  const DISPOSABLE_EMAIL_DOMAINS = new Set([
+    "10minutemail.com", "10minutemail.net", "guerrillamail.com", "mailinator.com",
+    "temp-mail.org", "tempmail.dev", "tempmailo.com", "yopmail.com",
+    "dispostable.com", "sharklasers.com", "getnada.com", "trashmail.com"
+  ]);
+
+  function isDisposableEmail(email) {
+    const value = (email || "").trim().toLowerCase();
+    const at = value.lastIndexOf("@");
+    if (at <= 0 || at === value.length - 1) return false;
+    const domain = value.slice(at + 1);
+    if (!domain) return false;
+    if (DISPOSABLE_EMAIL_DOMAINS.has(domain)) return true;
+    for (const d of DISPOSABLE_EMAIL_DOMAINS) {
+      if (domain.endsWith(`.${d}`)) return true;
+    }
+    return false;
+  }
+
   const menuBtn = document.getElementById("menu-toggle");
   const nav = document.getElementById("main-nav");
 
@@ -60,6 +79,9 @@
   if (confirmNo) confirmNo.addEventListener("click", () => hideModal(confirmModal));
 
   const reportModal = document.getElementById("report-modal");
+  const tempEmailModal = document.getElementById("temp-email-modal");
+  const tempEmailProceed = document.getElementById("temp-email-proceed");
+  const tempEmailCancel = document.getElementById("temp-email-cancel");
   const reportTitle = document.getElementById("report-modal-title");
   const reportForm = document.getElementById("report-modal-form");
   const reportCancel = document.getElementById("report-modal-cancel");
@@ -244,6 +266,7 @@
     userPickerApply.addEventListener("click", () => {
       commitPickerToTarget();
       hideModal(userPickerModal);
+    hideModal(tempEmailModal);
     });
   }
   if (userPickerCancel) userPickerCancel.addEventListener("click", () => hideModal(userPickerModal));
@@ -568,6 +591,55 @@
     return ok;
   }
 
+  const registerForm = document.getElementById("register-form");
+  const registerEmail = document.getElementById("register-email");
+  const registerTempAck = document.getElementById("register-temp-email-ack");
+
+  function resetTempEmailAck() {
+    if (registerTempAck) registerTempAck.value = "0";
+    if (registerForm) delete registerForm.dataset.tempEmailConfirmed;
+  }
+
+  if (registerEmail) {
+    registerEmail.addEventListener("input", () => {
+      resetTempEmailAck();
+    });
+  }
+
+  if (registerForm) {
+    registerForm.addEventListener("submit", (event) => {
+      if (!registerEmail) return;
+      const alreadyConfirmed = registerForm.dataset.tempEmailConfirmed === "1";
+      if (alreadyConfirmed) return;
+      if (!isDisposableEmail(registerEmail.value)) {
+        resetTempEmailAck();
+        return;
+      }
+      event.preventDefault();
+      if (registerTempAck) registerTempAck.value = "0";
+      showModal(tempEmailModal);
+    });
+  }
+
+  if (tempEmailProceed) {
+    tempEmailProceed.addEventListener("click", () => {
+      if (!registerForm) return;
+      registerForm.dataset.tempEmailConfirmed = "1";
+      if (registerTempAck) registerTempAck.value = "1";
+      hideModal(tempEmailModal);
+      if (typeof registerForm.requestSubmit === "function") registerForm.requestSubmit();
+      else registerForm.submit();
+    });
+  }
+
+  if (tempEmailCancel) {
+    tempEmailCancel.addEventListener("click", () => {
+      resetTempEmailAck();
+      hideModal(tempEmailModal);
+      if (registerEmail && typeof registerEmail.focus === "function") registerEmail.focus();
+    });
+  }
+
   document.querySelectorAll("form").forEach((form) => {
     if (form.classList.contains("delete-song-form") || form.classList.contains("lang-form")) return;
     const visibleFields = Array.from(form.querySelectorAll("input, textarea, select")).filter((field) => field.type !== "hidden");
@@ -595,7 +667,7 @@
     });
   });
 
-  [confirmModal, reportModal, userPickerModal].forEach((modal) => {
+  [confirmModal, reportModal, userPickerModal, tempEmailModal].forEach((modal) => {
     if (!modal) return;
     modal.addEventListener("click", (event) => {
       if (event.target === modal) hideModal(modal);
@@ -607,6 +679,7 @@
     hideModal(confirmModal);
     hideModal(reportModal);
     hideModal(userPickerModal);
+    hideModal(tempEmailModal);
   });
 })();
 

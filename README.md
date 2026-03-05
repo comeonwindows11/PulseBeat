@@ -9,8 +9,11 @@ Application de streaming musical en `Flask` + `Jinja`, inspirée de YouTube Musi
 - Connexion Google OAuth
 - Les comptes Google ne gèrent pas leur mot de passe dans PulseBeat : pas de changement de mot de passe local, pas de lockout lié aux mots de passe compromis
 - Réinitialisation de mot de passe par e-mail
+- Avertissement à l'inscription pour e-mail temporaire avec confirmation explicite avant création du compte
 - Vérification des mots de passe compromis
+- Verrouillage progressif de connexion par adresse e-mail après échecs répétés (10 tentatives), avec durée doublée à chaque cycle
 - Changement de mot de passe et lock de sécurité si mot de passe compromis
+- Invalidation globale des sessions après changement ou réinitialisation de mot de passe
 - Ajout de chansons par URL ou upload (avec détection automatique des balises ID3)
 - Lecture audio réelle avec lecteur flottant persistant entre les pages
 - Contrôles lecture/pause/suivant/précédent
@@ -21,6 +24,7 @@ Application de streaming musical en `Flask` + `Jinja`, inspirée de YouTube Musi
 - Page de détail par chanson
 - Like / dislike / commentaires / réponses
 - Signalement de chansons et commentaires
+- Modération automatique des termes vulgaires sur chansons, playlists et commentaires (avertissements + ban automatique au 3e strike)
 - Playlists publiques, privées ou non répertoriées
 - Collaborateurs de playlist
 - Notifications e-mail lors des partages de playlist
@@ -45,6 +49,13 @@ Comportement actuel :
 - les comptes Google sont considérés comme vérifiés automatiquement
 - les comptes Google ne passent pas par la logique locale de fuite de mot de passe ni par le changement de mot de passe PulseBeat
 - les demandes de réinitialisation de mot de passe sur un compte Google sont refusées côté serveur avec une erreur générique `501` (sans divulguer le provider)
+
+## Auth et sessions
+
+- Après 10 échecs de connexion pour une adresse e-mail existante, la connexion est verrouillée pendant 10 minutes pour cette adresse.
+- Si ce seuil est atteint à nouveau, la durée est doublée (10, 20, 40, 80, ... minutes).
+- Une connexion réussie avec les bons identifiants réinitialise le compteur et le niveau de verrouillage.
+- Après un changement de mot de passe ou une réinitialisation, toutes les sessions existantes sont invalidées globalement ; une reconnexion est requise sur tous les appareils.
 
 ## Lecteur audio
 
@@ -94,6 +105,14 @@ Les validations en direct couvrent notamment :
 Si JavaScript est désactivé :
 - un écran bloquant s'affiche sur toutes les routes utilisant le layout principal
 - l'application reste volontairement inutilisable tant que JavaScript n'est pas réactivé
+
+## Modération automatique
+
+- Les créations/modifications de chansons et playlists, ainsi que les commentaires, sont bloqués si des termes vulgaires connus sont détectés.
+- L'utilisateur reçoit un avertissement avec le nombre restant avant bannissement automatique.
+- Chaque détection incrémente un compteur d'infractions.
+- Au 3e strike, le compte est banni automatiquement (durée indéfinie) jusqu'à débannissement manuel par un admin.
+- Une alerte est ajoutée au dashboard admin et une notification admin peut être envoyée par e-mail.
 
 ## Notifications e-mail
 

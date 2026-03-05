@@ -5,13 +5,14 @@
 <section class="auth-wrap">
   <div class="card auth-card">
     <h1>{{ t('auth.register') }}</h1>
-    <form method="post" class="stack" data-validate-form="1">
+    <form id="register-form" method="post" class="stack" data-validate-form="1">
       <label>{{ t('auth.username') }}
         <input type="text" id="register-username" name="username" minlength="3" maxlength="32" pattern="[A-Za-z0-9_.-]{3,32}" data-remote-check="username" data-remote-url="{{ url_for('accounts.check_availability') }}" required>
       </label>
       <label>{{ t('auth.email') }}
         <input type="email" id="register-email" name="email" data-remote-check="email" data-remote-url="{{ url_for('accounts.check_availability') }}" required>
       </label>
+      <input type="hidden" id="register-temp-email-ack" name="temp_email_ack" value="0">
       <p class="muted small">{{ t('auth.verification_email_sent_note') }}</p>
       <label>{{ t('auth.password') }}
         <input type="password" id="register-password" name="password" minlength="6" data-password-policy="1" required>
@@ -25,5 +26,15 @@
     <p>{{ t('auth.have_account') }} <a href="{{ url_for('accounts.login') }}">{{ t('auth.login') }}</a></p>
   </div>
 </section>
-{% endblock %}
 
+<div id="temp-email-modal" class="modal hidden" aria-hidden="true" role="dialog" aria-modal="true">
+  <div class="modal-card">
+    <h3>{{ t('auth.temp_email_warning_title') }}</h3>
+    <p>{{ t('auth.temp_email_warning_body') }}</p>
+    <div class="row-actions">
+      <button type="button" id="temp-email-cancel" class="btn secondary">{{ t('modal.cancel') }}</button>
+      <button type="button" id="temp-email-proceed" class="btn">{{ t('auth.temp_email_warning_proceed') }}</button>
+    </div>
+  </div>
+</div>
+{% endblock %}

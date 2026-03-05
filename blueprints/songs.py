@@ -9,9 +9,11 @@ from auth_helpers import (
     allowed_file,
     can_access_song,
     cleanup_song,
+    contains_profanity,
     get_session_user_oid,
     login_required,
     parse_object_id,
+    register_auto_moderation_violation,
     save_uploaded_file,
     serialize_song,
     song_owner_matches,
@@ -197,6 +199,13 @@ def add_song():
         flash(tr("flash.songs.title_required"), "danger")
         return redirect(url_for("songs.new_song"))
 
+    if contains_profanity(" ".join([title, artist, genre])):
+        moderation = register_auto_moderation_violation(user_oid, "song_create")
+        flash(tr("flash.moderation.blocked", remaining=moderation.get("remaining", 0)), "danger")
+        if moderation.get("banned"):
+            flash(tr("flash.moderation.auto_banned"), "danger")
+        return redirect(url_for("songs.new_song"))
+
     if not song_url and (not file or not file.filename):
         flash(tr("flash.songs.source_required"), "danger")
         return redirect(url_for("songs.new_song"))
@@ -278,6 +287,13 @@ def edit_song(song_id):
     genre = request.form.get("genre", "").strip()
     if not title:
         flash(tr("flash.songs.title_required"), "danger")
+        return redirect(url_for("songs.song_detail", song_id=song_id))
+
+    if contains_profanity(" ".join([title, artist, genre])):
+        moderation = register_auto_moderation_violation(user_oid, "song_edit")
+        flash(tr("flash.moderation.blocked", remaining=moderation.get("remaining", 0)), "danger")
+        if moderation.get("banned"):
+            flash(tr("flash.moderation.auto_banned"), "danger")
         return redirect(url_for("songs.song_detail", song_id=song_id))
 
     extensions.songs_col.update_one(
@@ -517,6 +533,13 @@ def add_comment(song_id):
         abort(404)
     if not can_access_song(song, user_oid):
         abort(403)
+
+    if contains_profanity(content):
+        moderation = register_auto_moderation_violation(user_oid, "comment_create")
+        flash(tr("flash.moderation.blocked", remaining=moderation.get("remaining", 0)), "danger")
+        if moderation.get("banned"):
+            flash(tr("flash.moderation.auto_banned"), "danger")
+        return redirect(url_for("songs.song_detail", song_id=song_id))
 
     doc = {
         "song_id": song_oid,

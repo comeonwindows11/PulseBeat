@@ -2,7 +2,7 @@ import hashlib
 import html
 import secrets
 import smtplib
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.message import EmailMessage
 from math import ceil
 
@@ -18,6 +18,7 @@ from auth_helpers import (
     can_access_song,
     cleanup_song,
     cleanup_user,
+    is_disposable_email,
     get_session_user_oid,
     is_email_verified,
     is_user_banned,
@@ -39,6 +40,62 @@ bp = Blueprint("accounts", __name__)
 
 def root_admin_exists():
     return extensions.users_col.count_documents({"is_admin": True, "is_root_admin": True}, limit=1) > 0
+
+
+def _login_lock_minutes(level: int) -> int:
+    safe_level = max(1, int(level or 1))
+    return 10 * (2 ** (safe_level - 1))
+
+
+def _register_login_failure(user):
+    if not user:
+        return {"locked": False, "minutes": 0, "remaining_attempts": 0}
+
+    now = datetime.utcnow()
+    failures = int(user.get("login_failure_count", 0) or 0) + 1
+    if failures >= 10:
+        level = int(user.get("login_lock_level", 0) or 0) + 1
+        minutes = _login_lock_minutes(level)
+        lock_until = now + timedelta(minutes=minutes)
+        extensions.users_col.update_one(
+            {"_id": user["_id"]},
+            {
+                "$set": {
+                    "login_lock_level": level,
+                    "login_lock_until": lock_until,
+                    "login_failure_count": 0,
+                }
+            },
+        )
+        return {"locked": True, "minutes": minutes, "remaining_attempts": 0}
+
+    remaining = max(0, 10 - failures)
+    extensions.users_col.update_one(
+        {"_id": user["_id"]},
+        {"$set": {"login_failure_count": failures}},
+    )
+    return {"locked": False, "minutes": 0, "remaining_attempts": remaining}
+
+
+def _reset_login_lock(user_oid):
+    extensions.users_col.update_one(
+        {"_id": user_oid},
+        {
+            "$set": {
+                "login_failure_count": 0,
+                "login_lock_level": 0,
+                "login_lock_until": None,
+            }
+        },
+    )
+
+
+def _session_version(user) -> int:
+    return int(user.get("session_token_version", 0) or 0)
+
+
+def _bump_session_version(user_oid):
+    extensions.users_col.update_one({"_id": user_oid}, {"$inc": {"session_token_version": 1}})
 
 
 def find_user_by_email(email: str):
@@ -393,6 +450,10 @@ def register():
             flash(tr("flash.accounts.email_exists"), "danger")
             return redirect(url_for("accounts.register"))
 
+        if is_disposable_email(email) and request.form.get("temp_email_ack", "0") != "1":
+            flash(tr("flash.accounts.temp_email_confirm_required"), "warning")
+            return redirect(url_for("accounts.register"))
+
         ok, msg = validate_password_for_set(password, confirm_password, allow_unavailable=True)
         if not ok:
             flash(msg, "danger")
@@ -436,7 +497,20 @@ def login():
         password = request.form.get("password", "")
 
         user = find_user_by_email(email)
+        now = datetime.utcnow()
+        if user:
+            lock_until = user.get("login_lock_until")
+            if lock_until and lock_until > now:
+                minutes_left = max(1, int((lock_until - now).total_seconds() // 60) + 1)
+                flash(tr("flash.accounts.login_locked", minutes=minutes_left), "danger")
+                return redirect(url_for("accounts.login"))
+
         if not user or not check_password_hash(user.get("password_hash", ""), password):
+            if user:
+                lock_info = _register_login_failure(user)
+                if lock_info.get("locked"):
+                    flash(tr("flash.accounts.login_locked", minutes=lock_info.get("minutes", 10)), "danger")
+                    return redirect(url_for("accounts.login"))
             flash(tr("flash.accounts.invalid_credentials"), "danger")
             return redirect(url_for("accounts.login"))
         if is_user_banned(user):
@@ -466,8 +540,10 @@ def login():
         elif status == "unavailable":
             flash(tr("flash.accounts.password_check_unavailable"), "warning")
 
+        _reset_login_lock(user["_id"])
         session.pop("pending_verification_email", None)
         session["user_id"] = str(user["_id"])
+        session["session_token_version"] = _session_version(user)
         flash(tr("flash.accounts.logged_in"), "success")
         return redirect(url_for("main.index"))
 
@@ -568,13 +644,16 @@ def google_callback():
                 "created_at": datetime.utcnow(),
             }
         ).inserted_id
+        created_user = extensions.users_col.find_one({"_id": user_id}, {"session_token_version": 1}) or {}
         session["user_id"] = str(user_id)
+        session["session_token_version"] = int(created_user.get("session_token_version", 0) or 0)
     else:
         extensions.users_col.update_one(
             {"_id": existing["_id"]},
             {"$set": {"email_verified": True, "email_verified_at": existing.get("email_verified_at") or datetime.utcnow(), "auth_provider": "google", "require_password_change": False}, "$unset": {"password_compromised_at": ""}},
         )
         session["user_id"] = str(existing["_id"])
+        session["session_token_version"] = _session_version(existing)
 
     flash(tr("flash.accounts.logged_in"), "success")
     return redirect(url_for("main.index"))
@@ -675,6 +754,7 @@ def reset_password(token):
                 }
             },
         )
+        _bump_session_version(user["_id"])
         flash(tr("flash.accounts.password_reset_success"), "success")
         return redirect(url_for("accounts.login"))
 
@@ -799,6 +879,9 @@ def change_password():
         {"_id": user_oid},
         {"$set": {"password_hash": generate_password_hash(new_password), "require_password_change": False, "auth_provider": "local"}},
     )
+    _bump_session_version(user_oid)
+    refreshed = extensions.users_col.find_one({"_id": user_oid}, {"session_token_version": 1}) or {}
+    session["session_token_version"] = int(refreshed.get("session_token_version", 0) or 0)
     flash(tr("flash.accounts.password_changed"), "success")
     return redirect(url_for("accounts.manage_account"))
 

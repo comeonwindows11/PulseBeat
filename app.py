@@ -1,6 +1,6 @@
 import os
 from datetime import UTC, datetime
-from flask import Flask, flash, redirect, render_template, request, url_for
+from flask import Flask, flash, redirect, render_template, request, session, url_for
 from dotenv import load_dotenv
 
 import extensions
@@ -64,6 +64,10 @@ def create_app():
     extensions.users_col.update_many({"email_verification_sent_at": {"$exists": False}}, {"$set": {"email_verification_sent_at": None}})
     extensions.users_col.update_many({"auth_provider": {"$exists": False}}, {"$set": {"auth_provider": "local"}})
     extensions.users_col.update_many({"auth_provider": "google"}, {"$set": {"require_password_change": False}, "$unset": {"password_compromised_at": ""}})
+    extensions.users_col.update_many({"session_token_version": {"$exists": False}}, {"$set": {"session_token_version": 0}})
+    extensions.users_col.update_many({"login_failure_count": {"$exists": False}}, {"$set": {"login_failure_count": 0}})
+    extensions.users_col.update_many({"login_lock_level": {"$exists": False}}, {"$set": {"login_lock_level": 0}})
+    extensions.users_col.update_many({"login_lock_until": {"$exists": False}}, {"$set": {"login_lock_until": None}})
     for user in extensions.users_col.find({}, {"email": 1, "username": 1}):
         extensions.users_col.update_one(
             {"_id": user["_id"]},
@@ -97,7 +101,14 @@ def create_app():
         user_oid = get_session_user_oid()
         if not user_oid:
             return None
-        user = extensions.users_col.find_one({"_id": user_oid}, {"require_password_change": 1, "auth_provider": 1})
+        user = extensions.users_col.find_one({"_id": user_oid}, {"require_password_change": 1, "auth_provider": 1, "session_token_version": 1})
+        session_version = int(session.get("session_token_version", -1))
+        user_version = int((user or {}).get("session_token_version", 0) or 0)
+        if not user or session_version != user_version:
+            session.clear()
+            if endpoint not in {"accounts.login", "accounts.google_login", "accounts.google_callback", "accounts.setup_admin", "static"} and not endpoint.startswith("static"):
+                flash(t("flash.accounts.session_invalidated"), "warning")
+            return redirect(url_for("accounts.login"))
         if not user or user.get("auth_provider") == "google" or not user.get("require_password_change", False):
             return None
 

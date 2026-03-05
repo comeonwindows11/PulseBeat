@@ -68,11 +68,11 @@ def dashboard():
         extensions.song_comments_col.find().sort("created_at", -1).skip((comments_page - 1) * per_page).limit(per_page)
     )
 
-    reports_total = extensions.song_reports_col.count_documents({})
+    reports_total = extensions.song_reports_col.count_documents({"status": "open"})
     reports_pages = max(1, ceil(reports_total / per_page)) if reports_total else 1
     reports_page = min(reports_page, reports_pages)
     reports = list(
-        extensions.song_reports_col.find().sort("created_at", -1).skip((reports_page - 1) * per_page).limit(per_page)
+        extensions.song_reports_col.find({"status": "open"}).sort("created_at", -1).skip((reports_page - 1) * per_page).limit(per_page)
     )
 
     logs_total = extensions.admin_audit_col.count_documents({})
@@ -82,6 +82,7 @@ def dashboard():
 
     me = extensions.users_col.find_one({"_id": get_session_user_oid()})
     password_check_status = extensions.system_status_col.find_one({"key": "password_leak_service"})
+    moderation_status = extensions.system_status_col.find_one({"key": "auto_moderation"})
 
     return render_template(
         "admin/dashboard.jinja",
@@ -103,6 +104,7 @@ def dashboard():
         now=datetime.utcnow(),
         me=me,
         password_check_status=password_check_status,
+        moderation_status=moderation_status,
     )
 
 

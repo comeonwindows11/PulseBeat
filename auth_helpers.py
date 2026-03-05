@@ -19,6 +19,50 @@ VISIBILITY_VALUES = {"public", "private", "unlisted"}
 PASSWORD_POLICY_RE = re.compile(r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{6,}$")
 USERNAME_POLICY_RE = re.compile(r"^[A-Za-z0-9_.-]{3,32}$")
 
+DISPOSABLE_EMAIL_DOMAINS = {
+    "10minutemail.com",
+    "10minutemail.net",
+    "guerrillamail.com",
+    "mailinator.com",
+    "temp-mail.org",
+    "tempmail.dev",
+    "tempmailo.com",
+    "yopmail.com",
+    "dispostable.com",
+    "sharklasers.com",
+    "getnada.com",
+    "trashmail.com",
+}
+
+PROFANITY_TERMS = {
+    "fuck",
+    "fucking",
+    "shit",
+    "bitch",
+    "asshole",
+    "bastard",
+    "dick",
+    "motherfucker",
+    "fuk",
+    "f*ck",
+    "merde",
+    "putain",
+    "connard",
+    "connasse",
+    "encule",
+    "enculé",
+    "enculee",
+    "enculée",
+    "salope",
+    "batard",
+    "bâtard",
+    "nique",
+    "niquer",
+}
+
+AUTO_MODERATION_BAN_THRESHOLD = 3
+AUTO_MODERATION_BAN_DAYS = 36500
+
 FEATURE_DEFAULTS_FULL = {
     "usage_mode": "full",
     "enable_password_reset": True,
@@ -61,6 +105,85 @@ def normalize_email(email: str) -> str:
 
 def normalize_username(username: str) -> str:
     return (username or "").strip().lower()
+
+
+def is_disposable_email(email: str) -> bool:
+    normalized = normalize_email(email)
+    if "@" not in normalized:
+        return False
+    domain = normalized.split("@", 1)[1].strip().lower()
+    if not domain:
+        return False
+    return domain in DISPOSABLE_EMAIL_DOMAINS or any(domain.endswith(f".{d}") for d in DISPOSABLE_EMAIL_DOMAINS)
+
+
+def contains_profanity(text_value: str) -> bool:
+    value = (text_value or "").lower()
+    if not value:
+        return False
+    compact = re.sub(r"\s+", " ", value)
+    return any(term in compact for term in PROFANITY_TERMS)
+
+
+def register_auto_moderation_violation(user_oid, source: str):
+    user = extensions.users_col.find_one({"_id": user_oid}, {"username": 1, "auto_moderation_strikes": 1, "is_root_admin": 1})
+    if not user:
+        return {"strikes": 0, "remaining": AUTO_MODERATION_BAN_THRESHOLD, "banned": False}
+
+    now = datetime.utcnow()
+    current = int(user.get("auto_moderation_strikes", 0) or 0)
+    strikes = current + 1
+    remaining = max(0, AUTO_MODERATION_BAN_THRESHOLD - strikes)
+
+    set_payload = {
+        "auto_moderation_strikes": strikes,
+        "auto_moderation_last_source": source,
+        "auto_moderation_last_at": now,
+    }
+
+    banned = False
+    if strikes >= AUTO_MODERATION_BAN_THRESHOLD and not user.get("is_root_admin", False):
+        set_payload["banned_until"] = now + timedelta(days=AUTO_MODERATION_BAN_DAYS)
+        set_payload["auto_banned"] = True
+        banned = True
+
+    extensions.users_col.update_one({"_id": user_oid}, {"$set": set_payload})
+
+    username = user.get("username", "user")
+    alert_message = tr(
+        "moderation.admin_alert_message",
+        username=username,
+        source=source,
+        strikes=strikes,
+        remaining=remaining,
+    )
+
+    if extensions.system_status_col is not None:
+        extensions.system_status_col.update_one(
+            {"key": "auto_moderation"},
+            {
+                "$set": {
+                    "key": "auto_moderation",
+                    "status": "alert",
+                    "message": alert_message,
+                    "updated_at": now,
+                    "username": username,
+                    "source": source,
+                    "strikes": strikes,
+                    "remaining": remaining,
+                    "banned": banned,
+                }
+            },
+            upsert=True,
+        )
+
+    notify_admins(
+        "email.admin_alert_subject",
+        "email.admin_alert_body",
+        message=alert_message,
+    )
+
+    return {"strikes": strikes, "remaining": remaining, "banned": banned}
 
 
 def username_policy_ok(username: str) -> bool:

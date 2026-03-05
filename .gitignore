@@ -1,5 +1,6 @@
 # Python
 __pycache__/
+.vs/
 *.py[cod]
 *$py.class
 

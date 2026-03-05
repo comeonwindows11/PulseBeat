@@ -128,6 +128,40 @@ Comportement notable :
   - 5 secondes ou plus : redémarrage de la chanson courante
 - ce comportement s'applique aussi aux boutons média système compatibles (clavier, écouteurs, contrôles OS)
 
+### Sous-titres en plein écran (cas par cas)
+
+Le lecteur charge les sous-titres via `GET /songs/<song_id>/lyrics` à chaque changement de chanson.
+
+Cas par cas :
+
+1. Vue du lecteur `mini` ou `normale`
+- Le panneau de sous-titres est caché.
+- Aucun rendu de lignes de lyrics n'est affiché dans ces modes.
+
+2. Vue `plein écran` + chanson sans sous-titres
+- Le panneau s'affiche.
+- Le message "Aucun sous-titre disponible" est affiché.
+
+3. Vue `plein écran` + sous-titres synchronisables (`lyrics_auto_sync=true` + cues)
+- Le lecteur affiche un mode synchronisé.
+- La ligne active est déterminée selon le timestamp courant.
+- 3 lignes sont rendues autour de la position courante : ligne précédente, ligne active, ligne suivante.
+- La ligne active est visuellement mise en évidence.
+- Le rendu est recalculé pendant la lecture et après un seek.
+
+4. Vue `plein écran` + sous-titres non synchronisés (pas de cues exploitables)
+- Le lecteur affiche le texte complet des paroles dans un bloc `pre`.
+- Aucun suivi ligne-par-ligne par timestamp n'est appliqué.
+
+5. Changement de chanson pendant la lecture
+- L'état lyrics est réinitialisé, puis rechargé pour la nouvelle chanson.
+- Si la requête lyrics échoue, le lecteur retombe proprement sur l'affichage "pas de sous-titres".
+
+6. Données prises en compte côté lecteur
+- `lyrics_text` : texte brut des sous-titres.
+- `lyrics_auto_sync` : indique si le mode synchronisé doit être tenté.
+- `lyrics_cues` : timestamps + texte utilisés pour le rendu synchronisé.
+
 ## Profils publics
 
 Chaque utilisateur possède une page publique accessible via `/users/<username>`.

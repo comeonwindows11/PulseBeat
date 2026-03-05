@@ -46,6 +46,10 @@
   const currentTimeEl = document.getElementById("time-current");
   const remainingTimeEl = document.getElementById("time-remaining");
   const waveform = document.getElementById("waveform");
+  const lyricsPanel = document.getElementById("player-lyrics-panel");
+  const lyricsCuesEl = document.getElementById("player-lyrics-cues");
+  const lyricsFullEl = document.getElementById("player-lyrics-full");
+  const lyricsEmptyEl = document.getElementById("player-lyrics-empty");
 
   if (!audio) return;
 
@@ -83,6 +87,7 @@
 
 
   let toastTimer = null;
+  let lyricsState = { songId: "", text: "", cues: [], autoSync: false };
 
   function normalizeViewMode(mode) {
     return ["mini", "normal", "fullscreen"].includes(mode) ? mode : "normal";
@@ -118,6 +123,7 @@
     if (playerViewStatus) playerViewStatus.textContent = viewModeLabel(state.viewMode);
     document.body.classList.toggle("player-fullscreen-open", state.viewMode === "fullscreen");
     syncPlayerOffset();
+    renderLyricsAt(audio.currentTime || 0);
   }
 
   function setViewMode(mode, persist) {
@@ -133,6 +139,113 @@
       setViewMode("fullscreen", true);
     } else {
       setViewMode("normal", true);
+    }
+  }
+
+  function clearLyricsUI() {
+    if (lyricsPanel) lyricsPanel.classList.add("hidden");
+    if (lyricsCuesEl) {
+      lyricsCuesEl.classList.add("hidden");
+      lyricsCuesEl.innerHTML = "";
+    }
+    if (lyricsFullEl) {
+      lyricsFullEl.classList.add("hidden");
+      lyricsFullEl.textContent = "";
+    }
+    if (lyricsEmptyEl) lyricsEmptyEl.classList.add("hidden");
+  }
+
+  function renderLyricsAt(timeSec) {
+    if (!lyricsPanel) return;
+    if (state.viewMode !== "fullscreen") {
+      lyricsPanel.classList.add("hidden");
+      return;
+    }
+
+    lyricsPanel.classList.remove("hidden");
+
+    const hasText = Boolean(lyricsState.text);
+    if (!hasText) {
+      if (lyricsEmptyEl) lyricsEmptyEl.classList.remove("hidden");
+      if (lyricsCuesEl) {
+        lyricsCuesEl.classList.add("hidden");
+        lyricsCuesEl.innerHTML = "";
+      }
+      if (lyricsFullEl) {
+        lyricsFullEl.classList.add("hidden");
+        lyricsFullEl.textContent = "";
+      }
+      return;
+    }
+
+    const cues = lyricsState.autoSync && Array.isArray(lyricsState.cues) ? lyricsState.cues : [];
+    if (cues.length) {
+      let idx = 0;
+      const t = Number(timeSec) || 0;
+      for (let i = 0; i < cues.length; i += 1) {
+        if ((Number(cues[i].time) || 0) <= t) idx = i;
+        else break;
+      }
+      const start = Math.max(0, idx - 1);
+      const end = Math.min(cues.length, idx + 2);
+      if (lyricsCuesEl) {
+        lyricsCuesEl.innerHTML = "";
+        for (let i = start; i < end; i += 1) {
+          const line = document.createElement("div");
+          line.className = `lyric-line${i === idx ? " active" : ""}`;
+          line.textContent = cues[i].text || "";
+          lyricsCuesEl.appendChild(line);
+        }
+        lyricsCuesEl.classList.remove("hidden");
+      }
+      if (lyricsFullEl) lyricsFullEl.classList.add("hidden");
+      if (lyricsEmptyEl) lyricsEmptyEl.classList.add("hidden");
+      return;
+    }
+
+    if (lyricsFullEl) {
+      lyricsFullEl.textContent = lyricsState.text;
+      lyricsFullEl.classList.remove("hidden");
+    }
+    if (lyricsCuesEl) lyricsCuesEl.classList.add("hidden");
+    if (lyricsEmptyEl) lyricsEmptyEl.classList.add("hidden");
+  }
+
+  async function loadLyricsForSong(song) {
+    if (!song || !song.id) {
+      lyricsState = { songId: "", text: "", cues: [], autoSync: false };
+      clearLyricsUI();
+      return;
+    }
+    if (lyricsState.songId === song.id) {
+      renderLyricsAt(audio.currentTime || 0);
+      return;
+    }
+
+    lyricsState = { songId: song.id, text: "", cues: [], autoSync: false };
+    clearLyricsUI();
+
+    try {
+      const res = await fetch(`/songs/${encodeURIComponent(song.id)}/lyrics`, {
+        credentials: "same-origin",
+        cache: "no-store",
+      });
+      if (!res.ok) {
+        renderLyricsAt(audio.currentTime || 0);
+        return;
+      }
+      const data = await res.json();
+      if (!data || !data.ok || !data.has_lyrics) {
+        renderLyricsAt(audio.currentTime || 0);
+        return;
+      }
+      if (lyricsState.songId !== song.id) return;
+      lyricsState.text = data.lyrics_text || "";
+      lyricsState.autoSync = Boolean(data.lyrics_auto_sync);
+      lyricsState.cues = Array.isArray(data.lyrics_cues) ? data.lyrics_cues : [];
+      renderLyricsAt(audio.currentTime || 0);
+    } catch (_e) {
+      renderLyricsAt(audio.currentTime || 0);
     }
   }
 
@@ -381,6 +494,7 @@
     updateModeUI();
     updateViewModeUI();
     updateMediaSession(song);
+    loadLyricsForSong(song);
     document.title = song ? `${song.title} - ${i18n.playerAlbum || "PulseBeat"}` : DEFAULT_PAGE_TITLE;
   }
 
@@ -469,6 +583,7 @@
       state.isPlaying = false;
       updateMeta(null);
       saveState();
+      clearLyricsUI();
       return;
     }
 
@@ -799,6 +914,7 @@
       seek.value = Math.floor((audio.currentTime / audio.duration) * 1000);
       if (currentTimeEl) currentTimeEl.textContent = formatTime(audio.currentTime);
       if (remainingTimeEl) remainingTimeEl.textContent = `-${formatTime(audio.duration - audio.currentTime)}`;
+      renderLyricsAt(audio.currentTime || 0);
     } else {
       seek.value = 0;
       if (currentTimeEl) currentTimeEl.textContent = "00:00";

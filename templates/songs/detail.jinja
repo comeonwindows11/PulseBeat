@@ -41,7 +41,7 @@
     </div>
 
     {% if song.can_delete %}
-      <form method="post" action="{{ url_for('songs.edit_song', song_id=song.id) }}" class="stack top-gap">
+      <form method="post" action="{{ url_for('songs.edit_song', song_id=song.id) }}" class="stack top-gap" enctype="multipart/form-data">
         <label>{{ t('main.field.title') }}
           <input type="text" name="title" value="{{ song.title }}" required>
         </label>
@@ -51,6 +51,23 @@
         <label>{{ t('main.field.genre') }}
           <input type="text" name="genre" value="{{ song.genre }}">
         </label>
+        {% if not song.has_lyrics %}
+        <input type="hidden" name="lyrics_text" value="" class="edit-lyrics-text">
+        <input type="hidden" name="lyrics_source" value="" class="edit-lyrics-source">
+        <button
+          type="button"
+          class="btn secondary detect-lyrics-btn retry-lyrics-btn"
+          data-song-id="{{ song.id }}"
+          data-song-title="{{ song.title }}"
+          data-song-artist="{{ song.artist }}"
+        >{{ t('song.lyrics_detect_button') }}</button>
+        <div class="stack hidden edit-lyrics-file-wrap">
+          <label>{{ t('song.lyrics_upload_optional') }}
+            <input type="file" name="lyrics_file" accept=".txt,.lrc" class="edit-lyrics-file-input">
+          </label>
+          <span class="muted small">{{ t('song.lyrics_upload_help') }}</span>
+        </div>
+        {% endif %}
         <button type="submit">{{ t('song.update') }}</button>
       </form>
     {% endif %}

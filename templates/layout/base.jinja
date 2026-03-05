@@ -92,7 +92,7 @@
   <main class="page-container">
     {% with messages = get_flashed_messages(with_categories=true) %}
       {% if messages %}
-        <div class="flash-list">
+        <div class="flash-list server-flash-list">
           {% for category, message in messages %}
             <div class="flash {{ category }}">{{ message }}</div>
           {% endfor %}
@@ -126,6 +126,25 @@
           <button type="submit" class="btn-danger">{{ t('song.report') }}</button>
         </div>
       </form>
+    </div>
+  </div>
+
+  <div id="lyrics-candidate-modal" class="modal hidden" aria-hidden="true" role="dialog" aria-modal="true">
+    <div class="modal-card modal-card-wide">
+      <h3 id="lyrics-candidate-title">{{ t('song.lyrics_candidate_title') }}</h3>
+      <p id="lyrics-candidate-meta" class="muted small"></p>
+      <pre id="lyrics-candidate-preview" class="lyrics-preview-box"></pre>
+      <div class="row-actions">
+        <button type="button" id="lyrics-candidate-reject" class="btn secondary">{{ t('song.lyrics_candidate_wrong') }}</button>
+        <button type="button" id="lyrics-candidate-accept" class="btn">{{ t('song.lyrics_use_candidate') }}</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="lyrics-loading-modal" class="modal hidden" aria-hidden="true" role="dialog" aria-modal="true">
+    <div class="modal-card">
+      <h3>{{ t('song.lyrics_loading_title') }}</h3>
+      <p id="lyrics-loading-step" class="muted small">{{ t('song.lyrics_loading_step_metadata') }}</p>
     </div>
   </div>
 
@@ -219,6 +238,12 @@
           </label>
         </div>
       </div>
+      <div id="player-lyrics-panel" class="player-lyrics-panel hidden" aria-live="polite">
+        <h4>{{ t('player.lyrics') }}</h4>
+        <div id="player-lyrics-cues" class="player-lyrics-cues hidden"></div>
+        <pre id="player-lyrics-full" class="player-lyrics-full hidden"></pre>
+        <p id="player-lyrics-empty" class="muted small hidden">{{ t('player.lyrics_none') }}</p>
+      </div>
     </div>
   </div>
 
@@ -270,13 +295,35 @@
       validationUsernameInvalid: {{ t('flash.accounts.username_invalid')|tojson }},
       appLoadingTags: {{ t('song.id3_loading')|tojson }},
       appTagsDone: {{ t('song.id3_done')|tojson }},
-      appTagsFail: {{ t('song.id3_fail')|tojson }}
+      appTagsFail: {{ t('song.id3_fail')|tojson }},
+      appLyricsDetecting: {{ t('song.lyrics_status_detecting')|tojson }},
+      appLyricsFoundMetadata: {{ t('song.lyrics_found_metadata')|tojson }},
+      appLyricsSearchingOnline: {{ t('song.lyrics_searching_online')|tojson }},
+      appLyricsCandidateTitle: {{ t('song.lyrics_candidate_title')|tojson }},
+      appLyricsUseCandidate: {{ t('song.lyrics_use_candidate')|tojson }},
+      appLyricsCandidateWrong: {{ t('song.lyrics_candidate_wrong')|tojson }},
+      appLyricsSearchNone: {{ t('song.lyrics_search_none')|tojson }},
+      appLyricsAddedManual: {{ t('song.lyrics_added_manual')|tojson }},
+      appLyricsLoadingTitle: {{ t('song.lyrics_loading_title')|tojson }},
+      appLyricsLoadingStepMetadata: {{ t('song.lyrics_loading_step_metadata')|tojson }},
+      appLyricsLoadingStepOnline: {{ t('song.lyrics_loading_step_online')|tojson }},
+      appMetadataEnriching: {{ t('song.metadata_enriching')|tojson }},
+      appLyricsLoadingStepLrc: {{ t('song.lyrics_loading_step_lrc')|tojson }},
+      appLyricsLrcSyncOk: {{ t('song.lyrics_lrc_sync_ok')|tojson }},
+      appLyricsLrcSyncFail: {{ t('song.lyrics_lrc_sync_fail')|tojson }},
+      appLyricsLoadingStepFile: {{ t('song.lyrics_loading_step_file')|tojson }},
+      appLyricsSyncStateSynced: {{ t('song.lyrics_sync_state_synced')|tojson }},
+      appLyricsSyncStateUnsynced: {{ t('song.lyrics_sync_state_unsynced')|tojson }},
+      appLyricsAutoSuccess: {{ t('song.lyrics_auto_success')|tojson }},
+      appLyricsAutoFail: {{ t('song.lyrics_auto_fail')|tojson }},
+      playerLyricsNone: {{ t('player.lyrics_none')|tojson }}
     };
   </script>
   <script src="{{ url_for('static', filename='js/app.js') }}"></script>
   <script src="{{ url_for('static', filename='js/player.js') }}"></script>
 </body>
 </html>
+
 
 
 

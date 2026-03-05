@@ -15,6 +15,13 @@ Application de streaming musical en `Flask` + `Jinja`, inspirée de YouTube Musi
 - Changement de mot de passe et lock de sécurité si mot de passe compromis
 - Invalidation globale des sessions après changement ou réinitialisation de mot de passe
 - Ajout de chansons par URL ou upload (avec détection automatique des balises ID3)
+- Enrichissement automatique artiste/genre après upload via recherche en ligne
+- Détection automatique des sous-titres (métadonnées audio + recherche multi-sources en ligne)
+- Normalisation titre/artiste pour améliorer le matching des sous-titres
+- Support des fichiers de sous-titres `.lrc` et `.txt` en fallback manuel
+- Traitement local des fichiers de sous-titres avec modal bloquante et feedback visuel clair
+- Synchronisation timeline activée pour les fichiers `.lrc` avec timestamps; mode non synchronisé pour `.txt` ou `.lrc` incomplet
+- Relance manuelle de la recherche de sous-titres depuis le formulaire d'ajout
 - Lecture audio réelle avec lecteur flottant persistant entre les pages
 - Contrôles lecture/pause/suivant/précédent
 - Lecteur avec vues `mini`, `normale` et `plein écran`
@@ -36,6 +43,54 @@ Application de streaming musical en `Flask` + `Jinja`, inspirée de YouTube Musi
 - Zone admin séparée
 - Interface bilingue français / anglais
 - Pages d'erreur personnalisées
+
+## Upload, modification et détection
+
+### Upload d'une chanson
+
+- L'utilisateur peut publier via URL audio directe ou upload de fichier (`.mp3`, `.wav`, `.ogg`, `.m4a`).
+- Si un fichier audio est uploadé, PulseBeat lit d'abord les métadonnées ID3 locales.
+- Ordre de priorité au remplissage automatique :
+  - `title`, `artist`, `genre` depuis les tags ID3 quand disponibles
+  - enrichissement Internet de `artist`/`genre` à partir du `title` si des champs restent vides
+- Si des paroles sont trouvées dans les métadonnées audio (ID3 `USLT`/`SYLT`), elles sont utilisées immédiatement.
+- Si aucune parole n'est trouvée en métadonnées, la recherche online est lancée avec fallback multi-sources.
+
+### Modification d'une chanson
+
+- Le propriétaire peut modifier `title`, `artist`, `genre`.
+- Le fichier audio source n'est pas remplacé en édition.
+- Pour les chansons sans sous-titres, un bouton de détection permet de relancer la récupération automatique.
+- Si l'automatique échoue, l'utilisateur peut ajouter un fichier de sous-titres (`.lrc` ou `.txt`).
+
+### Pipeline de détection des sous-titres
+
+Étapes générales :
+
+1. Vérification locale des métadonnées du fichier audio (ID3) en priorité.
+2. Si rien n'est trouvé : recherche online avec plusieurs fallback API/sources.
+3. Si toujours rien : fallback manuel via fichier de sous-titres (`.lrc`/`.txt`).
+
+Recherche online (ordre de fallback actuel) :
+
+- `lrclib` endpoint `/api/get`
+- `lrclib` endpoint `/api/search` avec variantes normalisées du titre
+- `lrclib` endpoint `/api/search?q=...` (requête combinée artiste+titre)
+- `Lyricsify` (scraping de la page normalisée artiste/titre)
+- `lyrics.ovh`
+
+### Détection artiste/genre (après upload)
+
+- Si `artist` ou `genre` manque après lecture des tags ID3, PulseBeat interroge une source online de métadonnées musicales (iTunes Search API).
+- Le meilleur résultat est sélectionné par similarité de titre.
+- Les champs manquants sont complétés automatiquement sans écraser les champs déjà fournis.
+
+### Fichiers `.lrc` et `.txt` (manuel)
+
+- `.lrc` : traitement local avec validation des timestamps.
+- `.txt` : traitement local en paroles non synchronisées.
+- Le modal de traitement affiche l'étape en cours et un message final indique si la synchronisation est active ou non.
+- Quand un fichier de sous-titres manuel est sélectionné, PulseBeat traite le fichier localement (sans relancer une recherche lyrics online depuis cet upload).
 
 ## Vérification d'e-mail
 
@@ -158,6 +213,19 @@ python app.py
 ```
 
 Puis ouvrir `http://127.0.0.1:5000`.
+
+
+## Recommandation d'hébergement
+
+En raison de la complexité actuelle de PulseBeat (lecteur persistant, modération, recherche/suggestions, e-mails transactionnels, workflows de sous-titres, zone admin), les hébergeurs low-end ne sont pas recommandés.
+
+Recommandé :
+- self-hosting (VPS/serveur dédié) avec ressources stables
+- ou un hébergeur payant de niveau production
+
+Non recommandé :
+- offres gratuites/ultra low-end avec CPU/RAM limités, sleep forcé ou quotas réseau très stricts
+
 
 ## Variables d'environnement
 

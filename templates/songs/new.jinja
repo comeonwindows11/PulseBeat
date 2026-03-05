@@ -1,5 +1,6 @@
 {% extends "layout/base.jinja" %}
-{% block title %}{{ t('main.add_song') }} - {{ app_name }}{% endblock %}
+{% block title %}{{ t('main.add_song') }} - {{ app_name }}
+  {% endblock %}
 
 {% block content %}
 <section class="page-stack">
@@ -25,6 +26,7 @@
         <label>{{ t('main.field.artist') }}
           <input type="text" name="artist" id="song-artist-input">
         </label>
+        <button type="button" id="retry-lyrics-btn" class="btn secondary" disabled>{{ t('song.lyrics_detect_button') }}</button>
         <label>{{ t('main.field.genre') }}
           <input type="text" name="genre" id="song-genre-input">
         </label>
@@ -34,7 +36,16 @@
         <label>{{ t('main.field.file') }}
           <input type="file" name="song_file" id="song-file-input" accept=".mp3,.wav,.ogg,.m4a">
           <span id="id3-status" class="muted small"></span>
+          <span id="lyrics-status" class="muted small"></span>
         </label>
+        <input type="hidden" name="lyrics_text" id="song-lyrics-text-input" value="">
+        <input type="hidden" name="lyrics_source" id="song-lyrics-source-input" value="">
+        <div id="lyrics-file-wrap" class="stack hidden">
+          <label>{{ t('song.lyrics_upload_optional') }}
+            <input type="file" name="lyrics_file" id="lyrics-file-input" accept=".txt,.lrc">
+          </label>
+          <span class="muted small">{{ t('song.lyrics_upload_help') }}</span>
+        </div>
         <label>{{ t('main.field.visibility') }}
           <select name="visibility" id="visibility-select">
             <option value="public">{{ t('main.visibility.public') }}</option>
@@ -61,13 +72,31 @@
 
     <div class="card feature-notes">
       <h2>{{ t('songs.new_tips_title') }}</h2>
+      {% if current_lang == 'fr' %}
       <ul class="feature-list">
-        <li>{{ t('songs.new_tip_tags') }}</li>
-        <li>{{ t('songs.new_tip_visibility') }}</li>
-        <li>{{ t('songs.new_tip_private') }}</li>
-        <li>{{ t('songs.new_tip_redirect') }}</li>
+        <li>Ajoute un fichier audio propre (mp3/wav/ogg/m4a) pour maximiser la détection automatique des métadonnées.</li>
+        <li>Après l'upload, PulseBeat essaie de remplir automatiquement le titre, l'artiste, le genre et les sous-titres.</li>
+        <li>Le bouton "Ajouter des sous-titres automatiquement" permet de relancer la recherche après correction du titre ou de l'artiste.</li>
+        <li>Si l'automatique échoue, ajoute un fichier <strong>.lrc</strong> pour activer la synchronisation avec la timeline.</li>
+        <li>Un fichier <strong>.txt</strong> est accepté aussi, mais sans synchronisation temporelle automatique.</li>
+        <li>Pour récupérer des lyrics manuellement, tu peux utiliser <a href="https://www.lyricsify.com/" target="_blank" rel="noopener noreferrer">Lyricsify</a>.</li>
+        <li>Public = visible pour tous; Non répertoriée = visible via lien; Privée = partage ciblé avec utilisateurs sélectionnés.</li>
+        <li>Après publication, tu seras redirigé vers "Mes chansons" pour vérifier immédiatement le résultat.</li>
       </ul>
+      {% else %}
+      <ul class="feature-list">
+        <li>Upload a clean audio file (mp3/wav/ogg/m4a) to maximize automatic metadata detection.</li>
+        <li>After upload, PulseBeat tries to auto-fill title, artist, genre, and subtitles.</li>
+        <li>The "Add subtitles automatically" button lets you retry after updating title or artist fields.</li>
+        <li>If auto-detection fails, upload a <strong>.lrc</strong> file to enable timeline synchronization.</li>
+        <li>A <strong>.txt</strong> file is also supported, but without automatic time synchronization.</li>
+        <li>For manual lyrics lookup, you can use <a href="https://www.lyricsify.com/" target="_blank" rel="noopener noreferrer">Lyricsify</a>.</li>
+        <li>Public = visible to everyone; Unlisted = visible by link; Private = shared only with selected users.</li>
+        <li>After publishing, you will be redirected to "My songs" for immediate verification.</li>
+      </ul>
+      {% endif %}
     </div>
   </section>
 </section>
+
 {% endblock %}

@@ -53,7 +53,7 @@ def _register_login_failure(user):
 
     now = datetime.utcnow()
     failures = int(user.get("login_failure_count", 0) or 0) + 1
-    if failures >= 10:
+    if failures >= 6:
         level = int(user.get("login_lock_level", 0) or 0) + 1
         minutes = _login_lock_minutes(level)
         lock_until = now + timedelta(minutes=minutes)
@@ -69,7 +69,7 @@ def _register_login_failure(user):
         )
         return {"locked": True, "minutes": minutes, "remaining_attempts": 0}
 
-    remaining = max(0, 10 - failures)
+    remaining = max(0, 6 - failures)
     extensions.users_col.update_one(
         {"_id": user["_id"]},
         {"$set": {"login_failure_count": failures}},
@@ -110,6 +110,15 @@ def find_user_by_username(username: str):
     if not normalized:
         return None
     return extensions.users_col.find_one({"username_normalized": normalized})
+
+
+def find_user_by_login(identifier: str):
+    raw = (identifier or "").strip()
+    if not raw:
+        return None
+    if "@" in raw:
+        return find_user_by_email(raw)
+    return find_user_by_username(raw)
 
 
 def validate_username_for_create(username: str):
@@ -364,6 +373,99 @@ def _load_verification_user_from_token(token: str):
     return user, ""
 
 
+def _account_unlock_serializer():
+    salt = current_app.config.get("ACCOUNT_UNLOCK_SALT", "pulsebeat-account-unlock")
+    return URLSafeTimedSerializer(current_app.secret_key, salt=salt)
+
+
+def _account_unlock_fingerprint(user):
+    lock_until = user.get("login_lock_until")
+    lock_until_iso = lock_until.isoformat() if isinstance(lock_until, datetime) else ""
+    raw = "|".join(
+        [
+            str(user.get("_id", "")),
+            str(user.get("password_hash", "")),
+            str(int(user.get("login_lock_level", 0) or 0)),
+            str(int(user.get("login_failure_count", 0) or 0)),
+            lock_until_iso,
+        ]
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _build_account_unlock_link(user):
+    token = _account_unlock_serializer().dumps({"uid": str(user["_id"]), "fp": _account_unlock_fingerprint(user)})
+    base_url = current_app.config.get("APP_BASE_URL", "").strip()
+    if base_url:
+        return f"{base_url.rstrip('/')}{url_for('accounts.unlock_account', token=token)}"
+    return url_for("accounts.unlock_account", token=token, _external=True)
+
+
+def _send_account_unlock_email(recipient_email: str, username: str, unlock_link: str):
+    expires_minutes = int(current_app.config.get("ACCOUNT_UNLOCK_TOKEN_MAX_AGE", 3600) / 60)
+    username_safe = html.escape(username or "user")
+    unlock_link_safe = html.escape(unlock_link)
+    plain_text = (
+        f"{tr('auth.unlock_email_plain_greeting', username=username)}\n\n"
+        f"{tr('auth.unlock_email_plain_instruction')}\n{unlock_link}\n\n"
+        f"{tr('auth.unlock_email_plain_expiry', expires_minutes=expires_minutes)}\n\n"
+        f"{tr('auth.unlock_email_ignore')}"
+    )
+    html_body = f"""
+<!doctype html>
+<html>
+  <body style="margin:0;padding:0;background:#f3f6fb;font-family:Arial,Helvetica,sans-serif;color:#1b2430;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f3f6fb;padding:24px 0;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="640" cellspacing="0" cellpadding="0" style="max-width:640px;width:100%;background:#ffffff;border-radius:14px;overflow:hidden;border:1px solid #e3eaf3;">
+            <tr>
+              <td style="background:linear-gradient(135deg,#ff8a1f,#ff4f4f);padding:20px 28px;color:#fff;font-size:22px;font-weight:700;">PulseBeat</td>
+            </tr>
+            <tr>
+              <td style="padding:28px;">
+                <h1 style="margin:0 0 14px 0;font-size:22px;line-height:1.3;color:#101828;">{html.escape(tr('auth.unlock_email_heading'))}</h1>
+                <p style="margin:0 0 12px 0;font-size:15px;line-height:1.6;">{html.escape(tr('auth.unlock_email_html_greeting', username=username_safe))}</p>
+                <p style="margin:0 0 18px 0;font-size:15px;line-height:1.6;">{html.escape(tr('auth.unlock_email_html_intro'))}</p>
+                <p style="margin:0 0 22px 0;">
+                  <a href="{unlock_link_safe}" style="display:inline-block;background:#2563eb;color:#ffffff;text-decoration:none;padding:12px 18px;border-radius:10px;font-size:14px;font-weight:700;">{html.escape(tr('auth.unlock_email_button'))}</a>
+                </p>
+                <p style="margin:0 0 8px 0;font-size:13px;line-height:1.5;color:#5b6472;">{html.escape(tr('auth.unlock_email_plain_expiry', expires_minutes=expires_minutes))}</p>
+                <p style="margin:0 0 14px 0;font-size:13px;line-height:1.5;color:#5b6472;">{html.escape(tr('auth.unlock_email_ignore'))}</p>
+                <p style="margin:0;font-size:12px;line-height:1.5;color:#7b8494;word-break:break-all;">{unlock_link_safe}</p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>
+"""
+    return send_email_message(recipient_email, tr("auth.unlock_email_subject"), plain_text, html_body)
+
+
+def _load_unlock_user_from_token(token: str):
+    max_age = int(current_app.config.get("ACCOUNT_UNLOCK_TOKEN_MAX_AGE", 3600))
+    try:
+        payload = _account_unlock_serializer().loads(token, max_age=max_age)
+    except (SignatureExpired, BadSignature):
+        return None, tr("flash.accounts.unlock_invalid")
+
+    user_oid = parse_object_id(payload.get("uid", ""))
+    if not user_oid:
+        return None, tr("flash.accounts.unlock_invalid")
+
+    user = extensions.users_col.find_one({"_id": user_oid})
+    if not user:
+        return None, tr("flash.accounts.unlock_invalid")
+
+    if payload.get("fp") != _account_unlock_fingerprint(user):
+        return None, tr("flash.accounts.unlock_invalid")
+
+    return user, ""
+
+
 def _google_redirect_uri():
     configured = current_app.config.get("GOOGLE_REDIRECT_URI", "").strip()
     if configured:
@@ -493,10 +595,10 @@ def login():
         return redirect(url_for("accounts.setup_admin"))
 
     if request.method == "POST":
-        email = normalize_email(request.form.get("email", ""))
+        login_id = (request.form.get("login_id", "") or request.form.get("email", "")).strip()
         password = request.form.get("password", "")
 
-        user = find_user_by_email(email)
+        user = find_user_by_login(login_id)
         now = datetime.utcnow()
         if user:
             lock_until = user.get("login_lock_until")
@@ -509,6 +611,17 @@ def login():
             if user:
                 lock_info = _register_login_failure(user)
                 if lock_info.get("locked"):
+                    refreshed = extensions.users_col.find_one({"_id": user["_id"]}) or user
+                    unlock_link = _build_account_unlock_link(refreshed)
+                    sent = _send_account_unlock_email(
+                        refreshed.get("email", ""),
+                        refreshed.get("username", "user"),
+                        unlock_link,
+                    )
+                    if sent:
+                        flash(tr("flash.accounts.login_unlock_email_sent"), "info")
+                    else:
+                        flash(tr("flash.accounts.login_unlock_email_failed"), "warning")
                     flash(tr("flash.accounts.login_locked", minutes=lock_info.get("minutes", 10)), "danger")
                     return redirect(url_for("accounts.login"))
             flash(tr("flash.accounts.invalid_credentials"), "danger")
@@ -656,6 +769,27 @@ def google_callback():
         session["session_token_version"] = _session_version(existing)
 
     flash(tr("flash.accounts.logged_in"), "success")
+    return redirect(url_for("main.index"))
+
+
+@bp.route("/unlock-account/<token>")
+def unlock_account(token):
+    user, error = _load_unlock_user_from_token(token)
+    if not user:
+        flash(error, "danger")
+        return redirect(url_for("accounts.login"))
+
+    lock_until = user.get("login_lock_until")
+    now = datetime.utcnow()
+    if not lock_until or lock_until <= now:
+        flash(tr("flash.accounts.unlock_not_needed"), "info")
+        return redirect(url_for("accounts.login"))
+
+    _reset_login_lock(user["_id"])
+    refreshed = extensions.users_col.find_one({"_id": user["_id"]}) or user
+    session["user_id"] = str(user["_id"])
+    session["session_token_version"] = _session_version(refreshed)
+    flash(tr("flash.accounts.unlock_success"), "success")
     return redirect(url_for("main.index"))
 
 

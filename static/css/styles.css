@@ -223,6 +223,7 @@ button,
 .flash.success { background: #1d5f2d; }
 .flash.warning { background: #816319; }
 .flash.danger { background: #7a2121; }
+.flash.info { background: #1f3f72; }
 
 .badge {
   display: inline-block;
@@ -1120,4 +1121,85 @@ select.is-invalid {
   margin-bottom: 6px;
   padding: 8px 10px;
   font-size: 12px;
+}
+
+
+.modal-card-wide {
+  max-width: min(920px, 96vw);
+}
+
+.lyrics-preview-box {
+  margin: 8px 0 0;
+  max-height: min(46vh, 360px);
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid rgba(67, 120, 255, 0.35);
+  border-radius: 10px;
+  background: rgba(8, 21, 44, 0.65);
+  white-space: pre-wrap;
+  line-height: 1.45;
+  font-family: "JetBrains Mono", "Consolas", monospace;
+  font-size: 13px;
+}
+
+.player-lyrics-panel {
+  display: none;
+  width: min(860px, 100%);
+  margin: 0 auto;
+  border: 1px solid rgba(67, 120, 255, 0.35);
+  border-radius: 14px;
+  background: rgba(6, 18, 38, 0.72);
+  padding: 14px;
+}
+
+.player-lyrics-panel h4 {
+  margin: 0 0 10px;
+}
+
+.player-shell[data-view-mode="fullscreen"] .player-lyrics-panel {
+  display: block;
+}
+
+.player-lyrics-panel.hidden {
+  display: none !important;
+}
+
+.player-lyrics-cues {
+  display: grid;
+  gap: 8px;
+}
+
+.lyric-line {
+  font-size: clamp(14px, 2.2vw, 20px);
+  line-height: 1.3;
+  color: #d8e4ff;
+  opacity: 0.68;
+}
+
+.lyric-line.active {
+  color: #ffffff;
+  opacity: 1;
+  font-weight: 700;
+}
+
+.player-lyrics-full {
+  margin: 0;
+  max-height: min(28vh, 300px);
+  overflow: auto;
+  white-space: pre-wrap;
+  line-height: 1.4;
+  font-size: 14px;
+  padding: 8px;
+  border-radius: 8px;
+  background: rgba(2, 9, 22, 0.55);
+}
+
+@media (max-width: 768px) {
+  .lyrics-preview-box {
+    max-height: 42vh;
+  }
+
+  .player-lyrics-panel {
+    padding: 12px;
+  }
 }

@@ -19,6 +19,18 @@ VISIBILITY_VALUES = {"public", "private", "unlisted"}
 PASSWORD_POLICY_RE = re.compile(r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{6,}$")
 USERNAME_POLICY_RE = re.compile(r"^[A-Za-z0-9_.-]{3,32}$")
 
+KNOWN_EMAIL_PROVIDER_DOMAINS = {
+    "gmail.com", "googlemail.com",
+    "outlook.com", "hotmail.com", "live.com", "msn.com",
+    "icloud.com", "me.com", "mac.com",
+    "yahoo.com", "yahoo.ca", "yahoo.fr", "ymail.com",
+    "aol.com",
+    "proton.me", "protonmail.com",
+    "mail.com", "gmx.com", "gmx.net",
+    "zoho.com", "yandex.com", "yandex.ru",
+    "qq.com",
+}
+
 DISPOSABLE_EMAIL_DOMAINS = {
     "10minutemail.com",
     "10minutemail.net",
@@ -111,10 +123,24 @@ def is_disposable_email(email: str) -> bool:
     normalized = normalize_email(email)
     if "@" not in normalized:
         return False
+
     domain = normalized.split("@", 1)[1].strip().lower()
-    if not domain:
+    if not domain or "." not in domain:
+        return True
+
+    if domain in DISPOSABLE_EMAIL_DOMAINS or any(domain.endswith(f".{d}") for d in DISPOSABLE_EMAIL_DOMAINS):
+        return True
+
+    if domain in KNOWN_EMAIL_PROVIDER_DOMAINS:
         return False
-    return domain in DISPOSABLE_EMAIL_DOMAINS or any(domain.endswith(f".{d}") for d in DISPOSABLE_EMAIL_DOMAINS)
+
+    # Heuristique: certains patterns de domaines temporaires sont très fréquents.
+    disposable_markers = ("temp", "trash", "10min", "minute", "mailinator", "guerrilla", "disposable", "throwaway")
+    if any(marker in domain for marker in disposable_markers):
+        return True
+
+    # Dans ce projet, un domaine non reconnu est considéré à risque/jetable.
+    return True
 
 
 def contains_profanity(text_value: str) -> bool:

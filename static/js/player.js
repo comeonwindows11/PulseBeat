@@ -15,6 +15,9 @@
     playerViewMini: "Lecteur minimal",
     playerViewNormal: "Lecteur normal",
     playerViewFullscreen: "Lecteur plein écran",
+    playerStreamError: "Une erreur s'est produite lors de l'obtention de la chanson.",
+    playerStreamErrorCode: "Code {code}.",
+    playerTryNext: "Essaie de passer à la chanson suivante.",
     playerAlbum: "PulseBeat",
   };
 
@@ -30,6 +33,8 @@
   const addToPlaylistBtn = document.getElementById("add-to-playlist-btn");
   const playerViewBtn = document.getElementById("player-view-btn");
   const playerViewStatus = document.getElementById("player-view-status");
+  const playerErrorBanner = document.getElementById("player-error-banner");
+  const playerErrorText = document.getElementById("player-error-text");
   const seek = document.getElementById("seek-range");
   const playlistModal = document.getElementById("player-playlist-modal");
   const playlistModalClose = document.getElementById("player-playlist-close");
@@ -129,6 +134,45 @@
     } else {
       setViewMode("normal", true);
     }
+  }
+
+
+  function clearPlayerError() {
+    if (!playerErrorBanner || !playerErrorText) return;
+    playerErrorBanner.classList.add("hidden");
+    playerErrorText.textContent = "";
+  }
+
+  function showPlayerError(statusCode) {
+    if (!playerErrorBanner || !playerErrorText) return;
+    const code = Number.isFinite(statusCode) ? String(statusCode) : "404";
+    const codePart = (i18n.playerStreamErrorCode || "Code {code}.").replace("{code}", code);
+    const suffix = i18n.playerTryNext || "Try skipping to the next song.";
+    playerErrorText.textContent = `${i18n.playerStreamError || "An error occurred while fetching this song."} ${codePart} ${suffix}`;
+    playerErrorBanner.classList.remove("hidden");
+  }
+
+  async function detectSongHttpStatus(song) {
+    if (!song || !song.url) return null;
+    const req = { credentials: "same-origin", cache: "no-store", headers: { Range: "bytes=0-0" } };
+    try {
+      const res = await fetch(song.url, req);
+      return res.status;
+    } catch (_e) {
+      return null;
+    }
+  }
+
+  async function handleSongStreamError(song) {
+    const status = await detectSongHttpStatus(song);
+    if (status === 404) {
+      showPlayerError(404);
+    } else {
+      showPlayerError(status || 404);
+    }
+    state.isPlaying = false;
+    updateMeta(song || currentSong());
+    saveState();
   }
 
   function showPlaylistToast(message, type) {
@@ -417,6 +461,7 @@
   }
 
   function applySong(autoplay) {
+    clearPlayerError();
     const song = currentSong();
     if (!song || !song.url) {
       audio.removeAttribute("src");
@@ -453,6 +498,7 @@
         audioCtx.resume().catch(() => {});
       }
       audio.play().then(() => {
+        clearPlayerError();
         state.isPlaying = true;
         updateMeta(song);
         if (state.startedSongId !== song.id) {
@@ -461,9 +507,7 @@
         }
         saveState();
       }).catch(() => {
-        state.isPlaying = false;
-        updateMeta(song);
-        saveState();
+        handleSongStreamError(song);
       });
     }
   }
@@ -621,6 +665,7 @@
         audioCtx.resume().catch(() => {});
       }
       audio.play().then(() => {
+        clearPlayerError();
         state.isPlaying = true;
         updateMeta(song);
         if (state.startedSongId !== song.id) {
@@ -629,8 +674,7 @@
         }
         saveState();
       }).catch(() => {
-        state.isPlaying = false;
-        updateMeta(song);
+        handleSongStreamError(song);
       });
     } else {
       audio.pause();
@@ -731,6 +775,18 @@
   if (playerViewBtn) playerViewBtn.addEventListener("click", cycleViewMode);
 
   window.addEventListener("resize", syncPlayerOffset);
+
+  audio.addEventListener("canplay", () => {
+    clearPlayerError();
+  });
+
+  audio.addEventListener("error", () => {
+    handleSongStreamError(currentSong());
+  });
+
+  audio.addEventListener("stalled", () => {
+    if (!audio.paused) handleSongStreamError(currentSong());
+  });
 
   audio.addEventListener("ended", () => {
     const song = currentSong();

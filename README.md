@@ -16,6 +16,7 @@ Application de streaming musical en `Flask` + `Jinja`, inspirée de YouTube Musi
 - Contrôles lecture/pause/suivant/précédent
 - Lecteur avec vues `mini`, `normale` et `plein écran`
 - Bouton `previous` type lecteur moderne : avant 5 secondes il revient à la chanson précédente, à partir de 5 secondes il redémarre la chanson courante
+- Si une chanson est référencée en base mais introuvable sur le serveur, le lecteur affiche une erreur générique avec code HTTP (ex. 404) et suggère de passer à la suivante
 - Historique d'écoute
 - Page de détail par chanson
 - Like / dislike / commentaires / réponses
@@ -43,6 +44,7 @@ Comportement actuel :
 - les comptes existants avant cette mise à jour sont automatiquement marqués comme déjà vérifiés au démarrage de l'application
 - les comptes Google sont considérés comme vérifiés automatiquement
 - les comptes Google ne passent pas par la logique locale de fuite de mot de passe ni par le changement de mot de passe PulseBeat
+- les demandes de réinitialisation de mot de passe sur un compte Google sont refusées côté serveur avec une erreur générique `501` (sans divulguer le provider)
 
 ## Lecteur audio
 
@@ -51,6 +53,7 @@ Le lecteur flottant persiste entre les pages et conserve son état en local.
 Comportement notable :
 - en lecture de playlist : modes `normal`, `shuffle` et `repeat one` disponibles
 - hors playlist : lecture automatique avec recherche de recommandations
+- gestion d'erreur de stream côté lecteur avec bannière visible au-dessus des contrôles
 - vues disponibles : `mini`, `normale`, `plein écran`
 - le bouton de vue affiche le mode suivant, pas le mode actuel
 - un libellé d'état indique la vue actuellement active
@@ -226,6 +229,11 @@ Vérifier la syntaxe Python :
 python -m py_compile app.py auth_helpers.py blueprints\accounts.py blueprints\admin.py blueprints\main.py blueprints\songs.py blueprints\playlists.py i18n.py
 ```
 
+## Fiabilité API
+
+- Le endpoint `POST /songs/<id>/progress` a été durci pour éviter les conflits d'update MongoDB (`$set`, `$setOnInsert`, `$inc`)
+- Le favicon est servi en `204` via `/favicon.ico` pour éviter les 404 répétitifs en logs
+
 ## Comptes Google
 
 Les comptes connectés via Google OAuth ont un comportement spécifique :
@@ -233,6 +241,10 @@ Les comptes connectés via Google OAuth ont un comportement spécifique :
 - PulseBeat ne gère pas leur mot de passe
 - le bloc de changement de mot de passe n'est pas affiché dans `Gérer mon compte`
 - la vérification de mot de passe compromis et le lockout associé ne s'appliquent pas à ces comptes
+
+## Erreurs HTTP
+
+- Les pages d'erreur personnalisées incluent aussi le code `501` (requête non prise en charge).
 
 ## Sécurité
 

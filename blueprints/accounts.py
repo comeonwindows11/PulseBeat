@@ -625,6 +625,11 @@ def forgot_password():
     if request.method == "POST":
         email = normalize_email(request.form.get("email", ""))
         user = find_user_by_email(email) if email else None
+
+        # Do not reveal auth provider details; this request type is unsupported here.
+        if user and user.get("auth_provider") == "google":
+            abort(501)
+
         sent = False
         if user:
             reset_link = _build_password_reset_link(user)

@@ -1,5 +1,5 @@
 import os
-from datetime import datetime
+from datetime import UTC, datetime
 from flask import Flask, flash, redirect, render_template, request, url_for
 from dotenv import load_dotenv
 
@@ -20,7 +20,7 @@ def register_error_handlers(app):
 
         return handler
 
-    handled_codes = [400, 401, 403, 404, 405, 408, 413, 429, 500, 502, 503, 504]
+    handled_codes = [400, 401, 403, 404, 405, 408, 413, 429, 500, 501, 502, 503, 504]
     for code in handled_codes:
         app.register_error_handler(code, make_handler(code))
 
@@ -59,7 +59,7 @@ def create_app():
     app.config["GOOGLE_REDIRECT_URI"] = os.getenv("GOOGLE_REDIRECT_URI", "")
 
     extensions.init_mongo(app)
-    now = datetime.utcnow()
+    now = datetime.now(UTC)
     extensions.users_col.update_many({"email_verified": {"$exists": False}}, {"$set": {"email_verified": True, "email_verified_at": now}})
     extensions.users_col.update_many({"email_verification_sent_at": {"$exists": False}}, {"$set": {"email_verification_sent_at": None}})
     extensions.users_col.update_many({"auth_provider": {"$exists": False}}, {"$set": {"auth_provider": "local"}})
@@ -79,6 +79,10 @@ def create_app():
     app.register_blueprint(songs_bp)
     app.register_blueprint(playlists_bp)
     register_error_handlers(app)
+
+    @app.route("/favicon.ico")
+    def favicon():
+        return ("", 204)
 
     @app.before_request
     def enforce_initial_setup_and_password_change():

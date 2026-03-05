@@ -146,6 +146,9 @@
 
   <div class="player-shell">
     <audio id="global-audio" preload="metadata"></audio>
+    <div id="player-error-banner" class="player-error-banner hidden" role="status" aria-live="polite">
+      <span id="player-error-text"></span>
+    </div>
     <div class="player-bar">
       <div class="song-meta">
         <a id="player-title-link" href="#" class="player-title-link">
@@ -253,6 +256,9 @@
       playerViewMini: {{ t('player.view.mini')|tojson }},
       playerViewNormal: {{ t('player.view.normal')|tojson }},
       playerViewFullscreen: {{ t('player.view.fullscreen')|tojson }},
+      playerStreamError: {{ t('player.stream_error')|tojson }},
+      playerStreamErrorCode: {{ t('player.stream_error_code')|tojson }},
+      playerTryNext: {{ t('player.try_next')|tojson }},
       validationRequired: {{ t('validation.required')|tojson }},
       validationEmail: {{ t('validation.email')|tojson }},
       validationPasswordPolicy: {{ t('validation.password_policy')|tojson }},

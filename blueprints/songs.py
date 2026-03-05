@@ -1,5 +1,5 @@
 import os
-from datetime import datetime
+from datetime import UTC, datetime
 from math import ceil
 from flask import Blueprint, abort, current_app, flash, jsonify, redirect, render_template, request, send_from_directory, url_for
 
@@ -381,7 +381,7 @@ def update_progress(song_id):
     completed = bool(payload.get("completed", False))
     started = bool(payload.get("started", False))
 
-    now = datetime.utcnow()
+    now = datetime.now(UTC)
     existing = extensions.listening_history_col.find_one({"user_id": user_oid, "song_id": song_oid}, {"_id": 1})
     update_doc = {
         "$set": {
@@ -391,14 +391,14 @@ def update_progress(song_id):
         },
         "$setOnInsert": {
             "created_at": now,
-            "play_count": 0,
-            "last_completed_at": None,
         },
     }
 
     should_inc = started or existing is None
     if should_inc:
         update_doc.setdefault("$inc", {})["play_count"] = 1
+    else:
+        update_doc["$setOnInsert"]["play_count"] = 0
     if completed:
         update_doc["$set"]["last_completed_at"] = now
         update_doc["$set"]["last_position"] = 0

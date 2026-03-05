@@ -1096,3 +1096,28 @@ select.is-invalid {
   padding: 18px;
   background: rgba(0, 0, 0, 0.88);
 }
+
+
+.player-error-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 88, 88, 0.45);
+  border-radius: 10px;
+  background: rgba(103, 15, 23, 0.35);
+  color: #ffd8d8;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.player-error-banner.hidden {
+  display: none;
+}
+
+.player-shell[data-view-mode="mini"] .player-error-banner {
+  margin-bottom: 6px;
+  padding: 8px 10px;
+  font-size: 12px;
+}

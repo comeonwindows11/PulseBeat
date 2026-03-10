@@ -1,0 +1,29 @@
+{% extends "layout/base.jinja" %}
+{% block title %}{{ t('setup.title') }} - {{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="modal setup-modal-force" aria-hidden="false">
+  <div class="modal-card setup-card">
+    <h1>{{ t('setup.title') }}</h1>
+    <p>{{ t('setup.subtitle') }}</p>
+
+    <form method="post" action="{{ url_for('accounts.setup_admin') }}" class="stack" data-validate-form="1">
+      <label>{{ t('auth.username') }}
+        <input type="text" id="setup-username" name="username" minlength="3" maxlength="32" pattern="[A-Za-z0-9_.-]{3,32}" data-remote-check="username" data-remote-url="{{ url_for('accounts.check_availability') }}" required>
+      </label>
+      <label>{{ t('auth.email') }}
+        <input type="email" id="setup-email" name="email" data-remote-check="email" data-remote-url="{{ url_for('accounts.check_availability') }}" required>
+      </label>
+      <p class="muted small">{{ t('auth.verification_email_sent_note') }}</p>
+      <label>{{ t('auth.password') }}
+        <input type="password" id="setup-password" name="password" minlength="6" data-password-policy="1" required>
+      </label>
+      <p class="muted small">{{ t('auth.password_policy') }}</p>
+      <label>{{ t('account.confirm_password') }}
+        <input type="password" name="confirm_password" minlength="6" data-match-target="setup-password" required>
+      </label>
+      <button type="submit">{{ t('setup.create_root_admin') }}</button>
+    </form>
+  </div>
+</div>
+{% endblock %}

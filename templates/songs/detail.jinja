@@ -1,0 +1,121 @@
+{% extends "layout/base.jinja" %}
+{% block title %}{{ song.title }} - {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="grid two-cols">
+  <div class="card">
+    <h1>{{ song.title }}</h1>
+    <p>{{ song.artist }}{% if song.genre %} - {{ song.genre }}{% endif %}</p>
+    {% if uploader %}<p class="muted small">{{ t('song.uploaded_by') }} <a href="{{ uploader.profile_url }}">{{ uploader.username }}</a></p>{% endif %}
+    <span class="badge">{{ t('main.visibility.' ~ song.visibility) }}</span>
+    {% if not song.is_available %}<span class="badge">{{ t('song.unavailable') }}</span>{% endif %}
+    <div class="row-actions top-gap" id="song-votes-root" data-song-id="{{ song.id }}" data-song-stats-url="{{ url_for('songs.song_stats', song_id=song.id) }}" data-can-vote="{{ 1 if current_user else 0 }}">
+      <button type="button" class="play-one" data-context="auto" data-song='{{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url, "detail_url": song.detail_url, "source_type": song.source_type, "source_url": song.source_url, "external_provider": song.external_provider, "youtube_video_id": song.youtube_video_id, "playback_mode": song.playback_mode, "is_available": song.is_available, "is_audio_playable": song.is_audio_playable}|tojson|safe }}'>{{ t('main.play') }}</button>
+      <form method="post" action="{{ url_for('songs.vote_song', song_id=song.id) }}" class="song-vote-form" data-song-vote-form>
+        <input type="hidden" name="vote" value="1">
+        <button type="submit" class="vote-btn {% if user_vote == 1 %}btn{% else %}btn secondary{% endif %}" aria-label="{{ t('song.like') }}" data-vote="1" {% if not current_user %}disabled title="{{ t('song.login_to_react') }}"{% endif %}>
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 21h4V9H2v12zM22 10c0-1.1-.9-2-2-2h-6l1-4v-.7c0-.4-.2-.8-.4-1.1L13.6 1 7.7 6.9C7.3 7.3 7 7.8 7 8.4V19c0 1.1.9 2 2 2h8c.8 0 1.5-.5 1.8-1.2l3-7c.1-.2.2-.5.2-.8v-2z"/></svg>
+          <span class="song-like-count">{{ likes }}</span>
+        </button>
+      </form>
+      <form method="post" action="{{ url_for('songs.vote_song', song_id=song.id) }}" class="song-vote-form" data-song-vote-form>
+        <input type="hidden" name="vote" value="-1">
+        <button type="submit" class="vote-btn {% if user_vote == -1 %}btn{% else %}btn secondary{% endif %}" aria-label="{{ t('song.dislike') }}" data-vote="-1" {% if not current_user %}disabled title="{{ t('song.login_to_react') }}"{% endif %}>
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M22 3h-4v12h4V3zM2 14c0 1.1.9 2 2 2h6l-1 4v.7c0 .4.2.8.4 1.1l1 1 5.9-5.9c.4-.4.7-.9.7-1.5V5c0-1.1-.9-2-2-2H7c-.8 0-1.5.5-1.8 1.2l-3 7c-.1.2-.2.5-.2.8v2z"/></svg>
+          <span class="song-dislike-count">{{ dislikes }}</span>
+        </button>
+      </form>
+      {% if current_user %}
+      {% if song.visibility in ['public', 'unlisted'] %}
+      <button
+        type="button"
+        class="btn secondary open-share-modal"
+        data-share-url="{{ url_for('songs.song_detail', song_id=song.id, _external=True) }}"
+        data-share-title="{{ song.title }} - {{ song.artist }}"
+        data-share-text="{{ song.title }} - {{ song.artist }}"
+      >{{ t('share.open') }}</button>
+      {% endif %}
+      <button
+        type="button"
+        class="btn secondary open-report-modal"
+        data-report-action="{{ url_for('songs.report_song', song_id=song.id) }}"
+        data-report-title="{{ t('song.report_song_title') }}"
+      >{{ t('song.report') }}</button>
+      {% endif %}
+    </div>
+    {% if not current_user %}
+      <p class="muted small reaction-auth-hint">{{ t('song.login_to_react') }}</p>
+    {% endif %}
+    <p id="song-total-plays" class="muted small">{{ t('song.total_plays', count=total_plays) }}</p>
+
+    {% if song.can_delete %}
+      <form method="post" action="{{ url_for('songs.edit_song', song_id=song.id) }}" class="stack top-gap" enctype="multipart/form-data">
+        <label>{{ t('main.field.title') }}
+          <input type="text" name="title" value="{{ song.title }}" required>
+        </label>
+        <label>{{ t('main.field.artist') }}
+          <input type="text" name="artist" value="{{ song.artist }}">
+        </label>
+        <label>{{ t('main.field.genre') }}
+          <input type="text" name="genre" value="{{ song.genre }}">
+        </label>
+        {% if not song.has_lyrics %}
+        <input type="hidden" name="lyrics_text" value="" class="edit-lyrics-text">
+        <input type="hidden" name="lyrics_source" value="" class="edit-lyrics-source">
+        <button
+          type="button"
+          class="btn secondary detect-lyrics-btn retry-lyrics-btn"
+          data-song-id="{{ song.id }}"
+          data-song-title="{{ song.title }}"
+          data-song-artist="{{ song.artist }}"
+        >{{ t('song.lyrics_detect_button') }}</button>
+        <div class="stack hidden edit-lyrics-file-wrap">
+          <label>{{ t('song.lyrics_upload_optional') }}
+            <input type="file" name="lyrics_file" accept=".txt,.lrc" class="edit-lyrics-file-input">
+          </label>
+          <span class="muted small">{{ t('song.lyrics_upload_help') }}</span>
+        </div>
+        {% endif %}
+        <button type="submit">{{ t('song.update') }}</button>
+      </form>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    {% include "songs/_comments_section.jinja" %}
+  </div>
+
+  <div class="card">
+    <h2>{{ t('main.recommended') }}</h2>
+    {% if recommended_songs %}
+      <ul class="song-list">
+        {% for rs in recommended_songs %}
+          <li>
+            <div>
+              <a href="{{ rs.detail_url }}"><strong>{{ rs.title }}</strong></a>
+              <p>{{ rs.artist }}{% if rs.genre %} - {{ rs.genre }}{% endif %}</p>
+            </div>
+            <button type="button" class="play-one" data-context="auto" data-song='{{ {"id": rs.id, "title": rs.title, "artist": rs.artist, "url": rs.url, "detail_url": rs.detail_url, "source_type": rs.source_type, "source_url": rs.source_url, "external_provider": rs.external_provider, "youtube_video_id": rs.youtube_video_id, "playback_mode": rs.playback_mode, "is_available": rs.is_available, "is_audio_playable": rs.is_audio_playable}|tojson|safe }}'>{{ t('main.play') }}</button>
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p>{{ t('main.no_recommendations') }}</p>
+    {% endif %}
+  </div>
+</section>
+
+<script>
+  window.PAGE_SONG_OBJECTS = [{{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url, "detail_url": song.detail_url, "source_type": song.source_type, "source_url": song.source_url, "external_provider": song.external_provider, "youtube_video_id": song.youtube_video_id, "playback_mode": song.playback_mode, "is_available": song.is_available, "is_audio_playable": song.is_audio_playable}|tojson|safe }}];
+  window.PAGE_RECOMMENDED_SONGS = [
+    {% for rs in recommended_songs %}
+      {{ {"id": rs.id, "title": rs.title, "artist": rs.artist, "url": rs.url, "detail_url": rs.detail_url, "source_type": rs.source_type, "source_url": rs.source_url, "external_provider": rs.external_provider, "youtube_video_id": rs.youtube_video_id, "playback_mode": rs.playback_mode, "is_available": rs.is_available, "is_audio_playable": rs.is_audio_playable}|tojson|safe }}{% if not loop.last %},{% endif %}
+    {% endfor %}
+  ];
+</script>
+{% endblock %}
+
+
+
+
+

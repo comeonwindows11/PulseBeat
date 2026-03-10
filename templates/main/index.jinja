@@ -1,0 +1,126 @@
+{% extends "layout/base.jinja" %}
+{% block title %}{{ t('nav.home') }} - {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="page-stack">
+  <section class="card feature-hero home-hero">
+    <div class="hero-copy-block">
+      <p class="hero-kicker">{{ app_name }}</p>
+      <h1>{{ t('home.hero_title') }}</h1>
+      <p class="hero-copy">{{ t('home.hero_subtitle') }}</p>
+      <form method="get" action="{{ url_for('main.index') }}" class="search-form hero-search-form">
+        <input type="text" id="home-search-input" name="q" placeholder="{{ t('main.search_placeholder') }}" value="{{ q }}" data-autocomplete-url="{{ url_for('songs.search_suggest') }}" data-target-hidden="home-search-song-id" autocomplete="off">
+        <input type="hidden" id="home-search-song-id" name="song_id" value="{{ request.args.get('song_id', '') }}">
+        <select name="sort">
+          <option value="date" {% if sort == "date" %}selected{% endif %}>{{ t('main.sort.date') }}</option>
+          <option value="title" {% if sort == "title" %}selected{% endif %}>{{ t('main.sort.title') }}</option>
+          <option value="artist" {% if sort == "artist" %}selected{% endif %}>{{ t('main.sort.artist') }}</option>
+        </select>
+        <button type="submit">{{ t('main.apply') }}</button>
+      </form>
+      <div class="hero-actions">
+        {% if current_user %}
+          <a class="btn" href="{{ url_for('songs.new_song') }}">{{ t('main.add_song') }}</a>
+          <a class="btn secondary" href="{{ url_for('playlists.list_playlists') }}">{{ t('nav.playlists') }}</a>
+          <a class="btn secondary" href="{{ url_for('accounts.listening_history') }}">{{ t('nav.history') }}</a>
+        {% else %}
+          <a class="btn" href="{{ url_for('accounts.register') }}">{{ t('nav.register') }}</a>
+          <a class="btn secondary" href="{{ url_for('accounts.login') }}">{{ t('nav.login') }}</a>
+        {% endif %}
+      </div>
+    </div>
+    <div class="hero-panel">
+      <div class="hero-stat-card">
+        <span class="hero-stat-label">{{ t('home.results_label') }}</span>
+        <strong id="home-total-count">{{ total }}</strong>
+      </div>
+      <div class="hero-stat-card">
+        <span class="hero-stat-label">{{ t('home.page_label') }}</span>
+        <strong>{{ page }} / {{ pages }}</strong>
+      </div>
+      {% if current_user %}
+      <div class="hero-stat-card">
+        <span class="hero-stat-label">{{ t('nav.my_songs') }}</span>
+        <a class="btn secondary" href="{{ url_for('songs.my_songs') }}">{{ t('home.open_library') }}</a>
+      </div>
+      {% endif %}
+    </div>
+  </section>
+
+  <section class="content-shelves">
+    <div class="card shelf-card shelf-primary">
+      <div class="shelf-head">
+        <div>
+          <h2>{{ t('home.latest_title') }}</h2>
+          <p class="muted small">{{ t('home.latest_subtitle') }}</p>
+        </div>
+        {% if songs %}
+        <button type="button" class="queue-all btn secondary" data-source="all" data-context="auto">{{ t('main.queue_all') }}</button>
+        {% endif %}
+      </div>
+
+      {% if songs %}
+        <ul id="home-latest-list" class="song-list media-list" data-live-url="{{ url_for('main.live_songs') }}" data-live-enabled="{{ 1 if live_enabled else 0 }}" data-live-since="{{ live_since }}" data-query="{{ q }}" data-sort="{{ sort }}" data-page="{{ page }}" data-play-label="{{ t('main.play') }}" data-details-label="{{ t('song.details') }}" data-delete-label="{{ t('main.delete') }}" data-vis-public="{{ t('main.visibility.public') }}" data-vis-private="{{ t('main.visibility.private') }}" data-vis-unlisted="{{ t('main.visibility.unlisted') }}" data-shared-template="{{ t('main.shared_count', count='{count}') }}">
+          {% for song in songs %}
+            {% include "main/_song_item.jinja" %}
+          {% endfor %}
+        </ul>
+        <div class="pagination">
+          {% if page > 1 %}
+            <a class="btn secondary" href="{{ url_for('main.index', q=q, sort=sort, page=page-1) }}">{{ t('main.prev') }}</a>
+          {% endif %}
+          <span>{{ t('main.page', page=page, pages=pages) }}</span>
+          {% if page < pages %}
+            <a class="btn secondary" href="{{ url_for('main.index', q=q, sort=sort, page=page+1) }}">{{ t('main.next') }}</a>
+          {% endif %}
+        </div>
+      {% else %}
+        <p>{{ t('main.no_songs') }}</p>
+      {% endif %}
+    </div>
+
+    {% if recommended_songs %}
+    <div class="card shelf-card shelf-secondary">
+      <div class="shelf-head">
+        <div>
+          <h2>{{ t('main.recommended') }}</h2>
+          <p class="muted small">{{ t('home.recommended_subtitle') }}</p>
+        </div>
+      </div>
+      <ul class="song-list media-list compact-media-list">
+        {% for song in recommended_songs %}
+          <li>
+            <div>
+              <a href="{{ song.detail_url }}"><strong>{{ song.title }}</strong></a>
+              <p>{{ song.artist }}{% if song.genre %} - {{ song.genre }}{% endif %}</p>
+            </div>
+            <div class="row-actions">
+              <button
+                type="button"
+                class="play-one"
+                data-context="auto"
+                data-song='{{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url, "detail_url": song.detail_url, "source_type": song.source_type, "source_url": song.source_url, "external_provider": song.external_provider, "youtube_video_id": song.youtube_video_id, "playback_mode": song.playback_mode, "is_available": song.is_available, "is_audio_playable": song.is_audio_playable}|tojson|safe }}'
+              >{{ t('main.play') }}</button>
+              <a class="btn secondary" href="{{ song.detail_url }}">{{ t('song.details') }}</a>
+            </div>
+          </li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+  </section>
+</section>
+
+<script>
+  window.PAGE_SONG_OBJECTS = [
+  {% for song in songs %}
+    {{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url, "detail_url": song.detail_url, "source_type": song.source_type, "source_url": song.source_url, "external_provider": song.external_provider, "youtube_video_id": song.youtube_video_id, "playback_mode": song.playback_mode, "is_available": song.is_available, "is_audio_playable": song.is_audio_playable}|tojson|safe }}{% if not loop.last %},{% endif %}
+  {% endfor %}
+  ];
+  window.PAGE_RECOMMENDED_SONGS = [
+  {% for song in recommended_songs %}
+    {{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url, "detail_url": song.detail_url, "source_type": song.source_type, "source_url": song.source_url, "external_provider": song.external_provider, "youtube_video_id": song.youtube_video_id, "playback_mode": song.playback_mode, "is_available": song.is_available, "is_audio_playable": song.is_audio_playable}|tojson|safe }}{% if not loop.last %},{% endif %}
+  {% endfor %}
+  ];
+</script>
+{% endblock %}

@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="{{ current_lang }}">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}{{ t('nav.admin') }} - {{ app_name }}{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+</head>
+<body class="admin-body">
+  <header class="admin-header">
+    <strong>{{ app_name }} - {{ t('nav.admin') }}</strong>
+    <div class="row-actions">
+      <a class="btn secondary" href="{{ url_for('main.index') }}">{{ t('nav.home') }}</a>
+      <a class="btn" href="{{ url_for('accounts.logout') }}">{{ t('nav.logout') }}</a>
+    </div>
+  </header>
+  <main class="page-container">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        <div class="flash-list">
+          {% for category, message in messages %}
+            <div class="flash {{ category }}">{{ message }}</div>
+          {% endfor %}
+        </div>
+      {% endif %}
+    {% endwith %}
+    {% block content %}{% endblock %}
+  </main>
+  <script>
+    window.CSRF_TOKEN = {{ csrf_token|tojson }};
+    window.ADMIN_I18N = {
+      alertDismissed: {{ t('admin.alert_dismissed')|tojson }},
+      alertDismissFailed: {{ t('admin.alert_dismiss_failed')|tojson }},
+      alertRestored: {{ t('admin.alert_restored')|tojson }},
+      alertRestoreFailed: {{ t('admin.alert_restore_failed')|tojson }},
+      undo: {{ t('player.menu.undo')|tojson }}
+    };
+  </script>
+  <script src="{{ url_for('static', filename='js/admin.js') }}"></script>
+</body>
+</html>

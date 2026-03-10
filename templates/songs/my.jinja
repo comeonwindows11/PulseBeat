@@ -1,0 +1,52 @@
+{% extends "layout/base.jinja" %}
+{% block title %}{{ t('nav.my_songs') }} - {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="card">
+  <div class="shelf-head">
+    <h1>{{ t('nav.my_songs') }}</h1>
+    <a class="btn" href="{{ url_for('songs.new_song') }}">{{ t('main.add_song') }}</a>
+  </div>
+  {% if songs %}
+    <ul class="song-list">
+      {% for song in songs %}
+        <li data-song-id="{{ song.id }}" class="{% if not song.is_available %}song-unavailable{% endif %}">
+          <div>
+            <a href="{{ song.detail_url }}"><strong>{{ song.title }}</strong></a>
+            <p>{{ song.artist }}{% if song.genre %} - {{ song.genre }}{% endif %}</p>
+            <span class="badge">{{ t('main.visibility.' ~ song.visibility) }}</span>
+            {% if not song.is_available %}<span class="badge">{{ t('song.unavailable') }}</span>{% endif %}
+          </div>
+          <div class="row-actions">
+            <button type="button" class="play-one" data-context="auto" data-song='{{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url, "detail_url": song.detail_url, "source_type": song.source_type, "source_url": song.source_url, "external_provider": song.external_provider, "youtube_video_id": song.youtube_video_id, "playback_mode": song.playback_mode, "is_available": song.is_available, "is_audio_playable": song.is_audio_playable}|tojson|safe }}'>{{ t('main.play') }}</button>
+            <a class="btn secondary" href="{{ song.detail_url }}">{{ t('song.details') }}</a>
+            <form method="post" action="{{ url_for('songs.delete_song', song_id=song.id) }}" class="delete-song-form">
+              <button type="submit" class="btn-danger">{{ t('main.delete') }}</button>
+            </form>
+          </div>
+        </li>
+      {% endfor %}
+    </ul>
+    <div class="pagination">
+      {% if page > 1 %}
+        <a class="btn secondary" href="{{ url_for('songs.my_songs', page=page-1) }}">{{ t('main.prev') }}</a>
+      {% endif %}
+      <span>{{ t('main.page', page=page, pages=pages) }}</span>
+      {% if page < pages %}
+        <a class="btn secondary" href="{{ url_for('songs.my_songs', page=page+1) }}">{{ t('main.next') }}</a>
+      {% endif %}
+    </div>
+  {% else %}
+    <p>{{ t('song.none_mine') }}</p>
+  {% endif %}
+</section>
+
+<script>
+  window.PAGE_SONG_OBJECTS = [
+  {% for song in songs %}
+    {{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url, "detail_url": song.detail_url, "source_type": song.source_type, "source_url": song.source_url, "external_provider": song.external_provider, "youtube_video_id": song.youtube_video_id, "playback_mode": song.playback_mode, "is_available": song.is_available, "is_audio_playable": song.is_audio_playable}|tojson|safe }}{% if not loop.last %},{% endif %}
+  {% endfor %}
+  ];
+</script>
+{% endblock %}
+

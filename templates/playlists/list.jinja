@@ -1,0 +1,61 @@
+{% extends "layout/base.jinja" %}
+{% block title %}{{ t('nav.playlists') }} - {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="grid two-cols">
+  <div class="card">
+    <h1>{{ t('playlist.mine') }}</h1>
+    {% if playlists %}
+      <ul class="playlist-list">
+        {% for p in playlists %}
+          <li>
+            <div>
+              <a href="{{ url_for('playlists.playlist_detail', playlist_id=p.id) }}">{{ p.name }}</a>
+              <p class="muted small">{{ t('main.visibility.' ~ p.visibility) }} - {{ t('playlist.count', count=p.song_count) }}</p>
+            </div>
+            <span class="badge">{% if p.is_owner %}{{ t('playlist.owner') }}{% elif p.is_collaborator %}{{ t('playlist.collaborator') }}{% else %}{{ t('playlist.viewer') }}{% endif %}</span>
+          </li>
+        {% endfor %}
+      </ul>
+      <div class="pagination">
+        {% if page > 1 %}
+          <a class="btn secondary" href="{{ url_for('playlists.list_playlists', page=page-1) }}">{{ t('main.prev') }}</a>
+        {% endif %}
+        <span>{{ t('main.page', page=page, pages=pages) }}</span>
+        {% if page < pages %}
+          <a class="btn secondary" href="{{ url_for('playlists.list_playlists', page=page+1) }}">{{ t('main.next') }}</a>
+        {% endif %}
+      </div>
+    {% else %}
+      <p>{{ t('playlist.none') }}</p>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>{{ t('playlist.create') }}</h2>
+    <form method="post" class="stack" data-validate-form="1">
+      <label>{{ t('playlist.name') }}
+        <input type="text" name="name" minlength="2" maxlength="120" required>
+      </label>
+      <label>{{ t('main.field.visibility') }}
+        <select name="visibility">
+          <option value="public">{{ t('main.visibility.public') }}</option>
+          <option value="private" selected>{{ t('main.visibility.private') }}</option>
+          <option value="unlisted">{{ t('main.visibility.unlisted') }}</option>
+        </select>
+      </label>
+      <button
+        type="button"
+        class="btn secondary open-user-picker"
+        data-target-inputs="playlist-collab-inputs"
+        data-target-list="playlist-collab-list"
+        data-picker-title="{{ t('playlist.add_collaborators') }}" data-input-name="collaborator_ids"
+      >{{ t('playlist.add_collaborators') }}</button>
+      <div id="playlist-collab-list" class="selected-users"></div>
+      <div id="playlist-collab-inputs"></div>
+      <button type="submit">{{ t('playlist.create') }}</button>
+    </form>
+  </div>
+</section>
+{% endblock %}
+

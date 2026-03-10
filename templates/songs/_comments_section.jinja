@@ -1,0 +1,142 @@
+<div id="song-comments-root" data-song-id="{{ song.id }}" data-comments-page="{{ comments_page }}" data-comments-fragment-url="{{ url_for('songs.comments_fragment', song_id=song.id) }}">
+  <h2>{{ t('song.comments') }}</h2>
+  {% if can_comment %}
+    <form method="post" action="{{ url_for('songs.add_comment', song_id=song.id) }}" class="stack song-comment-form" data-ajax-comment-form>
+      <input type="hidden" name="comments_page" value="{{ comments_page }}">
+      <label>{{ t('song.add_comment') }}
+        <textarea name="content" required rows="3"></textarea>
+      </label>
+      <button type="submit">{{ t('song.add_comment') }}</button>
+    </form>
+  {% else %}
+    <p>{{ t('song.login_to_comment') }}</p>
+  {% endif %}
+
+  {% if not current_user %}
+    <p class="muted small reaction-auth-hint">{{ t('song.login_to_react') }}</p>
+  {% endif %}
+
+  {% if comments %}
+    <ul class="comment-list">
+      {% for c in comments %}
+        <li data-comment-id="{{ c.id }}">
+          <p>{% if c.profile_url %}<a href="{{ c.profile_url }}"><strong>{{ c.username }}</strong></a>{% else %}<strong>{{ c.username }}</strong>{% endif %}</p>
+          <p class="comment-content">{{ c.content }}</p>
+          {% if c.edited_at %}<p class="muted small">{{ t('song.edited') }}</p>{% endif %}
+          <div class="row-actions">
+            <form method="post" action="{{ url_for('songs.vote_comment', song_id=song.id, comment_id=c.id) }}" class="comment-vote-form" data-comment-vote-form>
+              <input type="hidden" name="vote" value="1">
+              <input type="hidden" name="comments_page" value="{{ comments_page }}">
+              <button type="submit" class="vote-btn {% if c.user_vote == 1 %}btn{% else %}btn secondary{% endif %}" aria-label="{{ t('song.like') }}" data-vote="1" data-comment-id="{{ c.id }}" {% if not current_user %}disabled title="{{ t('song.login_to_react') }}"{% endif %}>
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 21h4V9H2v12zM22 10c0-1.1-.9-2-2-2h-6l1-4v-.7c0-.4-.2-.8-.4-1.1L13.6 1 7.7 6.9C7.3 7.3 7 7.8 7 8.4V19c0 1.1.9 2 2 2h8c.8 0 1.5-.5 1.8-1.2l3-7c.1-.2.2-.5.2-.8v-2z"/></svg>
+                <span class="comment-like-count">{{ c.likes }}</span>
+              </button>
+            </form>
+            <form method="post" action="{{ url_for('songs.vote_comment', song_id=song.id, comment_id=c.id) }}" class="comment-vote-form" data-comment-vote-form>
+              <input type="hidden" name="vote" value="-1">
+              <input type="hidden" name="comments_page" value="{{ comments_page }}">
+              <button type="submit" class="vote-btn {% if c.user_vote == -1 %}btn{% else %}btn secondary{% endif %}" aria-label="{{ t('song.dislike') }}" data-vote="-1" data-comment-id="{{ c.id }}" {% if not current_user %}disabled title="{{ t('song.login_to_react') }}"{% endif %}>
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M22 3h-4v12h4V3zM2 14c0 1.1.9 2 2 2h6l-1 4v.7c0 .4.2.8.4 1.1l1 1 5.9-5.9c.4-.4.7-.9.7-1.5V5c0-1.1-.9-2-2-2H7c-.8 0-1.5.5-1.8 1.2l-3 7c-.1.2-.2.5-.2.8v2z"/></svg>
+                <span class="comment-dislike-count">{{ c.dislikes }}</span>
+              </button>
+            </form>
+            {% if can_comment %}
+              <form method="post" action="{{ url_for('songs.add_comment', song_id=song.id) }}" class="inline-reply song-comment-form" data-ajax-comment-form>
+                <input type="hidden" name="parent_comment_id" value="{{ c.id }}">
+                <input type="hidden" name="comments_page" value="{{ comments_page }}">
+                <input type="text" name="content" placeholder="{{ t('song.reply') }}" required>
+                <button type="submit">{{ t('song.reply') }}</button>
+              </form>
+            {% endif %}
+            {% if c.is_owner %}
+              <button type="button" class="btn secondary comment-edit-toggle" data-edit-target="comment-edit-{{ c.id }}">{{ t('song.edit_comment') }}</button>
+              <form method="post" action="{{ url_for('songs.edit_comment', song_id=song.id, comment_id=c.id) }}" id="comment-edit-{{ c.id }}" class="inline-reply hidden comment-edit-form" data-ajax-comment-form>
+                <input type="hidden" name="comments_page" value="{{ comments_page }}">
+                <input type="text" name="content" value="{{ c.content }}" required>
+                <button type="submit">{{ t('song.update') }}</button>
+                <button type="button" class="btn secondary comment-edit-cancel" data-edit-target="comment-edit-{{ c.id }}">{{ t('modal.cancel') }}</button>
+              </form>
+              <form method="post" action="{{ url_for('songs.delete_comment', song_id=song.id, comment_id=c.id) }}" data-ajax-comment-form>
+                <input type="hidden" name="comments_page" value="{{ comments_page }}">
+                <button type="submit" class="btn-danger">{{ t('main.delete') }}</button>
+              </form>
+            {% endif %}
+            {% if current_user %}
+              <button
+                type="button"
+                class="btn secondary open-report-modal"
+                data-report-action="{{ url_for('songs.report_comment', song_id=song.id, comment_id=c.id) }}"
+                data-report-title="{{ t('song.report_comment_title') }}"
+              >{{ t('song.report') }}</button>
+            {% endif %}
+          </div>
+          {% if c.replies %}
+            <ul class="reply-list">
+              {% for r in c.replies %}
+                <li data-comment-id="{{ r.id }}">
+                  <p>{% if r.profile_url %}<a href="{{ r.profile_url }}"><strong>{{ r.username }}</strong></a>{% else %}<strong>{{ r.username }}</strong>{% endif %}</p>
+                  <p class="comment-content">{{ r.content }}</p>
+                  {% if r.edited_at %}<p class="muted small">{{ t('song.edited') }}</p>{% endif %}
+                  <div class="row-actions">
+                    <form method="post" action="{{ url_for('songs.vote_comment', song_id=song.id, comment_id=r.id) }}" class="comment-vote-form" data-comment-vote-form>
+                      <input type="hidden" name="vote" value="1">
+                      <input type="hidden" name="comments_page" value="{{ comments_page }}">
+                      <button type="submit" class="vote-btn {% if r.user_vote == 1 %}btn{% else %}btn secondary{% endif %}" aria-label="{{ t('song.like') }}" data-vote="1" data-comment-id="{{ r.id }}" {% if not current_user %}disabled title="{{ t('song.login_to_react') }}"{% endif %}>
+                        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 21h4V9H2v12zM22 10c0-1.1-.9-2-2-2h-6l1-4v-.7c0-.4-.2-.8-.4-1.1L13.6 1 7.7 6.9C7.3 7.3 7 7.8 7 8.4V19c0 1.1.9 2 2 2h8c.8 0 1.5-.5 1.8-1.2l3-7c.1-.2.2-.5.2-.8v-2z"/></svg>
+                        <span class="comment-like-count">{{ r.likes }}</span>
+                      </button>
+                    </form>
+                    <form method="post" action="{{ url_for('songs.vote_comment', song_id=song.id, comment_id=r.id) }}" class="comment-vote-form" data-comment-vote-form>
+                      <input type="hidden" name="vote" value="-1">
+                      <input type="hidden" name="comments_page" value="{{ comments_page }}">
+                      <button type="submit" class="vote-btn {% if r.user_vote == -1 %}btn{% else %}btn secondary{% endif %}" aria-label="{{ t('song.dislike') }}" data-vote="-1" data-comment-id="{{ r.id }}" {% if not current_user %}disabled title="{{ t('song.login_to_react') }}"{% endif %}>
+                        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M22 3h-4v12h4V3zM2 14c0 1.1.9 2 2 2h6l-1 4v.7c0 .4.2.8.4 1.1l1 1 5.9-5.9c.4-.4.7-.9.7-1.5V5c0-1.1-.9-2-2-2H7c-.8 0-1.5.5-1.8 1.2l-3 7c-.1.2-.2.5-.2.8v2z"/></svg>
+                        <span class="comment-dislike-count">{{ r.dislikes }}</span>
+                      </button>
+                    </form>
+                    {% if r.is_owner %}
+                      <button type="button" class="btn secondary comment-edit-toggle" data-edit-target="comment-edit-{{ r.id }}">{{ t('song.edit_comment') }}</button>
+                      <form method="post" action="{{ url_for('songs.edit_comment', song_id=song.id, comment_id=r.id) }}" id="comment-edit-{{ r.id }}" class="inline-reply hidden comment-edit-form" data-ajax-comment-form>
+                        <input type="hidden" name="comments_page" value="{{ comments_page }}">
+                        <input type="text" name="content" value="{{ r.content }}" required>
+                        <button type="submit">{{ t('song.update') }}</button>
+                        <button type="button" class="btn secondary comment-edit-cancel" data-edit-target="comment-edit-{{ r.id }}">{{ t('modal.cancel') }}</button>
+                      </form>
+                      <form method="post" action="{{ url_for('songs.delete_comment', song_id=song.id, comment_id=r.id) }}" data-ajax-comment-form>
+                        <input type="hidden" name="comments_page" value="{{ comments_page }}">
+                        <button type="submit" class="btn-danger">{{ t('main.delete') }}</button>
+                      </form>
+                    {% endif %}
+                    {% if current_user %}
+                      <button
+                        type="button"
+                        class="btn secondary open-report-modal"
+                        data-report-action="{{ url_for('songs.report_comment', song_id=song.id, comment_id=r.id) }}"
+                        data-report-title="{{ t('song.report_comment_title') }}"
+                      >{{ t('song.report') }}</button>
+                    {% endif %}
+                  </div>
+                </li>
+              {% endfor %}
+            </ul>
+          {% endif %}
+        </li>
+      {% endfor %}
+    </ul>
+    <div class="pagination">
+      {% if comments_page > 1 %}
+        <a class="btn secondary" href="{{ url_for('songs.song_detail', song_id=song.id, comments_page=comments_page-1) }}">{{ t('main.prev') }}</a>
+      {% endif %}
+      <span>{{ t('main.page', page=comments_page, pages=comments_pages) }}</span>
+      {% if comments_page < comments_pages %}
+        <a class="btn secondary" href="{{ url_for('songs.song_detail', song_id=song.id, comments_page=comments_page+1) }}">{{ t('main.next') }}</a>
+      {% endif %}
+    </div>
+  {% else %}
+    <p>{{ t('song.no_comments') }}</p>
+  {% endif %}
+</div>
+
+
+
+

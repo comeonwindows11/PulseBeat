@@ -1,0 +1,233 @@
+{% extends "layout/base.jinja" %}
+
+{% block content %}
+<section class="auth-wrap">
+  <div class="card auth-card">
+    <h1>{{ t('errors.title', code=error_code) }}</h1>
+    <h2>{{ t('errors.' ~ error_code ~ '.title') }}</h2>
+    <p>{{ t('errors.' ~ error_code ~ '.msg') }}</p>
+    <p>{{ t('errors.dino_intro') }}</p>
+    <canvas id="dino-game" width="720" height="180" class="dino-canvas"></canvas>
+    <p class="muted small">{{ t('errors.dino_help') }}</p>
+    <div class="row-actions">
+      <a class="btn" href="{{ url_for('main.index') }}">{{ t('errors.back_home') }}</a>
+      {% if not current_user %}
+        <a class="btn secondary" href="{{ url_for('accounts.login') }}">{{ t('nav.login') }}</a>
+      {% endif %}
+    </div>
+  </div>
+</section>
+
+<script>
+(function () {
+  const canvas = document.getElementById('dino-game');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width;
+  const h = canvas.height;
+
+  const groundY = h - 26;
+  const dino = { x: 56, y: groundY - 40, w: 30, h: 40, vy: 0, jump: false };
+  const obstacles = [];
+
+  let speed = 5;
+  let score = 0;
+  let over = false;
+  let started = false;
+  let startedOnce = false;
+  let frame = 0;
+
+  function spawn() {
+    if (Math.random() < 0.02) {
+      const scale = 0.9 + Math.random() * 0.4;
+      obstacles.push({ x: w + 20, y: groundY - 30 * scale, w: 22 * scale, h: 30 * scale });
+    }
+  }
+
+  function resetRun() {
+    obstacles.length = 0;
+    dino.y = groundY - dino.h;
+    dino.vy = 0;
+    dino.jump = false;
+    speed = 5;
+    score = 0;
+    over = false;
+    frame = 0;
+  }
+
+  function restartFromGameOver() {
+    resetRun();
+    started = true;
+    startedOnce = true;
+  }
+
+  function tryStartOrJump() {
+    if (!started) {
+      started = true;
+      startedOnce = true;
+      return;
+    }
+    if (over) {
+      restartFromGameOver();
+      return;
+    }
+    if (!dino.jump) {
+      dino.jump = true;
+      dino.vy = -11.5;
+    }
+  }
+
+  function update() {
+    if (!started || over) return;
+
+    frame += 1;
+    dino.vy += 0.55;
+    dino.y += dino.vy;
+
+    if (dino.y >= groundY - dino.h) {
+      dino.y = groundY - dino.h;
+      dino.vy = 0;
+      dino.jump = false;
+    }
+
+    spawn();
+    for (let i = obstacles.length - 1; i >= 0; i--) {
+      const o = obstacles[i];
+      o.x -= speed;
+      if (o.x + o.w < 0) obstacles.splice(i, 1);
+
+      const hit = dino.x < o.x + o.w && dino.x + dino.w > o.x && dino.y < o.y + o.h && dino.y + dino.h > o.y;
+      if (hit) {
+        over = true;
+      }
+    }
+
+    score += 1;
+    if (score % 450 === 0) speed += 0.2;
+  }
+
+  function drawDino(x, y, runningStep, isJumping) {
+    ctx.save();
+    ctx.translate(x, y);
+
+    ctx.fillStyle = '#f4d9b8';
+    // body
+    ctx.fillRect(8, 14, 18, 18);
+    // neck + head
+    ctx.fillRect(18, 6, 8, 10);
+    ctx.fillRect(24, 4, 8, 8);
+    // eye
+    ctx.fillStyle = '#0b1830';
+    ctx.fillRect(29, 7, 2, 2);
+
+    // arms
+    ctx.fillStyle = '#f4d9b8';
+    ctx.fillRect(13, 20, 4, 3);
+    ctx.fillRect(10, 21, 3, 2);
+
+    // tail
+    ctx.fillRect(4, 20, 4, 4);
+    ctx.fillRect(2, 22, 2, 2);
+
+    // legs (animated only when running)
+    const legOffset = isJumping ? 0 : (runningStep ? 2 : 0);
+    ctx.fillRect(10, 32, 4, 7 - legOffset);
+    ctx.fillRect(19, 32, 4, 7 - (2 - legOffset));
+
+    // feet
+    ctx.fillRect(9, 38, 6, 2);
+    ctx.fillRect(18, 38, 6, 2);
+
+    ctx.restore();
+  }
+
+  function drawCactus(x, y, wC, hC) {
+    ctx.save();
+    ctx.translate(x, y);
+
+    ctx.fillStyle = '#57b366';
+
+    const trunkW = Math.max(8, wC * 0.34);
+    const trunkX = (wC - trunkW) / 2;
+    // trunk
+    ctx.fillRect(trunkX, 0, trunkW, hC);
+
+    // left arm
+    const armW = Math.max(4, wC * 0.2);
+    const armH = Math.max(8, hC * 0.36);
+    ctx.fillRect(trunkX - armW, hC * 0.34, armW, armH);
+    ctx.fillRect(trunkX - armW, hC * 0.34, armW * 0.75, Math.max(4, hC * 0.12));
+
+    // right arm
+    ctx.fillRect(trunkX + trunkW, hC * 0.44, armW, armH * 0.8);
+    ctx.fillRect(trunkX + trunkW + armW * 0.25, hC * 0.44, armW * 0.75, Math.max(4, hC * 0.12));
+
+    // subtle border
+    ctx.strokeStyle = 'rgba(8, 40, 20, 0.35)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(trunkX + 0.5, 0.5, trunkW - 1, hC - 1);
+
+    ctx.restore();
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = '#0b1830';
+    ctx.fillRect(0, 0, w, h);
+
+    // sky accents
+    ctx.fillStyle = 'rgba(220,231,255,0.12)';
+    ctx.fillRect(36, 24, 58, 6);
+    ctx.fillRect(130, 40, 46, 5);
+    ctx.fillRect(590, 34, 68, 6);
+
+    // ground
+    ctx.strokeStyle = '#4a6da8';
+    ctx.beginPath();
+    ctx.moveTo(0, groundY);
+    ctx.lineTo(w, groundY);
+    ctx.stroke();
+
+    // dino + obstacles
+    const runFrame = Math.floor(frame / 8) % 2;
+    drawDino(dino.x, dino.y, runFrame, dino.jump);
+    obstacles.forEach((o) => drawCactus(o.x, o.y, o.w, o.h));
+
+    // score and status
+    ctx.fillStyle = '#dce7ff';
+    ctx.font = '14px sans-serif';
+    ctx.fillText('Score: ' + score, 12, 18);
+
+    if (!started) {
+      ctx.fillText('Appuie sur Espace ou clique pour commencer', 210, 18);
+    } else if (over) {
+      ctx.fillText('Game Over - Espace/Clic pour recommencer', 220, 18);
+    }
+
+    if (!startedOnce) {
+      // small start marker: frozen first frame indicator
+      ctx.fillStyle = 'rgba(255,122,24,0.75)';
+      ctx.fillRect(0, groundY + 5, 52, 3);
+    }
+  }
+
+  function loop() {
+    update();
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  window.addEventListener('keydown', (e) => {
+    if (e.code === 'Space' || e.code === 'ArrowUp') {
+      e.preventDefault();
+      tryStartOrJump();
+    }
+  });
+  canvas.addEventListener('click', tryStartOrJump);
+  canvas.addEventListener('touchstart', (e) => { e.preventDefault(); tryStartOrJump(); }, { passive: false });
+
+  draw();
+  loop();
+})();
+</script>
+{% endblock %}

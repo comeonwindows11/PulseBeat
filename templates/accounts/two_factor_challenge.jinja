@@ -1,0 +1,31 @@
+{% extends "layout/base.jinja" %}
+{% block title %}{{ t('account.two_factor_title') }} - {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="auth-card two-factor-card">
+  <h1>{{ t('account.two_factor_title') }}</h1>
+  <p class="muted">{{ t('auth.two_factor_challenge_intro') }}</p>
+  <p class="muted small">{{ t('auth.two_factor_challenge_sent_to', email=masked_email) }}</p>
+  <p class="muted small">{{ t('auth.two_factor_challenge_expiry', minutes=expires_minutes) }}</p>
+
+  <form method="post" class="stack" data-validate-form="1">
+    <label>{{ t('auth.two_factor_code_label') }}
+      <input
+        type="text"
+        name="code"
+        inputmode="numeric"
+        autocomplete="one-time-code"
+        pattern="[0-9]{6}"
+        minlength="6"
+        maxlength="6"
+        required
+      >
+    </label>
+    <div class="row-actions">
+      <button type="submit" name="action" value="verify">{{ t('auth.two_factor_verify') }}</button>
+      <button type="submit" name="action" value="resend" class="btn secondary">{{ t('auth.two_factor_resend') }}</button>
+      <a class="btn secondary" href="{{ url_for('accounts.login') }}">{{ t('auth.back_to_login') }}</a>
+    </div>
+  </form>
+</section>
+{% endblock %}

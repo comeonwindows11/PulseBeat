@@ -1,0 +1,38 @@
+{% extends "layout/base.jinja" %}
+{% block title %}{{ t('account.two_factor_title') }} - {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="auth-card two-factor-card">
+  <h1>
+    {% if action == "enable" %}
+      {{ t('auth.two_factor_toggle_heading_enable') }}
+    {% else %}
+      {{ t('auth.two_factor_toggle_heading_disable') }}
+    {% endif %}
+  </h1>
+  <p class="muted">
+    {% if action == "enable" %}
+      {{ t('auth.two_factor_toggle_confirm_intro_enable') }}
+    {% else %}
+      {{ t('auth.two_factor_toggle_confirm_intro_disable') }}
+    {% endif %}
+  </p>
+  <p class="muted small">{{ t('auth.two_factor_challenge_sent_to', email=masked_email) }}</p>
+
+  <form method="post" class="stack" data-validate-form="1">
+    <label>{{ t('auth.password') }}
+      <input type="password" name="password" required>
+    </label>
+    <div class="row-actions">
+      <button type="submit">
+        {% if action == "enable" %}
+          {{ t('auth.two_factor_toggle_button_enable') }}
+        {% else %}
+          {{ t('auth.two_factor_toggle_button_disable') }}
+        {% endif %}
+      </button>
+      <a class="btn secondary" href="{{ url_for('accounts.login') }}">{{ t('auth.back_to_login') }}</a>
+    </div>
+  </form>
+</section>
+{% endblock %}

@@ -17,6 +17,7 @@ import re
 import requests
 from flask import Blueprint, Response, abort, current_app, flash, jsonify, redirect, render_template, request, session, url_for
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
+from werkzeug.routing import BuildError
 from werkzeug.security import check_password_hash, generate_password_hash
 
 import extensions
@@ -44,6 +45,8 @@ from i18n import tr
 
 bp = Blueprint("accounts", __name__)
 IMPORT_EXECUTOR = ThreadPoolExecutor(max_workers=2)
+TWO_FACTOR_CODE_LENGTH = 6
+TWO_FACTOR_CODE_MAX_ATTEMPTS = 6
 
 
 def _normalize_track_identity(value: str) -> str:
@@ -283,6 +286,30 @@ def _bump_session_version(user_oid):
     extensions.users_col.update_one({"_id": user_oid}, {"$inc": {"session_token_version": 1}})
 
 
+def _should_show_two_factor_prompt(user) -> bool:
+    if not user:
+        return False
+    if user.get("auth_provider") == "google":
+        return False
+    if bool(user.get("two_factor_enabled", False)):
+        return False
+    return bool(user.get("two_factor_prompt_pending", False))
+
+
+def _post_login_redirect(user):
+    if _should_show_two_factor_prompt(user):
+        return url_for("accounts.manage_account", two_factor_prompt="1")
+    return url_for("main.index")
+
+
+def _complete_login(user):
+    session.clear()
+    session["user_id"] = str(user.get("_id", ""))
+    session["session_token_version"] = _session_version(user)
+    flash(tr("flash.accounts.logged_in"), "success")
+    return redirect(_post_login_redirect(user))
+
+
 def find_user_by_email(email: str):
     normalized = normalize_email(email)
     if not normalized:
@@ -339,6 +366,225 @@ def validate_password_for_set(password: str, confirm_password: str, allow_unavai
     if status == "unavailable" and not allow_unavailable:
         return False, tr("flash.accounts.password_check_unavailable")
     return True, ""
+
+
+def _two_factor_toggle_serializer():
+    salt = current_app.config.get("TWO_FACTOR_TOGGLE_SALT", "pulsebeat-two-factor-toggle")
+    return URLSafeTimedSerializer(current_app.secret_key, salt=salt)
+
+
+def _two_factor_toggle_fingerprint(user, action: str):
+    raw = "|".join(
+        [
+            str(user.get("_id", "")),
+            normalize_email(user.get("email", "")),
+            str(user.get("password_hash", "")),
+            str(user.get("auth_provider", "local")),
+            "1" if bool(user.get("two_factor_enabled", False)) else "0",
+            str(action or "").strip().lower(),
+        ]
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _build_two_factor_toggle_link(user, action: str):
+    token = _two_factor_toggle_serializer().dumps(
+        {
+            "uid": str(user.get("_id", "")),
+            "action": str(action or "").strip().lower(),
+            "fp": _two_factor_toggle_fingerprint(user, action),
+        }
+    )
+    base_url = current_app.config.get("APP_BASE_URL", "").strip()
+    if base_url:
+        return f"{base_url.rstrip('/')}{url_for('accounts.confirm_two_factor_toggle', token=token)}"
+    return url_for("accounts.confirm_two_factor_toggle", token=token, _external=True)
+
+
+def _send_two_factor_toggle_email(user, action: str):
+    recipient_email = normalize_email(user.get("email", ""))
+    if not recipient_email:
+        return False
+    enable = str(action or "").strip().lower() == "enable"
+    link = _build_two_factor_toggle_link(user, action)
+    expires_minutes = int(current_app.config.get("TWO_FACTOR_TOGGLE_TOKEN_MAX_AGE", 3600) / 60)
+    username = user.get("username", "user")
+    username_safe = html.escape(username)
+    link_safe = html.escape(link)
+    plain_text = (
+        f"{tr('auth.two_factor_toggle_plain_greeting', username=username)}\n\n"
+        f"{tr('auth.two_factor_toggle_plain_instruction_enable' if enable else 'auth.two_factor_toggle_plain_instruction_disable')}\n"
+        f"{link}\n\n"
+        f"{tr('auth.two_factor_toggle_plain_expiry', expires_minutes=expires_minutes)}\n\n"
+        f"{tr('auth.two_factor_toggle_ignore')}"
+    )
+    html_body = f"""
+<!doctype html>
+<html>
+  <body style=\"margin:0;padding:0;background:#f3f6fb;font-family:Arial,Helvetica,sans-serif;color:#1b2430;\">
+    <table role=\"presentation\" width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" style=\"background:#f3f6fb;padding:24px 0;\">
+      <tr>
+        <td align=\"center\">
+          <table role=\"presentation\" width=\"640\" cellspacing=\"0\" cellpadding=\"0\" style=\"max-width:640px;width:100%;background:#ffffff;border-radius:14px;overflow:hidden;border:1px solid #e3eaf3;\">
+            <tr>
+              <td style=\"background:linear-gradient(135deg,#ff8a1f,#ff4f4f);padding:20px 28px;color:#fff;font-size:22px;font-weight:700;\">PulseBeat</td>
+            </tr>
+            <tr>
+              <td style=\"padding:28px;\">
+                <h1 style=\"margin:0 0 14px 0;font-size:22px;line-height:1.3;color:#101828;\">{html.escape(tr('auth.two_factor_toggle_heading_enable' if enable else 'auth.two_factor_toggle_heading_disable'))}</h1>
+                <p style=\"margin:0 0 12px 0;font-size:15px;line-height:1.6;\">{html.escape(tr('auth.two_factor_toggle_html_greeting', username=username_safe))}</p>
+                <p style=\"margin:0 0 18px 0;font-size:15px;line-height:1.6;\">{html.escape(tr('auth.two_factor_toggle_html_intro_enable' if enable else 'auth.two_factor_toggle_html_intro_disable'))}</p>
+                <p style=\"margin:0 0 22px 0;\">
+                  <a href=\"{link_safe}\" style=\"display:inline-block;background:#2563eb;color:#ffffff;text-decoration:none;padding:12px 18px;border-radius:10px;font-size:14px;font-weight:700;\">{html.escape(tr('auth.two_factor_toggle_button_enable' if enable else 'auth.two_factor_toggle_button_disable'))}</a>
+                </p>
+                <p style=\"margin:0 0 8px 0;font-size:13px;line-height:1.5;color:#5b6472;\">{html.escape(tr('auth.two_factor_toggle_plain_expiry', expires_minutes=expires_minutes))}</p>
+                <p style=\"margin:0 0 14px 0;font-size:13px;line-height:1.5;color:#5b6472;\">{html.escape(tr('auth.two_factor_toggle_ignore'))}</p>
+                <p style=\"margin:0;font-size:12px;line-height:1.5;color:#7b8494;word-break:break-all;\">{link_safe}</p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>
+"""
+    subject_key = "auth.two_factor_toggle_subject_enable" if enable else "auth.two_factor_toggle_subject_disable"
+    return send_email_message(recipient_email, tr(subject_key), plain_text, html_body)
+
+
+def _load_two_factor_toggle_user_from_token(token: str):
+    max_age = int(current_app.config.get("TWO_FACTOR_TOGGLE_TOKEN_MAX_AGE", 3600))
+    try:
+        payload = _two_factor_toggle_serializer().loads(token, max_age=max_age)
+    except (SignatureExpired, BadSignature):
+        return None, "", tr("flash.accounts.two_factor_toggle_invalid")
+
+    user_oid = parse_object_id(payload.get("uid", ""))
+    action = str(payload.get("action", "")).strip().lower()
+    if not user_oid or action not in {"enable", "disable"}:
+        return None, "", tr("flash.accounts.two_factor_toggle_invalid")
+
+    user = extensions.users_col.find_one({"_id": user_oid})
+    if not user:
+        return None, "", tr("flash.accounts.two_factor_toggle_invalid")
+    if user.get("auth_provider") == "google":
+        return None, "", tr("flash.accounts.two_factor_not_available_google")
+
+    if payload.get("fp") != _two_factor_toggle_fingerprint(user, action):
+        return None, "", tr("flash.accounts.two_factor_toggle_invalid")
+    return user, action, ""
+
+
+def _mask_email(value: str):
+    email = normalize_email(value)
+    if not email or "@" not in email:
+        return ""
+    local, domain = email.split("@", 1)
+    if len(local) <= 2:
+        local_masked = "*" * max(1, len(local))
+    else:
+        local_masked = f"{local[0]}{'*' * (len(local) - 2)}{local[-1]}"
+    return f"{local_masked}@{domain}"
+
+
+def _two_factor_code_hash(user_id: str, code: str):
+    raw = f"{str(user_id)}|{str(code)}|{current_app.secret_key}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _clear_two_factor_session():
+    for key in [
+        "pending_2fa_user_id",
+        "pending_2fa_code_hash",
+        "pending_2fa_expires_at",
+        "pending_2fa_attempts",
+    ]:
+        session.pop(key, None)
+
+
+def _issue_two_factor_code(user):
+    code = f"{secrets.randbelow(10 ** TWO_FACTOR_CODE_LENGTH):0{TWO_FACTOR_CODE_LENGTH}d}"
+    ttl_seconds = int(current_app.config.get("TWO_FACTOR_CODE_MAX_AGE", 600))
+    expires_at = datetime.utcnow() + timedelta(seconds=max(60, ttl_seconds))
+    sent = _send_two_factor_code_email(
+        normalize_email(user.get("email", "")),
+        user.get("username", "user"),
+        code,
+        max(1, int(ttl_seconds / 60)),
+    )
+    if not sent:
+        return False
+    session["pending_2fa_user_id"] = str(user.get("_id", ""))
+    session["pending_2fa_code_hash"] = _two_factor_code_hash(str(user.get("_id", "")), code)
+    session["pending_2fa_expires_at"] = int(expires_at.timestamp())
+    session["pending_2fa_attempts"] = 0
+    return True
+
+
+def _load_pending_two_factor_user():
+    user_oid = parse_object_id(session.get("pending_2fa_user_id", ""))
+    if not user_oid:
+        _clear_two_factor_session()
+        return None, tr("flash.accounts.two_factor_session_invalid")
+    user = extensions.users_col.find_one({"_id": user_oid})
+    if not user:
+        _clear_two_factor_session()
+        return None, tr("flash.accounts.two_factor_session_invalid")
+    if is_user_banned(user):
+        _clear_two_factor_session()
+        return None, tr("flash.accounts.banned")
+    if not is_email_verified(user):
+        _clear_two_factor_session()
+        return None, tr("flash.accounts.email_not_verified")
+    if user.get("auth_provider") == "google" or not bool(user.get("two_factor_enabled", False)):
+        _clear_two_factor_session()
+        return None, tr("flash.accounts.two_factor_session_invalid")
+    return user, ""
+
+
+def _send_two_factor_code_email(recipient_email: str, username: str, code: str, expires_minutes: int):
+    if not recipient_email:
+        return False
+    code_safe = html.escape(code)
+    username_safe = html.escape(username or "user")
+    plain_text = (
+        f"{tr('auth.two_factor_code_plain_greeting', username=username)}\n\n"
+        f"{tr('auth.two_factor_code_plain_instruction', code=code)}\n\n"
+        f"{tr('auth.two_factor_code_plain_expiry', expires_minutes=expires_minutes)}\n\n"
+        f"{tr('auth.two_factor_code_ignore')}"
+    )
+    html_body = f"""
+<!doctype html>
+<html>
+  <body style=\"margin:0;padding:0;background:#f3f6fb;font-family:Arial,Helvetica,sans-serif;color:#1b2430;\">
+    <table role=\"presentation\" width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" style=\"background:#f3f6fb;padding:24px 0;\">
+      <tr>
+        <td align=\"center\">
+          <table role=\"presentation\" width=\"640\" cellspacing=\"0\" cellpadding=\"0\" style=\"max-width:640px;width:100%;background:#ffffff;border-radius:14px;overflow:hidden;border:1px solid #e3eaf3;\">
+            <tr>
+              <td style=\"background:linear-gradient(135deg,#ff8a1f,#ff4f4f);padding:20px 28px;color:#fff;font-size:22px;font-weight:700;\">PulseBeat</td>
+            </tr>
+            <tr>
+              <td style=\"padding:28px;\">
+                <h1 style=\"margin:0 0 14px 0;font-size:22px;line-height:1.3;color:#101828;\">{html.escape(tr('auth.two_factor_code_heading'))}</h1>
+                <p style=\"margin:0 0 12px 0;font-size:15px;line-height:1.6;\">{html.escape(tr('auth.two_factor_code_html_greeting', username=username_safe))}</p>
+                <p style=\"margin:0 0 12px 0;font-size:15px;line-height:1.6;\">{html.escape(tr('auth.two_factor_code_html_intro'))}</p>
+                <p style=\"margin:0 0 20px 0;\">
+                  <span style=\"display:inline-block;padding:12px 18px;border-radius:12px;background:#eff4ff;border:1px solid #bfd0ff;color:#12306a;font-size:28px;letter-spacing:0.24em;font-weight:700;\">{code_safe}</span>
+                </p>
+                <p style=\"margin:0 0 8px 0;font-size:13px;line-height:1.5;color:#5b6472;\">{html.escape(tr('auth.two_factor_code_plain_expiry', expires_minutes=expires_minutes))}</p>
+                <p style=\"margin:0;font-size:13px;line-height:1.5;color:#5b6472;\">{html.escape(tr('auth.two_factor_code_ignore'))}</p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>
+"""
+    return send_email_message(recipient_email, tr("auth.two_factor_code_subject"), plain_text, html_body)
 
 
 
@@ -946,6 +1192,8 @@ def setup_admin():
                 "email_verified": False,
                 "email_verified_at": None,
                 "email_verification_sent_at": None,
+                "two_factor_enabled": False,
+                "two_factor_prompt_pending": True,
                 "created_at": datetime.utcnow(),
             }
         ).inserted_id
@@ -1005,6 +1253,8 @@ def register():
                 "email_verified": False,
                 "email_verified_at": None,
                 "email_verification_sent_at": None,
+                "two_factor_enabled": False,
+                "two_factor_prompt_pending": True,
                 "created_at": datetime.utcnow(),
             }
         ).inserted_id
@@ -1084,13 +1334,72 @@ def login():
             flash(tr("flash.accounts.password_check_unavailable"), "warning")
 
         _reset_login_lock(user["_id"])
-        session.clear()
-        session["user_id"] = str(user["_id"])
-        session["session_token_version"] = _session_version(user)
-        flash(tr("flash.accounts.logged_in"), "success")
-        return redirect(url_for("main.index"))
+        if user.get("auth_provider") != "google" and bool(user.get("two_factor_enabled", False)):
+            session.clear()
+            if not _issue_two_factor_code(user):
+                flash(tr("flash.accounts.two_factor_send_failed"), "danger")
+                return redirect(url_for("accounts.login"))
+            flash(tr("flash.accounts.two_factor_code_sent"), "info")
+            return redirect(url_for("accounts.two_factor_challenge"))
+        return _complete_login(user)
 
     return render_template("accounts/login.jinja", pending_verification_email=session.get("pending_verification_email", ""))
+
+
+@bp.route("/two-factor/challenge", methods=["GET", "POST"])
+def two_factor_challenge():
+    if get_session_user_oid():
+        return redirect(url_for("main.index"))
+
+    user, error = _load_pending_two_factor_user()
+    if not user:
+        if error:
+            flash(error, "warning")
+        return redirect(url_for("accounts.login"))
+
+    expires_at_ts = int(session.get("pending_2fa_expires_at", 0) or 0)
+    now_ts = int(datetime.utcnow().timestamp())
+    if expires_at_ts <= now_ts:
+        _clear_two_factor_session()
+        flash(tr("flash.accounts.two_factor_code_expired"), "warning")
+        return redirect(url_for("accounts.login"))
+
+    if request.method == "POST":
+        action = (request.form.get("action", "verify") or "verify").strip().lower()
+        if action == "resend":
+            if _issue_two_factor_code(user):
+                flash(tr("flash.accounts.two_factor_code_sent"), "success")
+            else:
+                flash(tr("flash.accounts.two_factor_send_failed"), "danger")
+            return redirect(url_for("accounts.two_factor_challenge"))
+
+        code_raw = (request.form.get("code", "") or "").strip()
+        code = re.sub(r"[^0-9]", "", code_raw)
+        expected_hash = str(session.get("pending_2fa_code_hash", "") or "").strip()
+        is_valid = bool(code) and len(code) == TWO_FACTOR_CODE_LENGTH and expected_hash and secrets.compare_digest(
+            _two_factor_code_hash(str(user.get("_id", "")), code),
+            expected_hash,
+        )
+        if not is_valid:
+            attempts = int(session.get("pending_2fa_attempts", 0) or 0) + 1
+            session["pending_2fa_attempts"] = attempts
+            remaining = max(0, TWO_FACTOR_CODE_MAX_ATTEMPTS - attempts)
+            if attempts >= TWO_FACTOR_CODE_MAX_ATTEMPTS:
+                _clear_two_factor_session()
+                flash(tr("flash.accounts.two_factor_too_many_attempts"), "danger")
+                return redirect(url_for("accounts.login"))
+            flash(tr("flash.accounts.two_factor_code_invalid", remaining=remaining), "danger")
+            return redirect(url_for("accounts.two_factor_challenge"))
+
+        _clear_two_factor_session()
+        return _complete_login(user)
+
+    expires_minutes = max(1, int((expires_at_ts - now_ts) / 60) + 1)
+    return render_template(
+        "accounts/two_factor_challenge.jinja",
+        masked_email=_mask_email(user.get("email", "")),
+        expires_minutes=expires_minutes,
+    )
 
 
 @bp.route("/google-login")
@@ -1184,6 +1493,8 @@ def google_callback():
                 "email_verified": True,
                 "email_verified_at": datetime.utcnow(),
                 "email_verification_sent_at": None,
+                "two_factor_enabled": False,
+                "two_factor_prompt_pending": False,
                 "created_at": datetime.utcnow(),
             }
         ).inserted_id
@@ -1194,7 +1505,17 @@ def google_callback():
     else:
         extensions.users_col.update_one(
             {"_id": existing["_id"]},
-            {"$set": {"email_verified": True, "email_verified_at": existing.get("email_verified_at") or datetime.utcnow(), "auth_provider": "google", "require_password_change": False}, "$unset": {"password_compromised_at": ""}},
+            {
+                "$set": {
+                    "email_verified": True,
+                    "email_verified_at": existing.get("email_verified_at") or datetime.utcnow(),
+                    "auth_provider": "google",
+                    "require_password_change": False,
+                    "two_factor_enabled": False,
+                    "two_factor_prompt_pending": False,
+                },
+                "$unset": {"password_compromised_at": ""},
+            },
         )
         session.clear()
         session["user_id"] = str(existing["_id"])
@@ -1219,11 +1540,20 @@ def unlock_account(token):
 
     _reset_login_lock(user["_id"])
     refreshed = extensions.users_col.find_one({"_id": user["_id"]}) or user
+    if refreshed.get("auth_provider") != "google" and bool(refreshed.get("two_factor_enabled", False)):
+        session.clear()
+        if not _issue_two_factor_code(refreshed):
+            flash(tr("flash.accounts.two_factor_send_failed"), "danger")
+            return redirect(url_for("accounts.login"))
+        flash(tr("flash.accounts.unlock_success"), "success")
+        flash(tr("flash.accounts.two_factor_code_sent"), "info")
+        return redirect(url_for("accounts.two_factor_challenge"))
+
     session.clear()
     session["user_id"] = str(user["_id"])
     session["session_token_version"] = _session_version(refreshed)
     flash(tr("flash.accounts.unlock_success"), "success")
-    return redirect(url_for("main.index"))
+    return redirect(_post_login_redirect(refreshed))
 
 
 @bp.route("/resend-verification", methods=["POST"])
@@ -1635,6 +1965,106 @@ def external_provider_import_playlist(provider, external_playlist_id):
     return redirect(url_for("playlists.playlist_detail", playlist_id=str(local_playlist_id)))
 
 
+@bp.route("/account/2fa/request-toggle", methods=["POST"])
+@login_required
+def request_two_factor_toggle():
+    user_oid = get_session_user_oid()
+    user = extensions.users_col.find_one({"_id": user_oid})
+    if not user:
+        session.clear()
+        flash(tr("flash.auth.required"), "warning")
+        return redirect(url_for("accounts.login"))
+    if user.get("auth_provider") == "google":
+        flash(tr("flash.accounts.two_factor_not_available_google"), "warning")
+        return redirect(url_for("accounts.manage_account"))
+
+    action = (request.form.get("action", "") or "").strip().lower()
+    if action not in {"enable", "disable"}:
+        flash(tr("flash.songs.invalid_request"), "danger")
+        return redirect(url_for("accounts.manage_account"))
+    target_enabled = action == "enable"
+    if bool(user.get("two_factor_enabled", False)) == target_enabled:
+        flash(
+            tr("flash.accounts.two_factor_already_enabled" if target_enabled else "flash.accounts.two_factor_already_disabled"),
+            "info",
+        )
+        return redirect(url_for("accounts.manage_account"))
+
+    sent = _send_two_factor_toggle_email(user, action)
+    if not sent:
+        flash(tr("flash.accounts.two_factor_toggle_email_failed"), "danger")
+        return redirect(url_for("accounts.manage_account"))
+
+    extensions.users_col.update_one(
+        {"_id": user_oid},
+        {
+            "$set": {
+                "two_factor_toggle_requested_action": action,
+                "two_factor_toggle_requested_at": datetime.utcnow(),
+            }
+        },
+    )
+    flash(
+        tr("flash.accounts.two_factor_toggle_email_sent_enable" if target_enabled else "flash.accounts.two_factor_toggle_email_sent_disable"),
+        "success",
+    )
+    return redirect(url_for("accounts.manage_account"))
+
+
+@bp.route("/account/2fa/confirm/<token>", methods=["GET", "POST"])
+def confirm_two_factor_toggle(token):
+    user, action, error = _load_two_factor_toggle_user_from_token(token)
+    if not user:
+        if error:
+            flash(error, "danger")
+        return redirect(url_for("accounts.login"))
+
+    target_enabled = action == "enable"
+    if request.method == "POST":
+        password = request.form.get("password", "")
+        if not password:
+            flash(tr("flash.accounts.fields_required"), "danger")
+            return redirect(url_for("accounts.confirm_two_factor_toggle", token=token))
+        if not check_password_hash(user.get("password_hash", ""), password):
+            flash(tr("flash.accounts.invalid_credentials"), "danger")
+            return redirect(url_for("accounts.confirm_two_factor_toggle", token=token))
+
+        extensions.users_col.update_one(
+            {"_id": user.get("_id")},
+            {
+                "$set": {
+                    "two_factor_enabled": target_enabled,
+                    "two_factor_prompt_pending": False,
+                    "two_factor_updated_at": datetime.utcnow(),
+                },
+                "$unset": {
+                    "two_factor_toggle_requested_action": "",
+                    "two_factor_toggle_requested_at": "",
+                },
+            },
+        )
+        flash(tr("flash.accounts.two_factor_enabled" if target_enabled else "flash.accounts.two_factor_disabled"), "success")
+        if get_session_user_oid() == user.get("_id"):
+            return redirect(url_for("accounts.manage_account"))
+        return redirect(url_for("accounts.login"))
+
+    return render_template(
+        "accounts/two_factor_toggle_confirm.jinja",
+        token=token,
+        action=action,
+        masked_email=_mask_email(user.get("email", "")),
+    )
+
+
+@bp.route("/account/2fa/dismiss-suggestion", methods=["POST"])
+@login_required
+def dismiss_two_factor_suggestion():
+    user_oid = get_session_user_oid()
+    extensions.users_col.update_one({"_id": user_oid}, {"$set": {"two_factor_prompt_pending": False}})
+    flash(tr("flash.accounts.two_factor_prompt_dismissed"), "info")
+    return redirect(url_for("accounts.manage_account"))
+
+
 @bp.route("/account/manage")
 @login_required
 def manage_account():
@@ -1708,6 +2138,15 @@ def manage_account():
                 }
             )
 
+    try:
+        two_factor_toggle_url = url_for("accounts.request_two_factor_toggle")
+    except BuildError:
+        two_factor_toggle_url = ""
+    try:
+        two_factor_dismiss_url = url_for("accounts.dismiss_two_factor_suggestion")
+    except BuildError:
+        two_factor_dismiss_url = ""
+
     return render_template(
         "accounts/manage.jinja",
         me={
@@ -1720,6 +2159,8 @@ def manage_account():
             "email_verified": bool(is_email_verified(user)),
             "auth_provider": user.get("auth_provider", "local"),
             "is_google_account": user.get("auth_provider") == "google",
+            "two_factor_enabled": bool(user.get("two_factor_enabled", False)),
+            "two_factor_prompt_pending": bool(user.get("two_factor_prompt_pending", False)),
             "profile_url": url_for("accounts.public_profile", username=user.get("username", "user")),
         },
         my_songs_count=my_songs_count,
@@ -1729,6 +2170,13 @@ def manage_account():
         youtube_integration_enabled=youtube_enabled,
         integration_providers=provider_rows,
         external_playlists=external_playlists,
+        two_factor_toggle_url=two_factor_toggle_url,
+        two_factor_dismiss_url=two_factor_dismiss_url,
+        show_two_factor_prompt=bool(
+            user.get("auth_provider") != "google"
+            and not bool(user.get("two_factor_enabled", False))
+            and bool(user.get("two_factor_prompt_pending", False))
+        ),
     )
 
 

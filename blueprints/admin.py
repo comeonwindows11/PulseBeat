@@ -225,6 +225,8 @@ def create_admin():
             "email_verified": True,
             "email_verified_at": datetime.utcnow(),
             "email_verification_sent_at": None,
+            "two_factor_enabled": False,
+            "two_factor_prompt_pending": True,
             "created_at": datetime.utcnow(),
         }
     ).inserted_id

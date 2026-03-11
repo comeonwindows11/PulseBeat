@@ -15,6 +15,7 @@
         <input type="email" id="setup-email" name="email" data-remote-check="email" data-remote-url="{{ url_for('accounts.check_availability') }}" required>
       </label>
       <p class="muted small">{{ t('auth.verification_email_sent_note') }}</p>
+      <p class="muted small">{{ t('setup.two_factor_note') }}</p>
       <label>{{ t('auth.password') }}
         <input type="password" id="setup-password" name="password" minlength="6" data-password-policy="1" required>
       </label>

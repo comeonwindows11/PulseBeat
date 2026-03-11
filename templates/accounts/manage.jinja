@@ -2,221 +2,311 @@
 {% block title %}{{ t('nav.manage_account') }} - {{ app_name }}{% endblock %}
 
 {% block content %}
-<section class="grid two-cols">
-  <div class="card">
+<section class="dashboard-shell account-dashboard-shell">
+  <aside class="card dashboard-sidebar">
     <h1>{{ t('account.manage_title') }}</h1>
-    <p>
-      <strong>{{ me.username }}</strong> ({{ t('auth.email') }}: {{ me.email }})
+    <p class="muted small"><strong>{{ me.username }}</strong> - {{ me.email }}</p>
+    <div class="dashboard-badges">
       {% if me.is_root_admin %}<span class="badge root-badge">Root admin</span>{% endif %}
       {% if me.require_password_change %}<span class="badge">{{ t('account.password_change_required') }}</span>{% endif %}
       {% if me.email_verified %}<span class="badge">{{ t('auth.email_verified') }}</span>{% else %}<span class="badge">{{ t('auth.email_not_verified') }}</span>{% endif %}
-    </p>
-    <p class="muted">{{ t('account.my_song_count', count=my_songs_count) }}</p>
-    {% if me.require_password_change %}
-    <p class="muted">{{ t('account.password_change_required') }}</p>
-    {% else %}
-    <div class="row-actions top-gap"><a class="btn secondary" href="{{ url_for('accounts.listening_history') }}">{{ t('nav.history') }}</a><a class="btn secondary" href="{{ me.profile_url }}">{{ t('profile.view_public') }}</a></div>
-    {% endif %}
-  </div>
-
-  {% if not me.is_google_account %}
-  <div class="card">
-    <h2>{{ t('account.change_password') }}</h2>
-    <p class="muted small">{{ t('auth.password_policy') }}</p>
-    <form method="post" action="{{ url_for('accounts.change_password') }}" class="stack" data-validate-form="1">
-      {% if not me.require_password_change %}
-      <label>{{ t('account.current_password') }}
-        <input type="password" name="current_password" required>
-      </label>
-      {% endif %}
-      <label>{{ t('account.new_password') }}
-        <input type="password" id="manage-new-password" name="new_password" minlength="6" data-password-policy="1" required>
-      </label>
-      <label>{{ t('account.confirm_password') }}
-        <input type="password" name="confirm_password" minlength="6" data-match-target="manage-new-password" required>
-      </label>
-      <button type="submit">{{ t('account.change_password') }}</button>
-    </form>
-  </div>
-  {% endif %}
-
-  {% if not me.require_password_change %}
-  <div class="card creator-stats-card">
-    <h2>{{ t('account.creator_stats') }}</h2>
-    <p class="muted small">{{ t('account.creator_stats_hint') }}</p>
-    <div class="grid creator-stats-grid top-gap">
-      <div class="badge">{{ t('account.creator_song_count', count=creator_stats.song_count) }}</div>
-      <div class="badge">{{ t('account.creator_total_plays', count=creator_stats.total_plays) }}</div>
-      <div class="badge">{{ t('account.creator_total_likes', count=creator_stats.total_likes) }}</div>
-      <div class="badge">{{ t('account.creator_total_dislikes', count=creator_stats.total_dislikes) }}</div>
-      <div class="badge">{{ t('account.creator_avg_plays', value=creator_stats.avg_plays_per_song) }}</div>
+      {% if me.two_factor_enabled %}<span class="badge">{{ t('account.two_factor_enabled') }}</span>{% endif %}
     </div>
-    <h3 class="top-gap">{{ t('account.creator_top_songs') }}</h3>
-    {% if creator_stats.top_songs %}
-      <ul class="playlist-list">
-        {% for row in creator_stats.top_songs %}
-          <li>
-            <div>
-              <a href="{{ row.detail_url }}"><strong>{{ row.title }}</strong></a>
-              <p>{{ row.artist }}</p>
-            </div>
-            <span class="muted small">{{ t('account.creator_song_plays', count=row.plays) }}</span>
-          </li>
-        {% endfor %}
-      </ul>
-    {% else %}
-      <p class="muted">{{ t('account.creator_no_data') }}</p>
+    <p class="muted small">{{ t('account.my_song_count', count=my_songs_count) }}</p>
+    <nav class="dashboard-nav">
+      <a href="#account-profile">{{ t('account.section_profile') }}</a>
+      <a href="#account-security">{{ t('account.section_security') }}</a>
+      {% if not me.require_password_change %}
+      <a href="#account-integrations">{{ t('account.section_integrations') }}</a>
+      <a href="#account-stats">{{ t('account.section_stats') }}</a>
+      <a href="#account-preferences">{{ t('account.section_preferences') }}</a>
+      <a href="#account-export">{{ t('account.section_export') }}</a>
+      <a href="#account-danger">{{ t('account.section_danger') }}</a>
+      {% endif %}
+    </nav>
+    {% if not me.require_password_change %}
+    <div class="row-actions top-gap">
+      <a class="btn secondary" href="{{ url_for('accounts.listening_history') }}">{{ t('nav.history') }}</a>
+      <a class="btn secondary" href="{{ me.profile_url }}">{{ t('profile.view_public') }}</a>
+    </div>
     {% endif %}
-  </div>
+  </aside>
 
-  <div class="card account-integrations-card">
-    <h2>{{ t('account.integrations_title') }}</h2>
-    <p class="muted small">{{ t('account.integrations_hint') }}</p>
-    <ul class="playlist-list account-integrations-list">
-      {% for row in integration_providers %}
-        <li>
-          <div>
-            <strong>{{ row.name }}</strong>
-            {% if row.disabled_by_admin %}
-              <p class="muted small">{{ t('account.integration_disabled_by_admin') }}</p>
-            {% elif row.connected %}
-              <p class="muted small">{{ t('account.integration_connected_state') }}</p>
-              {% if row.updated_at %}<p class="muted small">{{ t('account.integration_updated_at') }}: {{ row.updated_at }}</p>{% endif %}
-            {% elif row.configured %}
-              <p class="muted small">{{ t('account.integration_not_connected_state') }}</p>
+  <div class="dashboard-main">
+    <section id="account-profile" class="card dashboard-panel">
+      <h2>{{ t('account.section_profile') }}</h2>
+      <p class="muted">{{ t('account.profile_summary') }}</p>
+      <div class="dashboard-kv">
+        <div><span class="muted small">{{ t('auth.username') }}</span><strong>{{ me.username }}</strong></div>
+        <div><span class="muted small">{{ t('auth.email') }}</span><strong>{{ me.email }}</strong></div>
+        <div><span class="muted small">{{ t('auth.login') }}</span><strong>{% if me.is_google_account %}Google{% else %}PulseBeat{% endif %}</strong></div>
+        <div><span class="muted small">{{ t('account.two_factor_status') }}</span><strong>{% if me.two_factor_enabled %}{{ t('account.two_factor_enabled') }}{% else %}{{ t('account.two_factor_disabled') }}{% endif %}</strong></div>
+      </div>
+    </section>
+
+    <section id="account-security" class="card dashboard-panel">
+      <h2>{{ t('account.section_security') }}</h2>
+      <div class="security-split">
+        {% if me.is_google_account %}
+        <article class="sub-card">
+          <h3>{{ t('account.two_factor_title') }}</h3>
+          <p class="muted">{{ t('account.two_factor_google_notice') }}</p>
+        </article>
+        {% else %}
+        <article class="sub-card">
+          <h3>{{ t('account.two_factor_title') }}</h3>
+          <p class="muted">
+            {% if me.two_factor_enabled %}
+              {{ t('account.two_factor_status_enabled_detail') }}
             {% else %}
-              <p class="muted small">{{ t('account.integration_not_configured_state') }}</p>
+              {{ t('account.two_factor_status_disabled_detail') }}
+            {% endif %}
+          </p>
+          <div class="row-actions top-gap">
+            {% if me.two_factor_enabled %}
+            <form method="post" action="{{ two_factor_toggle_url or '#' }}">
+              <input type="hidden" name="action" value="disable">
+              <button type="submit" class="btn secondary" {% if not two_factor_toggle_url %}disabled{% endif %}>{{ t('account.two_factor_disable_cta') }}</button>
+            </form>
+            {% else %}
+            <form method="post" action="{{ two_factor_toggle_url or '#' }}">
+              <input type="hidden" name="action" value="enable">
+              <button type="submit" {% if not two_factor_toggle_url %}disabled{% endif %}>{{ t('account.two_factor_enable_cta') }}</button>
+            </form>
+            {% endif %}
+            {% if not two_factor_toggle_url %}
+            <p class="muted small">Endpoint 2FA indisponible. Redémarre le serveur pour charger la dernière version.</p>
             {% endif %}
           </div>
-          <div class="row-actions integration-actions">
-            {% if row.disabled_by_admin %}
-              <button type="button" class="btn secondary" disabled>{{ t('account.integration_unavailable') }}</button>
-            {% elif row.connected %}
-              <form method="post" action="{{ url_for('accounts.external_provider_sync', provider=row.provider) }}">
-                <button type="submit" class="btn secondary">{{ t('account.integration_sync') }}</button>
-              </form>
-              <form method="post" action="{{ url_for('accounts.external_provider_disconnect', provider=row.provider) }}">
-                <button type="submit" class="btn-danger">{{ t('account.integration_disconnect') }}</button>
-              </form>
-            {% elif row.configured %}
-              <a class="btn secondary" href="{{ url_for('accounts.external_provider_connect', provider=row.provider) }}">{{ t('account.integration_connect') }}</a>
-            {% else %}
-              <button type="button" class="btn secondary" disabled>{{ t('account.integration_unavailable') }}</button>
-            {% endif %}
-          </div>
-        </li>
-      {% endfor %}
-    </ul>
+        </article>
+        {% endif %}
 
-    <h3 class="top-gap">{{ t('account.integration_synced_playlists') }}</h3>
-    {% if not youtube_integration_enabled %}
-      <p class="muted">{{ t('account.integration_playlists_hidden_by_admin') }}</p>
-    {% elif external_playlists %}
-      <ul class="playlist-list account-synced-playlists">
-        {% for row in external_playlists %}
+        {% if not me.is_google_account %}
+        <article class="sub-card">
+          <h3>{{ t('account.change_password') }}</h3>
+          <p class="muted small">{{ t('auth.password_policy') }}</p>
+          <form method="post" action="{{ url_for('accounts.change_password') }}" class="stack" data-validate-form="1">
+            {% if not me.require_password_change %}
+            <label>{{ t('account.current_password') }}
+              <input type="password" name="current_password" required>
+            </label>
+            {% endif %}
+            <label>{{ t('account.new_password') }}
+              <input type="password" id="manage-new-password" name="new_password" minlength="6" data-password-policy="1" required>
+            </label>
+            <label>{{ t('account.confirm_password') }}
+              <input type="password" name="confirm_password" minlength="6" data-match-target="manage-new-password" required>
+            </label>
+            <button type="submit">{{ t('account.change_password') }}</button>
+          </form>
+        </article>
+        {% endif %}
+      </div>
+    </section>
+
+    {% if not me.require_password_change %}
+    <section id="account-integrations" class="card dashboard-panel">
+      <h2>{{ t('account.integrations_title') }}</h2>
+      <p class="muted">{{ t('account.integrations_hint') }}</p>
+      <ul class="playlist-list account-integrations-list">
+        {% for row in integration_providers %}
           <li>
             <div>
               <strong>{{ row.name }}</strong>
-              <p class="muted small">{{ row.provider_name }} - {{ t('playlist.count', count=row.tracks_count) }}</p>
-            </div>
-            <div class="row-actions">
-              {% if row.url %}
-                <a class="btn secondary" href="{{ row.url }}" target="_blank" rel="noopener noreferrer">{{ t('account.integration_open_source') }}</a>
+              {% if row.disabled_by_admin %}
+                <p class="muted small">{{ t('account.integration_disabled_by_admin') }}</p>
+              {% elif row.connected %}
+                <p class="muted small">{{ t('account.integration_connected_state') }}</p>
+                {% if row.updated_at %}<p class="muted small">{{ t('account.integration_updated_at') }}: {{ row.updated_at }}</p>{% endif %}
+              {% elif row.configured %}
+                <p class="muted small">{{ t('account.integration_not_connected_state') }}</p>
+              {% else %}
+                <p class="muted small">{{ t('account.integration_not_configured_state') }}</p>
               {% endif %}
-              <form method="post" action="{{ url_for('accounts.external_provider_import_playlist', provider=row.provider, external_playlist_id=row.external_playlist_id) }}">
-                <button type="submit">{{ t('account.integration_import_playlist') }}</button>
-              </form>
+            </div>
+            <div class="integration-actions">
+              {% if row.disabled_by_admin %}
+                <button type="button" class="btn secondary" disabled>{{ t('account.integration_unavailable') }}</button>
+              {% elif row.connected %}
+                <form method="post" action="{{ url_for('accounts.external_provider_sync', provider=row.provider) }}">
+                  <button type="submit" class="btn secondary">{{ t('account.integration_sync') }}</button>
+                </form>
+                <form method="post" action="{{ url_for('accounts.external_provider_disconnect', provider=row.provider) }}">
+                  <button type="submit" class="btn-danger">{{ t('account.integration_disconnect') }}</button>
+                </form>
+              {% elif row.configured %}
+                <a class="btn secondary" href="{{ url_for('accounts.external_provider_connect', provider=row.provider) }}">{{ t('account.integration_connect') }}</a>
+              {% else %}
+                <button type="button" class="btn secondary" disabled>{{ t('account.integration_unavailable') }}</button>
+              {% endif %}
             </div>
           </li>
         {% endfor %}
       </ul>
-    {% else %}
+
+      <h3 class="top-gap">{{ t('account.integration_synced_playlists') }}</h3>
+      {% if not youtube_integration_enabled %}
+      <p class="muted">{{ t('account.integration_playlists_hidden_by_admin') }}</p>
+      {% elif external_playlists %}
+      <ul class="playlist-list account-synced-playlists">
+        {% for row in external_playlists %}
+        <li>
+          <div>
+            <strong>{{ row.name }}</strong>
+            <p class="muted small">{{ row.provider_name }} - {{ t('playlist.count', count=row.tracks_count) }}</p>
+          </div>
+          <div class="row-actions">
+            {% if row.url %}
+            <a class="btn secondary" href="{{ row.url }}" target="_blank" rel="noopener noreferrer">{{ t('account.integration_open_source') }}</a>
+            {% endif %}
+            <form method="post" action="{{ url_for('accounts.external_provider_import_playlist', provider=row.provider, external_playlist_id=row.external_playlist_id) }}">
+              <button type="submit">{{ t('account.integration_import_playlist') }}</button>
+            </form>
+          </div>
+        </li>
+        {% endfor %}
+      </ul>
+      {% else %}
       <p class="muted">{{ t('account.integration_no_playlist') }}</p>
-    {% endif %}
-  </div>
+      {% endif %}
+    </section>
 
-  <div class="card">
-    <h2>{{ t('account.export_title') }}</h2>
-    <p class="muted small">{{ t('account.export_hint') }}</p>
-    <div class="row-actions">
-      <a class="btn secondary" href="{{ url_for('accounts.export_account_json') }}">{{ t('account.export_json') }}</a>
-      <a class="btn secondary" href="{{ url_for('accounts.export_account_csv') }}">{{ t('account.export_csv') }}</a>
-    </div>
-  </div>
+    <section id="account-stats" class="card dashboard-panel">
+      <h2>{{ t('account.creator_stats') }}</h2>
+      <p class="muted">{{ t('account.creator_stats_hint') }}</p>
+      <div class="grid creator-stats-grid top-gap">
+        <div class="badge">{{ t('account.creator_song_count', count=creator_stats.song_count) }}</div>
+        <div class="badge">{{ t('account.creator_total_plays', count=creator_stats.total_plays) }}</div>
+        <div class="badge">{{ t('account.creator_total_likes', count=creator_stats.total_likes) }}</div>
+        <div class="badge">{{ t('account.creator_total_dislikes', count=creator_stats.total_dislikes) }}</div>
+        <div class="badge">{{ t('account.creator_avg_plays', value=creator_stats.avg_plays_per_song) }}</div>
+      </div>
+      <h3 class="top-gap">{{ t('account.creator_top_songs') }}</h3>
+      {% if creator_stats.top_songs %}
+      <ul class="playlist-list">
+        {% for row in creator_stats.top_songs %}
+        <li>
+          <div>
+            <a href="{{ row.detail_url }}"><strong>{{ row.title }}</strong></a>
+            <p>{{ row.artist }}</p>
+          </div>
+          <span class="muted small">{{ t('account.creator_song_plays', count=row.plays) }}</span>
+        </li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <p class="muted">{{ t('account.creator_no_data') }}</p>
+      {% endif %}
+    </section>
 
-  <div class="card">
-    <h2>{{ t('account.preferences_title') }}</h2>
+    <section id="account-preferences" class="card dashboard-panel">
+      <h2>{{ t('account.preferences_title') }}</h2>
 
-    <h3>{{ t('account.blocked_songs') }}</h3>
-    {% if blocked_songs %}
+      <h3>{{ t('account.blocked_songs') }}</h3>
+      {% if blocked_songs %}
       <ul class="playlist-list">
         {% for item in blocked_songs %}
-          <li>
-            <div>
-              {% if item.detail_url %}
-                <a href="{{ item.detail_url }}"><strong>{{ item.title }}</strong></a>
-              {% else %}
-                <strong>{{ item.title }}</strong>
-              {% endif %}
-              <p>{{ item.artist }}</p>
-            </div>
-            <form method="post" action="{{ url_for('accounts.unblock_recommendation_song') }}">
-              <input type="hidden" name="song_id" value="{{ item.id }}">
-              <button type="submit" class="btn secondary">{{ t('account.unblock_song') }}</button>
-            </form>
-          </li>
+        <li>
+          <div>
+            {% if item.detail_url %}
+            <a href="{{ item.detail_url }}"><strong>{{ item.title }}</strong></a>
+            {% else %}
+            <strong>{{ item.title }}</strong>
+            {% endif %}
+            <p>{{ item.artist }}</p>
+          </div>
+          <form method="post" action="{{ url_for('accounts.unblock_recommendation_song') }}">
+            <input type="hidden" name="song_id" value="{{ item.id }}">
+            <button type="submit" class="btn secondary">{{ t('account.unblock_song') }}</button>
+          </form>
+        </li>
         {% endfor %}
       </ul>
-    {% else %}
+      {% else %}
       <p class="muted">{{ t('account.no_blocked_songs') }}</p>
-    {% endif %}
+      {% endif %}
 
-    <h3 class="top-gap">{{ t('account.blocked_artists') }}</h3>
-    {% if blocked_artists %}
+      <h3 class="top-gap">{{ t('account.blocked_artists') }}</h3>
+      {% if blocked_artists %}
       <ul class="playlist-list">
         {% for artist in blocked_artists %}
-          <li>
-            <div><strong>{{ artist }}</strong></div>
-            <form method="post" action="{{ url_for('accounts.unblock_recommendation_artist') }}">
-              <input type="hidden" name="artist" value="{{ artist }}">
-              <button type="submit" class="btn secondary">{{ t('account.unblock_artist') }}</button>
-            </form>
-          </li>
+        <li>
+          <div><strong>{{ artist }}</strong></div>
+          <form method="post" action="{{ url_for('accounts.unblock_recommendation_artist') }}">
+            <input type="hidden" name="artist" value="{{ artist }}">
+            <button type="submit" class="btn secondary">{{ t('account.unblock_artist') }}</button>
+          </form>
+        </li>
         {% endfor %}
       </ul>
-    {% else %}
+      {% else %}
       <p class="muted">{{ t('account.no_blocked_artists') }}</p>
+      {% endif %}
+    </section>
+
+    <section id="account-export" class="card dashboard-panel">
+      <h2>{{ t('account.export_title') }}</h2>
+      <p class="muted">{{ t('account.export_hint') }}</p>
+      <div class="row-actions">
+        <a class="btn secondary" href="{{ url_for('accounts.export_account_json') }}">{{ t('account.export_json') }}</a>
+        <a class="btn secondary" href="{{ url_for('accounts.export_account_csv') }}">{{ t('account.export_csv') }}</a>
+      </div>
+    </section>
+
+    <section id="account-danger" class="card dashboard-panel danger-panel">
+      <h2>{{ t('account.section_danger') }}</h2>
+      <div class="danger-grid">
+        <article class="sub-card">
+          <h3>{{ t('account.delete_my_songs') }}</h3>
+          <form method="post" action="{{ url_for('accounts.delete_my_songs') }}">
+            <button type="submit" class="btn-danger">{{ t('account.delete_my_songs') }}</button>
+          </form>
+        </article>
+
+        <article class="sub-card">
+          <h3>{{ t('account.delete_account') }}</h3>
+          {% if me.is_root_admin %}
+          <p class="muted">{{ t('account.root_admin_not_deletable') }}</p>
+          {% else %}
+          <form method="post" action="{{ url_for('accounts.delete_account') }}" class="stack" data-validate-form="1">
+            <label>{{ t('auth.password') }}
+              <input type="password" name="password" required>
+            </label>
+            <label>{{ t('account.delete_songs_on_delete') }}
+              <select name="delete_songs">
+                <option value="yes">{{ t('yes') }}</option>
+                <option value="no">{{ t('no') }}</option>
+              </select>
+            </label>
+            <button type="submit" class="btn-danger">{{ t('account.delete_account') }}</button>
+          </form>
+          {% endif %}
+        </article>
+      </div>
+    </section>
     {% endif %}
   </div>
-
-  <div class="card">
-    <h2>{{ t('account.delete_my_songs') }}</h2>
-    <form method="post" action="{{ url_for('accounts.delete_my_songs') }}">
-      <button type="submit" class="btn-danger">{{ t('account.delete_my_songs') }}</button>
-    </form>
-  </div>
-
-  <div class="card">
-    <h2>{{ t('account.delete_account') }}</h2>
-    {% if me.is_root_admin %}
-      <p>{{ t('account.root_admin_not_deletable') }}</p>
-    {% else %}
-    <form method="post" action="{{ url_for('accounts.delete_account') }}" class="stack" data-validate-form="1">
-      <label>{{ t('auth.password') }}
-        <input type="password" name="password" required>
-      </label>
-      <label>{{ t('account.delete_songs_on_delete') }}
-        <select name="delete_songs">
-          <option value="yes">{{ t('yes') }}</option>
-          <option value="no">{{ t('no') }}</option>
-        </select>
-      </label>
-      <button type="submit" class="btn-danger">{{ t('account.delete_account') }}</button>
-    </form>
-    {% endif %}
-  </div>
-  {% endif %}
 </section>
+
+{% if show_two_factor_prompt %}
+<div id="two-factor-suggest-modal" class="modal force-modal" aria-hidden="false" role="dialog" aria-modal="true">
+  <div class="modal-card">
+    <h3>{{ t('account.two_factor_suggest_title') }}</h3>
+    <p>{{ t('account.two_factor_suggest_body') }}</p>
+    <p class="muted small">{{ t('account.two_factor_suggest_note') }}</p>
+    <div class="row-actions top-gap">
+      <form method="post" action="{{ two_factor_toggle_url or '#' }}">
+        <input type="hidden" name="action" value="enable">
+        <button type="submit" {% if not two_factor_toggle_url %}disabled{% endif %}>{{ t('account.two_factor_enable_cta') }}</button>
+      </form>
+      <form method="post" action="{{ two_factor_dismiss_url or '#' }}">
+        <button type="submit" class="btn secondary" {% if not two_factor_dismiss_url %}disabled{% endif %}>{{ t('account.two_factor_suggest_later') }}</button>
+      </form>
+    </div>
+    {% if (not two_factor_toggle_url) or (not two_factor_dismiss_url) %}
+    <p class="muted small">Endpoints 2FA indisponibles. Redémarre le serveur pour charger la dernière version.</p>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
 {% endblock %}
-
-

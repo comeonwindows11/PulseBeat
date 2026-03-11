@@ -357,6 +357,17 @@
     </div>
   </div>
 
+  <div id="tab-audio-guard-modal" class="modal hidden" aria-hidden="true" role="dialog" aria-modal="true">
+    <div class="modal-card tab-guard-card">
+      <h3>{{ t('tab_guard.title') }}</h3>
+      <p>{{ t('tab_guard.body') }}</p>
+      <div class="row-actions">
+        <button id="tab-audio-guard-deny" type="button" class="btn secondary">{{ t('tab_guard.keep_old_tab') }}</button>
+        <button id="tab-audio-guard-allow" type="button">{{ t('tab_guard.allow_here') }}</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     window.CSRF_TOKEN = {{ csrf_token|tojson }};
     window.I18N = {
@@ -397,6 +408,7 @@
       playerStreamError: {{ t('player.stream_error')|tojson }},
       playerStreamErrorCode: {{ t('player.stream_error_code')|tojson }},
       playerTryNext: {{ t('player.try_next')|tojson }},
+      playerTabBlockedNotice: {{ t('player.tab_blocked_notice')|tojson }},
       playerYoutubeOnly: {{ t('player.youtube_only')|tojson }},
       playerOpenSource: {{ t('player.open_source')|tojson }},
       playerUnavailableSkipped: {{ t('player.unavailable_skipped')|tojson }},
@@ -450,7 +462,6 @@
   <script src="{{ url_for('static', filename='js/player.js') }}"></script>
 </body>
 </html>
-
 
 
 

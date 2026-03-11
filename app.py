@@ -178,6 +178,9 @@ def create_app():
     app.config["PASSWORD_RESET_SALT"] = os.getenv("PASSWORD_RESET_SALT", "pulsebeat-reset-salt")
     app.config["EMAIL_VERIFICATION_TOKEN_MAX_AGE"] = int(os.getenv("EMAIL_VERIFICATION_TOKEN_MAX_AGE", "86400"))
     app.config["EMAIL_VERIFICATION_SALT"] = os.getenv("EMAIL_VERIFICATION_SALT", "pulsebeat-email-verify")
+    app.config["TWO_FACTOR_CODE_MAX_AGE"] = int(os.getenv("TWO_FACTOR_CODE_MAX_AGE", "600"))
+    app.config["TWO_FACTOR_TOGGLE_TOKEN_MAX_AGE"] = int(os.getenv("TWO_FACTOR_TOGGLE_TOKEN_MAX_AGE", "3600"))
+    app.config["TWO_FACTOR_TOGGLE_SALT"] = os.getenv("TWO_FACTOR_TOGGLE_SALT", "pulsebeat-two-factor-toggle")
     app.config["GOOGLE_CLIENT_ID"] = os.getenv("GOOGLE_CLIENT_ID", "")
     app.config["GOOGLE_CLIENT_SECRET"] = os.getenv("GOOGLE_CLIENT_SECRET", "")
     app.config["GOOGLE_REDIRECT_URI"] = os.getenv("GOOGLE_REDIRECT_URI", "")
@@ -198,7 +201,17 @@ def create_app():
     extensions.users_col.update_many({"email_verified": {"$exists": False}}, {"$set": {"email_verified": True, "email_verified_at": now}})
     extensions.users_col.update_many({"email_verification_sent_at": {"$exists": False}}, {"$set": {"email_verification_sent_at": None}})
     extensions.users_col.update_many({"auth_provider": {"$exists": False}}, {"$set": {"auth_provider": "local"}})
-    extensions.users_col.update_many({"auth_provider": "google"}, {"$set": {"require_password_change": False}, "$unset": {"password_compromised_at": ""}})
+    extensions.users_col.update_many(
+        {"auth_provider": "google"},
+        {
+            "$set": {
+                "require_password_change": False,
+                "two_factor_enabled": False,
+                "two_factor_prompt_pending": False,
+            },
+            "$unset": {"password_compromised_at": ""},
+        },
+    )
     extensions.users_col.update_many({"session_token_version": {"$exists": False}}, {"$set": {"session_token_version": 0}})
     extensions.users_col.update_many({"login_failure_count": {"$exists": False}}, {"$set": {"login_failure_count": 0}})
     extensions.users_col.update_many({"login_lock_level": {"$exists": False}}, {"$set": {"login_lock_level": 0}})
@@ -206,6 +219,8 @@ def create_app():
     extensions.users_col.update_many({"dismissed_admin_alerts": {"$exists": False}}, {"$set": {"dismissed_admin_alerts": []}})
     extensions.users_col.update_many({"player_crossfade_enabled": {"$exists": False}}, {"$set": {"player_crossfade_enabled": True}})
     extensions.users_col.update_many({"player_normalize_volume_enabled": {"$exists": False}}, {"$set": {"player_normalize_volume_enabled": True}})
+    extensions.users_col.update_many({"two_factor_enabled": {"$exists": False}}, {"$set": {"two_factor_enabled": False}})
+    extensions.users_col.update_many({"two_factor_prompt_pending": {"$exists": False}}, {"$set": {"two_factor_prompt_pending": False}})
     extensions.songs_col.update_many({"is_available": {"$exists": False}}, {"$set": {"is_available": True}})
     extensions.songs_col.update_many({"availability_reason": {"$exists": False}}, {"$set": {"availability_reason": ""}})
     for user in extensions.users_col.find({}, {"email": 1, "username": 1}):
@@ -399,4 +414,3 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     # On force l'hôte à 0.0.0.0 pour être accessible de l'extérieur
     app.run(host="0.0.0.0", port=port)
-

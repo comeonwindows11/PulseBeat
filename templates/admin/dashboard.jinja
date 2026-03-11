@@ -2,85 +2,107 @@
 {% block title %}{{ t('nav.admin') }} - {{ app_name }}{% endblock %}
 
 {% block content %}
-<section class="admin-alerts">
-  {% if show_password_alert %}
-  <div class="card alert-card admin-alert-card" data-admin-alert-key="{{ password_alert_key }}">
-    <button type="button" class="admin-alert-dismiss-btn" aria-label="{{ t('admin.dismiss_alert') }}" title="{{ t('admin.dismiss_alert') }}">×</button>
-    <h3>{{ t('admin.security_alert') }}</h3>
-    <p>{{ t('admin.password_check_down') }}</p>
-    <p class="muted small">{{ password_check_status.message }}</p>
-  </div>
-  {% endif %}
+<section class="dashboard-shell admin-dashboard-shell">
+  <aside class="card dashboard-sidebar">
+    <h1>{{ t('nav.admin') }}</h1>
+    <p class="muted small"><strong>{{ me.username }}</strong> - {{ me.email }}</p>
+    <div class="dashboard-badges">
+      {% if me.is_root_admin %}<span class="badge root-badge">Root admin</span>{% endif %}
+    </div>
+    <nav class="dashboard-nav">
+      <a href="#admin-settings">{{ t('admin.section_settings') }}</a>
+      <a href="#admin-users">{{ t('admin.users') }}</a>
+      <a href="#admin-songs">{{ t('admin.songs') }}</a>
+      <a href="#admin-comments">{{ t('admin.comments') }}</a>
+      <a href="#admin-reports">{{ t('admin.reports') }}</a>
+      <a href="#admin-audit">{{ t('admin.audit_logs') }}</a>
+    </nav>
+  </aside>
 
-  {% if show_moderation_alert %}
-  <div class="card alert-card admin-alert-card" data-admin-alert-key="{{ moderation_alert_key }}">
-    <button type="button" class="admin-alert-dismiss-btn" aria-label="{{ t('admin.dismiss_alert') }}" title="{{ t('admin.dismiss_alert') }}">×</button>
-    <h3>{{ t('admin.moderation_alert') }}</h3>
-    <p>{{ moderation_status.message }}</p>
-    <p class="muted small">{{ moderation_status.updated_at }}</p>
-  </div>
-  {% endif %}
-</section>
-
-<div
-  id="admin-alert-toast"
-  class="admin-alert-toast hidden"
-  role="status"
-  aria-live="polite"
-  data-dismiss-url="{{ url_for('admin.dismiss_dashboard_alert') }}"
-  data-restore-url="{{ url_for('admin.restore_dashboard_alert') }}"
->
-  <span id="admin-alert-toast-text"></span>
-  <button id="admin-alert-toast-undo" type="button">{{ t('player.menu.undo') }}</button>
-</div>
-
-<section class="grid two-cols">
-  <div class="card admin-settings-card">
-    <h2>{{ t('admin.youtube_settings_title') }}</h2>
-    <p class="muted small">{{ t('admin.youtube_settings_hint') }}</p>
-    <form method="post" action="{{ youtube_toggle_url or '#' }}" class="stack admin-settings-form">
-      <label class="admin-setting-row">
-        <span class="admin-setting-text">{{ t('admin.youtube_toggle_label') }}</span>
-        <input type="checkbox" name="enable_youtube_integration" value="1" {% if youtube_integration_enabled %}checked{% endif %} {% if (not me.is_root_admin) or (not youtube_toggle_url) %}disabled{% endif %}>
-      </label>
-      {% if not me.is_root_admin %}
-        <p class="muted small admin-settings-help">{{ t('admin.youtube_toggle_root_only') }}</p>
-      {% elif not youtube_toggle_url %}
-        <p class="muted small admin-settings-help">Endpoint indisponible. Redémarre le serveur pour charger la dernière version.</p>
+  <div class="dashboard-main">
+    <section class="admin-alerts" id="admin-alerts">
+      {% if show_password_alert %}
+      <div class="card alert-card admin-alert-card" data-admin-alert-key="{{ password_alert_key }}">
+        <button type="button" class="admin-alert-dismiss-btn" aria-label="{{ t('admin.dismiss_alert') }}" title="{{ t('admin.dismiss_alert') }}">×</button>
+        <h3>{{ t('admin.security_alert') }}</h3>
+        <p>{{ t('admin.password_check_down') }}</p>
+        <p class="muted small">{{ password_check_status.message }}</p>
+      </div>
       {% endif %}
-      <button type="submit" {% if (not me.is_root_admin) or (not youtube_toggle_url) %}disabled{% endif %}>{{ t('admin.youtube_toggle_save') }}</button>
-    </form>
-  </div>
 
-  <div class="card">
-    <h2>{{ t('admin.create_admin') }}</h2>
-    <form method="post" action="{{ url_for('admin.create_admin') }}" class="stack" data-validate-form="1">
-      <label>{{ t('auth.username') }}
-        <input type="text" id="admin-create-username" name="username" minlength="3" maxlength="32" pattern="[A-Za-z0-9_.-]{3,32}" data-remote-check="username" data-remote-url="{{ url_for('accounts.check_availability') }}" required>
-      </label>
-      <label>{{ t('auth.email') }}
-        <input type="email" id="admin-create-email" name="email" data-remote-check="email" data-remote-url="{{ url_for('accounts.check_availability') }}" required>
-      </label>
-      <label>{{ t('auth.password') }}
-        <input type="password" id="admin-create-password" name="password" minlength="6" data-password-policy="1" required>
-      </label>
-      <p class="muted small">{{ t('auth.password_policy') }}</p>
-      <label>{{ t('account.confirm_password') }}
-        <input type="password" name="confirm_password" minlength="6" data-match-target="admin-create-password" required>
-      </label>
-      <button type="submit">{{ t('admin.create_admin') }}</button>
-    </form>
-  </div>
+      {% if show_moderation_alert %}
+      <div class="card alert-card admin-alert-card" data-admin-alert-key="{{ moderation_alert_key }}">
+        <button type="button" class="admin-alert-dismiss-btn" aria-label="{{ t('admin.dismiss_alert') }}" title="{{ t('admin.dismiss_alert') }}">×</button>
+        <h3>{{ t('admin.moderation_alert') }}</h3>
+        <p>{{ moderation_status.message }}</p>
+        <p class="muted small">{{ moderation_status.updated_at }}</p>
+      </div>
+      {% endif %}
+    </section>
 
-  <div class="card">
-    <h2>{{ t('admin.users') }}</h2>
-    <ul class="playlist-list users-scroll">
-      {% for user in users %}
+    <div
+      id="admin-alert-toast"
+      class="admin-alert-toast hidden"
+      role="status"
+      aria-live="polite"
+      data-dismiss-url="{{ url_for('admin.dismiss_dashboard_alert') }}"
+      data-restore-url="{{ url_for('admin.restore_dashboard_alert') }}"
+    >
+      <span id="admin-alert-toast-text"></span>
+      <button id="admin-alert-toast-undo" type="button">{{ t('player.menu.undo') }}</button>
+    </div>
+
+    <section id="admin-settings" class="dashboard-panel card">
+      <h2>{{ t('admin.section_settings') }}</h2>
+      <div class="admin-settings-grid">
+        <article class="sub-card admin-settings-card">
+          <h3>{{ t('admin.youtube_settings_title') }}</h3>
+          <p class="muted small">{{ t('admin.youtube_settings_hint') }}</p>
+          <form method="post" action="{{ youtube_toggle_url or '#' }}" class="stack admin-settings-form">
+            <label class="admin-setting-row">
+              <span class="admin-setting-text">{{ t('admin.youtube_toggle_label') }}</span>
+              <input type="checkbox" name="enable_youtube_integration" value="1" {% if youtube_integration_enabled %}checked{% endif %} {% if (not me.is_root_admin) or (not youtube_toggle_url) %}disabled{% endif %}>
+            </label>
+            {% if not me.is_root_admin %}
+              <p class="muted small admin-settings-help">{{ t('admin.youtube_toggle_root_only') }}</p>
+            {% elif not youtube_toggle_url %}
+              <p class="muted small admin-settings-help">Endpoint indisponible. Redémarre le serveur pour charger la dernière version.</p>
+            {% endif %}
+            <button type="submit" {% if (not me.is_root_admin) or (not youtube_toggle_url) %}disabled{% endif %}>{{ t('admin.youtube_toggle_save') }}</button>
+          </form>
+        </article>
+
+        <article class="sub-card">
+          <h3>{{ t('admin.create_admin') }}</h3>
+          <form method="post" action="{{ url_for('admin.create_admin') }}" class="stack" data-validate-form="1">
+            <label>{{ t('auth.username') }}
+              <input type="text" id="admin-create-username" name="username" minlength="3" maxlength="32" pattern="[A-Za-z0-9_.-]{3,32}" data-remote-check="username" data-remote-url="{{ url_for('accounts.check_availability') }}" required>
+            </label>
+            <label>{{ t('auth.email') }}
+              <input type="email" id="admin-create-email" name="email" data-remote-check="email" data-remote-url="{{ url_for('accounts.check_availability') }}" required>
+            </label>
+            <label>{{ t('auth.password') }}
+              <input type="password" id="admin-create-password" name="password" minlength="6" data-password-policy="1" required>
+            </label>
+            <p class="muted small">{{ t('auth.password_policy') }}</p>
+            <label>{{ t('account.confirm_password') }}
+              <input type="password" name="confirm_password" minlength="6" data-match-target="admin-create-password" required>
+            </label>
+            <button type="submit">{{ t('admin.create_admin') }}</button>
+          </form>
+        </article>
+      </div>
+    </section>
+
+    <section id="admin-users" class="dashboard-panel card">
+      <h2>{{ t('admin.users') }}</h2>
+      <ul class="playlist-list users-scroll">
+        {% for user in users %}
         <li>
           <div>
             <strong>{{ user.username }}</strong> ({{ user.email }}) {% if user.is_root_admin %}[root admin]{% elif user.is_admin %}[admin]{% endif %}
             {% if user.banned_until and user.banned_until > now %}
-              <p class="muted small">{{ t('admin.banned_until') }}: {{ user.banned_until }}</p>
+            <p class="muted small">{{ t('admin.banned_until') }}: {{ user.banned_until }}</p>
             {% endif %}
           </div>
           <div class="row-actions">
@@ -108,70 +130,69 @@
             {% endif %}
           </div>
         </li>
-      {% endfor %}
-    </ul>
-    <div class="pagination">
-      {% if users_page > 1 %}
-        <a class="btn secondary" href="{{ url_for('admin.dashboard', users_page=users_page-1, songs_page=songs_page, comments_page=comments_page, reports_page=reports_page, logs_page=logs_page) }}">{{ t('main.prev') }}</a>
-      {% endif %}
-      <span>{{ t('main.page', page=users_page, pages=users_pages) }}</span>
-      {% if users_page < users_pages %}
-        <a class="btn secondary" href="{{ url_for('admin.dashboard', users_page=users_page+1, songs_page=songs_page, comments_page=comments_page, reports_page=reports_page, logs_page=logs_page) }}">{{ t('main.next') }}</a>
-      {% endif %}
-    </div>
-  </div>
+        {% endfor %}
+      </ul>
+      <div class="pagination">
+        {% if users_page > 1 %}
+          <a class="btn secondary" href="{{ url_for('admin.dashboard', users_page=users_page-1, songs_page=songs_page, comments_page=comments_page, reports_page=reports_page, logs_page=logs_page) }}">{{ t('main.prev') }}</a>
+        {% endif %}
+        <span>{{ t('main.page', page=users_page, pages=users_pages) }}</span>
+        {% if users_page < users_pages %}
+          <a class="btn secondary" href="{{ url_for('admin.dashboard', users_page=users_page+1, songs_page=songs_page, comments_page=comments_page, reports_page=reports_page, logs_page=logs_page) }}">{{ t('main.next') }}</a>
+        {% endif %}
+      </div>
+    </section>
 
-  <div class="card">
-    <h2>{{ t('admin.songs') }}</h2>
-    <ul class="playlist-list users-scroll">
-      {% for song in songs %}
+    <section id="admin-songs" class="dashboard-panel card">
+      <h2>{{ t('admin.songs') }}</h2>
+      <ul class="playlist-list users-scroll">
+        {% for song in songs %}
         <li>
           <span>{{ song.title }} - {{ song.artist }}</span>
           <form method="post" action="{{ url_for('songs.admin_delete_song', song_id=song._id|string) }}">
             <button type="submit" class="btn-danger">{{ t('main.delete') }}</button>
           </form>
         </li>
-      {% endfor %}
-    </ul>
-    <div class="pagination">
-      {% if songs_page > 1 %}
-        <a class="btn secondary" href="{{ url_for('admin.dashboard', users_page=users_page, songs_page=songs_page-1, comments_page=comments_page, reports_page=reports_page, logs_page=logs_page) }}">{{ t('main.prev') }}</a>
-      {% endif %}
-      <span>{{ t('main.page', page=songs_page, pages=songs_pages) }}</span>
-      {% if songs_page < songs_pages %}
-        <a class="btn secondary" href="{{ url_for('admin.dashboard', users_page=users_page, songs_page=songs_page+1, comments_page=comments_page, reports_page=reports_page, logs_page=logs_page) }}">{{ t('main.next') }}</a>
-      {% endif %}
-    </div>
-  </div>
+        {% endfor %}
+      </ul>
+      <div class="pagination">
+        {% if songs_page > 1 %}
+          <a class="btn secondary" href="{{ url_for('admin.dashboard', users_page=users_page, songs_page=songs_page-1, comments_page=comments_page, reports_page=reports_page, logs_page=logs_page) }}">{{ t('main.prev') }}</a>
+        {% endif %}
+        <span>{{ t('main.page', page=songs_page, pages=songs_pages) }}</span>
+        {% if songs_page < songs_pages %}
+          <a class="btn secondary" href="{{ url_for('admin.dashboard', users_page=users_page, songs_page=songs_page+1, comments_page=comments_page, reports_page=reports_page, logs_page=logs_page) }}">{{ t('main.next') }}</a>
+        {% endif %}
+      </div>
+    </section>
 
-  
-  <div class="card">
-    <h2>{{ t('admin.comments') }}</h2>
-    <ul class="playlist-list users-scroll">
-      {% for comment in comments %}
+    <section id="admin-comments" class="dashboard-panel card">
+      <h2>{{ t('admin.comments') }}</h2>
+      <ul class="playlist-list users-scroll">
+        {% for comment in comments %}
         <li>
           <span>{{ comment.content }}</span>
           <form method="post" action="{{ url_for('admin.delete_comment', comment_id=comment._id|string) }}">
             <button type="submit" class="btn-danger">{{ t('main.delete') }}</button>
           </form>
         </li>
-      {% endfor %}
-    </ul>
-    <div class="pagination">
-      {% if comments_page > 1 %}
-        <a class="btn secondary" href="{{ url_for('admin.dashboard', users_page=users_page, songs_page=songs_page, comments_page=comments_page-1, reports_page=reports_page, logs_page=logs_page) }}">{{ t('main.prev') }}</a>
-      {% endif %}
-      <span>{{ t('main.page', page=comments_page, pages=comments_pages) }}</span>
-      {% if comments_page < comments_pages %}
-        <a class="btn secondary" href="{{ url_for('admin.dashboard', users_page=users_page, songs_page=songs_page, comments_page=comments_page+1, reports_page=reports_page, logs_page=logs_page) }}">{{ t('main.next') }}</a>
-      {% endif %}
-    </div>
-  </div>
+        {% endfor %}
+      </ul>
+      <div class="pagination">
+        {% if comments_page > 1 %}
+          <a class="btn secondary" href="{{ url_for('admin.dashboard', users_page=users_page, songs_page=songs_page, comments_page=comments_page-1, reports_page=reports_page, logs_page=logs_page) }}">{{ t('main.prev') }}</a>
+        {% endif %}
+        <span>{{ t('main.page', page=comments_page, pages=comments_pages) }}</span>
+        {% if comments_page < comments_pages %}
+          <a class="btn secondary" href="{{ url_for('admin.dashboard', users_page=users_page, songs_page=songs_page, comments_page=comments_page+1, reports_page=reports_page, logs_page=logs_page) }}">{{ t('main.next') }}</a>
+        {% endif %}
+      </div>
+    </section>
 
-  <div class="card">
-    <h2>{{ t('admin.reports') }}</h2>
-    <ul class="playlist-list users-scroll">
-      {% for report in reports %}
+    <section id="admin-reports" class="dashboard-panel card">
+      <h2>{{ t('admin.reports') }}</h2>
+      <ul class="playlist-list users-scroll">
+        {% for report in reports %}
         <li>
           <div>
             <strong>{{ report.target_type }}</strong>
@@ -192,23 +213,23 @@
             </form>
           </div>
         </li>
-      {% endfor %}
-    </ul>
-    <div class="pagination">
-      {% if reports_page > 1 %}
-        <a class="btn secondary" href="{{ url_for('admin.dashboard', users_page=users_page, songs_page=songs_page, comments_page=comments_page, reports_page=reports_page-1, logs_page=logs_page) }}">{{ t('main.prev') }}</a>
-      {% endif %}
-      <span>{{ t('main.page', page=reports_page, pages=reports_pages) }}</span>
-      {% if reports_page < reports_pages %}
-        <a class="btn secondary" href="{{ url_for('admin.dashboard', users_page=users_page, songs_page=songs_page, comments_page=comments_page, reports_page=reports_page+1, logs_page=logs_page) }}">{{ t('main.next') }}</a>
-      {% endif %}
-    </div>
-  </div>
+        {% endfor %}
+      </ul>
+      <div class="pagination">
+        {% if reports_page > 1 %}
+          <a class="btn secondary" href="{{ url_for('admin.dashboard', users_page=users_page, songs_page=songs_page, comments_page=comments_page, reports_page=reports_page-1, logs_page=logs_page) }}">{{ t('main.prev') }}</a>
+        {% endif %}
+        <span>{{ t('main.page', page=reports_page, pages=reports_pages) }}</span>
+        {% if reports_page < reports_pages %}
+          <a class="btn secondary" href="{{ url_for('admin.dashboard', users_page=users_page, songs_page=songs_page, comments_page=comments_page, reports_page=reports_page+1, logs_page=logs_page) }}">{{ t('main.next') }}</a>
+        {% endif %}
+      </div>
+    </section>
 
-  <div class="card">
-    <h2>{{ t('admin.audit_logs') }}</h2>
-    <ul class="playlist-list users-scroll">
-      {% for log in audit_logs %}
+    <section id="admin-audit" class="dashboard-panel card">
+      <h2>{{ t('admin.audit_logs') }}</h2>
+      <ul class="playlist-list users-scroll">
+        {% for log in audit_logs %}
         <li>
           <div>
             <strong>{{ log.action }}</strong>
@@ -216,20 +237,18 @@
           </div>
           <span class="muted small">{{ log.created_at }}</span>
         </li>
-      {% endfor %}
-    </ul>
-    <div class="pagination">
-      {% if logs_page > 1 %}
-        <a class="btn secondary" href="{{ url_for('admin.dashboard', users_page=users_page, songs_page=songs_page, comments_page=comments_page, reports_page=reports_page, logs_page=logs_page-1) }}">{{ t('main.prev') }}</a>
-      {% endif %}
-      <span>{{ t('main.page', page=logs_page, pages=logs_pages) }}</span>
-      {% if logs_page < logs_pages %}
-        <a class="btn secondary" href="{{ url_for('admin.dashboard', users_page=users_page, songs_page=songs_page, comments_page=comments_page, reports_page=reports_page, logs_page=logs_page+1) }}">{{ t('main.next') }}</a>
-      {% endif %}
-    
-    </div>
+        {% endfor %}
+      </ul>
+      <div class="pagination">
+        {% if logs_page > 1 %}
+          <a class="btn secondary" href="{{ url_for('admin.dashboard', users_page=users_page, songs_page=songs_page, comments_page=comments_page, reports_page=reports_page, logs_page=logs_page-1) }}">{{ t('main.prev') }}</a>
+        {% endif %}
+        <span>{{ t('main.page', page=logs_page, pages=logs_pages) }}</span>
+        {% if logs_page < logs_pages %}
+          <a class="btn secondary" href="{{ url_for('admin.dashboard', users_page=users_page, songs_page=songs_page, comments_page=comments_page, reports_page=reports_page, logs_page=logs_page+1) }}">{{ t('main.next') }}</a>
+        {% endif %}
+      </div>
+    </section>
   </div>
-  </section>
+</section>
 {% endblock %}
-
-

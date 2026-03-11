@@ -8,6 +8,8 @@ Application de streaming musical en `Flask` + `Jinja`, inspirée de YouTube Musi
 - Vérification d'adresse e-mail obligatoire avant connexion
 - Connexion Google OAuth
 - Les comptes Google ne gèrent pas leur mot de passe dans PulseBeat : pas de changement de mot de passe local, pas de lockout lié aux mots de passe compromis
+- Authentification 2 facteurs (2FA) optionnelle par code courriel pour les comptes locaux
+- Activation/désactivation de la 2FA confirmée par courriel puis mot de passe
 - Réinitialisation de mot de passe par e-mail
 - Avertissement à l'inscription pour e-mail temporaire avec confirmation explicite avant création du compte
 - Vérification des mots de passe compromis
@@ -30,6 +32,7 @@ Application de streaming musical en `Flask` + `Jinja`, inspirée de YouTube Musi
 - Option de normalisation de volume côté lecteur
 - Lecteur avec vues `mini`, `normale` et `plein écran`
 - Bouton `previous` type lecteur moderne : avant 5 secondes il revient à la chanson précédente, à partir de 5 secondes il redémarre la chanson courante
+- Anti-superposition audio multi-onglets (modal de garde audio + blocage de lecture sur onglet récent tant que non confirmé)
 - Si une chanson est référencée en base mais introuvable sur le serveur, le lecteur affiche une erreur générique avec code HTTP (ex. 404) et suggère de passer à la suivante
 - Historique d'écoute
 - Page de détail par chanson
@@ -160,6 +163,63 @@ Comportement actuel :
 - Une connexion réussie avec les bons identifiants réinitialise le compteur et le niveau de verrouillage.
 - Après un changement de mot de passe ou une réinitialisation, toutes les sessions existantes sont invalidées globalement ; une reconnexion est requise sur tous les appareils.
 
+## Authentification 2 facteurs (2FA)
+
+### Vue d'ensemble
+
+PulseBeat propose une 2FA **optionnelle** pour les comptes locaux (non Google).  
+Quand elle est activée, une connexion par mot de passe nécessite aussi un **code de vérification à 6 chiffres envoyé par courriel**.
+
+Important :
+- les comptes Google ne peuvent pas activer la 2FA PulseBeat (la 2FA est gérée côté Google)
+- la 2FA locale s'applique uniquement après une authentification primaire correcte (email/username + mot de passe)
+
+### Comment activer la 2FA
+
+1. Aller dans `Gérer mon compte` > section `Authentification 2 facteurs`.
+2. Cliquer `Activer la 2FA`.
+3. PulseBeat envoie un **courriel de confirmation** contenant un lien signé temporaire.
+4. Ouvrir ce lien puis entrer le **mot de passe actuel** pour finaliser.
+5. La 2FA passe à l'état `activée`.
+
+Après la création d'un compte local, PulseBeat affiche aussi un modal de recommandation pour encourager l'activation.
+
+### Comment désactiver la 2FA
+
+Le flux est symétrique à l'activation :
+1. Cliquer `Désactiver la 2FA`.
+2. Confirmer via le lien reçu par courriel.
+3. Entrer le mot de passe actuel sur l'écran de confirmation.
+4. La 2FA passe à l'état `désactivée`.
+
+### Technique 2FA utilisée
+
+- code OTP numérique à `6` chiffres (`TWO_FACTOR_CODE_LENGTH = 6`)
+- code généré côté serveur via `secrets.randbelow(...)`
+- le code n'est **pas stocké en clair** en session :
+  - PulseBeat stocke un hash SHA-256 basé sur `user_id + code + FLASK_SECRET_KEY`
+- durée de validité du code configurable via `TWO_FACTOR_CODE_MAX_AGE` (défaut `600` secondes)
+- page challenge dédiée (`/two-factor/challenge`) avec possibilité de renvoyer un nouveau code
+
+### Mauvais code / trop de tentatives
+
+- chaque code invalide incrémente un compteur en session
+- message utilisateur avec le nombre de tentatives restantes
+- limite stricte : `6` erreurs (`TWO_FACTOR_CODE_MAX_ATTEMPTS = 6`)
+- à la limite atteinte :
+  - session 2FA invalidée
+  - retour à la page de connexion
+  - il faut recommencer le login pour obtenir un nouveau code
+- si le code expire, même comportement : challenge invalidé et retour login
+
+### Confirmation par courriel pour activation/désactivation
+
+Les opérations sensibles d'activation/désactivation 2FA exigent :
+- un **lien signé temporaire** envoyé par courriel (`TWO_FACTOR_TOGGLE_TOKEN_MAX_AGE`, défaut `3600` secondes)
+- puis une **vérification du mot de passe**
+
+Cela réduit les risques de bascule 2FA non autorisée même si la session web est déjà ouverte.
+
 ## Lecteur audio
 
 Le lecteur flottant persiste entre les pages et conserve son état en local.
@@ -175,6 +235,43 @@ Comportement notable :
   - moins de 5 secondes de lecture : chanson précédente
   - 5 secondes ou plus : redémarrage de la chanson courante
 - ce comportement s'applique aussi aux boutons média système compatibles (clavier, écouteurs, contrôles OS)
+
+## Anti-superposition audio multi-onglets
+
+PulseBeat inclut une garde audio pour éviter que plusieurs onglets lisent du son en même temps par erreur.
+
+### Comportement utilisateur
+
+- si un seul onglet PulseBeat est actif : lecture normale
+- dès qu'un onglet plus récent est ouvert alors qu'un autre onglet PulseBeat existe déjà :
+  - un modal bloquant s'affiche dans l'onglet récent
+  - la lecture y est bloquée tant que l'utilisateur ne confirme pas explicitement
+  - l'onglet le plus ancien continue à jouer normalement
+
+Options du modal :
+- `Garder l'ancien onglet` : ce nouvel onglet reste bloqué pour l'audio
+- `Autoriser ici` : l'utilisateur autorise la lecture sur l'onglet récent
+
+### Détails techniques
+
+- registre des onglets actifs dans `localStorage` (`pulsebeat_active_tabs_v1`)
+- identifiant tab-level en `sessionStorage` + `runtimeId` pour éviter les collisions lors de duplication d'onglet
+- heartbeat périodique toutes les `5s` (`TAB_HEARTBEAT_MS`)
+- purge automatique des onglets inactifs après `20s` (`TAB_STALE_MS`)
+- désenregistrement propre de l'onglet à la fermeture/navigation (`beforeunload` / `pagehide`)
+- réévaluation immédiate via événements `storage` et `visibilitychange`
+
+### Points d'application du blocage
+
+Le garde audio est vérifié :
+- au lancement automatique d'une chanson (`autoplay`)
+- lors d'une action manuelle play/pause
+- lors de la reprise de lecture après changement de page
+
+Si un onglet est bloqué, PulseBeat :
+- stoppe la lecture en cours sur cet onglet
+- garde l'état du lecteur cohérent
+- affiche un message explicite indiquant que l'audio est bloqué tant que l'activation n'est pas confirmée
 
 ### Moteur hybride local + YouTube
 
@@ -417,6 +514,13 @@ Configuration côté Google Cloud Console :
 Important :
 - l'URI doit correspondre exactement, sinon Google retourne `redirect_uri_mismatch`
 - si un e-mail existe déjà avec un compte local, la connexion Google est refusée pour cet e-mail
+
+### 2FA (optionnel, recommandé)
+
+Variables disponibles :
+- `TWO_FACTOR_CODE_MAX_AGE=600` (durée de validité du code 2FA, en secondes)
+- `TWO_FACTOR_TOGGLE_TOKEN_MAX_AGE=3600` (durée de validité du lien de confirmation activation/désactivation 2FA, en secondes)
+- `TWO_FACTOR_TOGGLE_SALT=pulsebeat-two-factor-toggle` (salt du token de confirmation 2FA)
 
 ### Sync bibliothèque YouTube (optionnel)
 

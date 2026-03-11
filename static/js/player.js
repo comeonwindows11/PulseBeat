@@ -18,6 +18,7 @@
     playerStreamError: "Une erreur s'est produite lors de l'obtention de la chanson.",
     playerStreamErrorCode: "Code {code}.",
     playerTryNext: "Essaie de passer à la chanson suivante.",
+    playerTabBlockedNotice: "Lecture bloquée sur cet onglet tant que tu n'as pas confirmé l'activation audio.",
     playerAlbum: "PulseBeat",
   };
 
@@ -76,6 +77,16 @@
   const lyricsCuesEl = document.getElementById("player-lyrics-cues");
   const lyricsFullEl = document.getElementById("player-lyrics-full");
   const lyricsEmptyEl = document.getElementById("player-lyrics-empty");
+  const tabGuardModal = document.getElementById("tab-audio-guard-modal");
+  const tabGuardAllowBtn = document.getElementById("tab-audio-guard-allow");
+  const tabGuardDenyBtn = document.getElementById("tab-audio-guard-deny");
+
+  const TAB_REGISTRY_KEY = "pulsebeat_active_tabs_v1";
+  const TAB_ID_KEY = "pulsebeat_tab_id_v1";
+  const TAB_OPENED_AT_KEY = "pulsebeat_tab_opened_at_v1";
+  const TAB_AUDIO_DECISION_KEY = "pulsebeat_tab_audio_decision_v1";
+  const TAB_HEARTBEAT_MS = 5000;
+  const TAB_STALE_MS = 20000;
 
   if (!audio) return;
 
@@ -145,6 +156,15 @@
   let youtubeSkipLocked = false;
   let lastPrevActionAt = 0;
   let creatingPlaylist = false;
+  let tabGuardNoticeAt = 0;
+  const tabGuardState = {
+    tabId: "",
+    runtimeId: "",
+    openedAt: 0,
+    decision: "ask",
+    blocked: false,
+    heartbeatTimer: null,
+  };
 
   function jsonHeaders(withJsonContent = true) {
     const headers = {
@@ -157,6 +177,236 @@
       headers["Content-Type"] = "application/json";
     }
     return headers;
+  }
+
+  function safeParseJson(raw, fallback) {
+    if (!raw) return fallback;
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === "object" ? parsed : fallback;
+    } catch (_e) {
+      return fallback;
+    }
+  }
+
+  function createRuntimeId() {
+    if (window.crypto && typeof window.crypto.randomUUID === "function") {
+      return window.crypto.randomUUID();
+    }
+    return `pb_runtime_${Date.now()}_${Math.random().toString(36).slice(2, 12)}`;
+  }
+
+  function getOrCreateTabId() {
+    let tabId = String(sessionStorage.getItem(TAB_ID_KEY) || "").trim();
+    if (tabId) return tabId;
+    tabId = `pb_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+    sessionStorage.setItem(TAB_ID_KEY, tabId);
+    return tabId;
+  }
+
+  function getOrCreateOpenedAt() {
+    const existing = Number(sessionStorage.getItem(TAB_OPENED_AT_KEY) || 0);
+    if (Number.isFinite(existing) && existing > 0) return existing;
+    const now = Date.now();
+    sessionStorage.setItem(TAB_OPENED_AT_KEY, String(now));
+    return now;
+  }
+
+  function readTabRegistry() {
+    return safeParseJson(localStorage.getItem(TAB_REGISTRY_KEY), {});
+  }
+
+  function writeTabRegistry(registry) {
+    try {
+      localStorage.setItem(TAB_REGISTRY_KEY, JSON.stringify(registry || {}));
+    } catch (_e) {}
+  }
+
+  function cleanupTabRegistry(registry) {
+    const now = Date.now();
+    const next = {};
+    Object.entries(registry || {}).forEach(([id, info]) => {
+      const openedAt = Number((info && info.openedAt) || 0);
+      const lastSeen = Number((info && info.lastSeen) || 0);
+      const runtimeId = String((info && info.runtimeId) || "").trim();
+      if (!id || !openedAt || !lastSeen) return;
+      if (now - lastSeen > TAB_STALE_MS) return;
+      next[id] = { openedAt, lastSeen, runtimeId };
+    });
+    return next;
+  }
+
+  function forceNewTabIdentity() {
+    const nextId = `pb_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+    const now = Date.now();
+    tabGuardState.tabId = nextId;
+    tabGuardState.openedAt = now;
+    tabGuardState.decision = "ask";
+    try {
+      sessionStorage.setItem(TAB_ID_KEY, nextId);
+      sessionStorage.setItem(TAB_OPENED_AT_KEY, String(now));
+      sessionStorage.setItem(TAB_AUDIO_DECISION_KEY, "ask");
+    } catch (_e) {}
+  }
+
+  function ensureTabRegistered() {
+    const now = Date.now();
+    let registry = cleanupTabRegistry(readTabRegistry());
+    const existingEntry = registry[tabGuardState.tabId];
+    if (
+      existingEntry
+      && existingEntry.runtimeId
+      && tabGuardState.runtimeId
+      && existingEntry.runtimeId !== tabGuardState.runtimeId
+      && now - Number(existingEntry.lastSeen || 0) <= TAB_STALE_MS
+    ) {
+      forceNewTabIdentity();
+      registry = cleanupTabRegistry(readTabRegistry());
+    }
+    const existing = registry[tabGuardState.tabId] || {};
+    registry[tabGuardState.tabId] = {
+      openedAt: tabGuardState.openedAt || Number(existing.openedAt || 0) || now,
+      lastSeen: now,
+      runtimeId: tabGuardState.runtimeId,
+    };
+    tabGuardState.openedAt = Number(registry[tabGuardState.tabId].openedAt || now) || now;
+    writeTabRegistry(registry);
+    return registry;
+  }
+
+  function unregisterTab() {
+    const registry = cleanupTabRegistry(readTabRegistry());
+    if (registry[tabGuardState.tabId]) {
+      delete registry[tabGuardState.tabId];
+      writeTabRegistry(registry);
+    }
+  }
+
+  function hideTabGuardModal() {
+    if (!tabGuardModal) return;
+    tabGuardModal.classList.add("hidden");
+    tabGuardModal.setAttribute("aria-hidden", "true");
+  }
+
+  function showTabGuardModal() {
+    if (!tabGuardModal) return;
+    tabGuardModal.classList.remove("hidden");
+    tabGuardModal.setAttribute("aria-hidden", "false");
+  }
+
+  function stopPlaybackForTabGuard() {
+    try {
+      if (ytPlayer && typeof ytPlayer.pauseVideo === "function") {
+        ytPlayer.pauseVideo();
+      }
+    } catch (_e) {}
+    try {
+      audio.pause();
+    } catch (_e) {}
+    state.isPlaying = false;
+    updateMeta(currentSong());
+    saveState();
+  }
+
+  function setTabAudioDecision(decision) {
+    const normalized = decision === "allow" ? "allow" : "deny";
+    tabGuardState.decision = normalized;
+    try {
+      sessionStorage.setItem(TAB_AUDIO_DECISION_KEY, normalized);
+    } catch (_e) {}
+    tabGuardState.blocked = normalized !== "allow";
+    if (tabGuardState.blocked) {
+      stopPlaybackForTabGuard();
+    }
+  }
+
+  function evaluateTabGuard(showPrompt = true) {
+    const registry = ensureTabRegistered();
+    const entries = Object.entries(registry).sort((a, b) => {
+      const aOpened = Number((a[1] && a[1].openedAt) || 0);
+      const bOpened = Number((b[1] && b[1].openedAt) || 0);
+      if (aOpened !== bOpened) return aOpened - bOpened;
+      return String(a[0]).localeCompare(String(b[0]));
+    });
+    const activeCount = entries.length;
+    const oldestTabId = entries.length ? String(entries[0][0]) : tabGuardState.tabId;
+    const isOldestTab = oldestTabId === tabGuardState.tabId;
+
+    if (activeCount <= 1 || isOldestTab) {
+      tabGuardState.blocked = false;
+      hideTabGuardModal();
+      return;
+    }
+
+    const decision = tabGuardState.decision || "ask";
+    tabGuardState.blocked = decision !== "allow";
+    if (tabGuardState.blocked) {
+      stopPlaybackForTabGuard();
+      if (showPrompt) {
+        showTabGuardModal();
+      }
+    } else {
+      hideTabGuardModal();
+    }
+  }
+
+  function isPlaybackBlocked(showPrompt = false) {
+    evaluateTabGuard(showPrompt);
+    if (!tabGuardState.blocked) return false;
+    if (showPrompt) {
+      const now = Date.now();
+      if (now - tabGuardNoticeAt > 1500) {
+        showPlaylistToast(i18n.playerTabBlockedNotice || "Playback is blocked on this tab.", "error");
+        tabGuardNoticeAt = now;
+      }
+    }
+    return true;
+  }
+
+  function initTabGuard() {
+    tabGuardState.runtimeId = createRuntimeId();
+    tabGuardState.tabId = getOrCreateTabId();
+    tabGuardState.openedAt = getOrCreateOpenedAt();
+    const decision = String(sessionStorage.getItem(TAB_AUDIO_DECISION_KEY) || "ask").trim().toLowerCase();
+    tabGuardState.decision = decision === "allow" ? "allow" : (decision === "deny" ? "deny" : "ask");
+
+    ensureTabRegistered();
+    evaluateTabGuard(true);
+
+    if (tabGuardAllowBtn) {
+      tabGuardAllowBtn.addEventListener("click", () => {
+        setTabAudioDecision("allow");
+        hideTabGuardModal();
+      });
+    }
+    if (tabGuardDenyBtn) {
+      tabGuardDenyBtn.addEventListener("click", () => {
+        setTabAudioDecision("deny");
+        hideTabGuardModal();
+      });
+    }
+
+    window.addEventListener("storage", (event) => {
+      if (event.key !== TAB_REGISTRY_KEY) return;
+      evaluateTabGuard(false);
+    });
+
+    window.addEventListener("beforeunload", unregisterTab);
+    window.addEventListener("pagehide", unregisterTab);
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") {
+        ensureTabRegistered();
+        evaluateTabGuard(false);
+      }
+    });
+
+    if (tabGuardState.heartbeatTimer) {
+      clearInterval(tabGuardState.heartbeatTimer);
+    }
+    tabGuardState.heartbeatTimer = setInterval(() => {
+      ensureTabRegistered();
+      evaluateTabGuard(false);
+    }, TAB_HEARTBEAT_MS);
   }
 
   function extractYouTubeVideoId(rawValue) {
@@ -1700,6 +1950,13 @@
       return;
     }
 
+    if (autoplay && isPlaybackBlocked(true)) {
+      state.isPlaying = false;
+      updateMeta(song);
+      saveState();
+      return;
+    }
+
     await ensureSongPlaybackMeta(song);
     const manualStart = !!options.manual || (state.manualStartSongId && String(state.manualStartSongId) === String(song.id));
     if (manualStart) {
@@ -2017,6 +2274,10 @@
   }
 
   async function togglePlayPause() {
+    if (isPlaybackBlocked(true)) {
+      return;
+    }
+
     const song = currentSong();
     if (!song) {
       if (window.PAGE_SONG_OBJECTS && window.PAGE_SONG_OBJECTS.length) {
@@ -2560,7 +2821,7 @@
       audio.playbackRate = Number(state.playbackRate) || 1;
       if (speedSelect) speedSelect.value = String(audio.playbackRate);
 
-      if (wasPlayingBeforePageChange) {
+      if (wasPlayingBeforePageChange && !isPlaybackBlocked(true)) {
         if (isYoutubeEngineActive()) {
           state.isPlaying = true;
           const player = await ensureYouTubePlayer();
@@ -2581,6 +2842,8 @@
             state.isPlaying = false;
           }
         }
+      } else if (wasPlayingBeforePageChange) {
+        state.isPlaying = false;
       }
       updateMeta(song);
       saveState();
@@ -2593,6 +2856,8 @@
     renderQueueEditor();
   }
 
+  initTabGuard();
+
   initializePlayerState().catch(() => {
     updateMeta(currentSong());
     updateModeUI();
@@ -2601,6 +2866,3 @@
     renderQueueEditor();
   });
 })();
-
-
-

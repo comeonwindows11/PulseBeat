@@ -1612,6 +1612,9 @@
       } catch (_e) {
       }
     };
+    const invokeNextTrack = () => {
+      next(true).catch(() => {});
+    };
     safeSet("play", () => {
       if (!state.isPlaying) {
         togglePlayPause();
@@ -1623,7 +1626,16 @@
       }
     });
     safeSet("previoustrack", invokePrevTrack);
-    safeSet("nexttrack", () => next(true).catch(() => {}));
+    safeSet("nexttrack", invokeNextTrack);
+    // Certains périphériques multimédias envoient seekbackward/seekforward
+    // au lieu de previoustrack/nexttrack. On les mappe vers la navigation
+    // de piste pour garder un comportement cohérent.
+    safeSet("seekbackward", () => {
+      invokePrevTrack();
+    });
+    safeSet("seekforward", () => {
+      invokeNextTrack();
+    });
     safeSet("seekto", (details) => {
       if (!details || typeof details.seekTime !== "number") return;
       const duration = getPlaybackDurationSeconds();
@@ -1731,6 +1743,13 @@
             state.isPlaying = true;
             state.activeEngine = "youtube";
             youtubeSkipLocked = false;
+            bindMediaSessionHandlers();
+            window.setTimeout(() => {
+              bindMediaSessionHandlers();
+            }, 180);
+            window.setTimeout(() => {
+              bindMediaSessionHandlers();
+            }, 700);
             if (song && song.id) {
               const prefix = `${String(song.id)}:`;
               for (const key of Array.from(youtubeErrorAttempts.keys())) {
@@ -2148,6 +2167,48 @@
     }
   }
 
+  function buildPageNavigationPool() {
+    const sources = [];
+    if (Array.isArray(window.PAGE_SONG_OBJECTS) && window.PAGE_SONG_OBJECTS.length) {
+      sources.push(...window.PAGE_SONG_OBJECTS);
+    }
+    if (Array.isArray(window.PAGE_RECOMMENDED_SONGS) && window.PAGE_RECOMMENDED_SONGS.length) {
+      sources.push(...window.PAGE_RECOMMENDED_SONGS);
+    }
+    if (!sources.length) return [];
+
+    const seen = new Set();
+    const pool = [];
+    sources.forEach((item) => {
+      if (!item) return;
+      const id = String(item.id || "").trim();
+      if (!id || seen.has(id)) return;
+      seen.add(id);
+      pool.push(item);
+    });
+    return pool;
+  }
+
+  function hydrateQueueFromPageIfNeeded() {
+    if (state.queue.length > 1) return false;
+    const current = currentSong();
+    const currentId = String((current && current.id) || "").trim();
+    if (!currentId) return false;
+
+    const pool = buildPageNavigationPool();
+    if (pool.length <= 1) return false;
+    const index = pool.findIndex((item) => String((item && item.id) || "") === currentId);
+    if (index < 0) return false;
+
+    state.queue = pool;
+    state.index = index;
+    state.shuffleHistory = [];
+    if (!["playlist", "auto"].includes(state.queueContext)) {
+      state.queueContext = "auto";
+    }
+    return true;
+  }
+
   async function transitionWithCrossfade(transitionFn) {
     if (typeof transitionFn !== "function") return;
     if (!state.crossfadeEnabled || isYoutubeEngineActive() || audio.paused) {
@@ -2164,9 +2225,30 @@
     }
   }
 
+  async function navigateToIndex(targetIndex, options = {}) {
+    const manual = options.manual !== false;
+    const useCrossfade = !!options.useCrossfade;
+    if (!state.queue.length) return;
+    const bounded = Math.max(0, Math.min(Number(targetIndex) || 0, state.queue.length - 1));
+    const transition = () => {
+      state.index = bounded;
+      state.time = 0;
+      return applySong(true, { manual: !!manual });
+    };
+    if (useCrossfade) {
+      await transitionWithCrossfade(transition);
+      return;
+    }
+    await transition();
+  }
+
   async function next(manual) {
+    if (state.playlistModalOpen && playlistModal && playlistModal.classList.contains("hidden")) {
+      state.playlistModalOpen = false;
+    }
     if (state.playlistModalOpen) return;
     if (!state.queue.length) return;
+    hydrateQueueFromPageIfNeeded();
 
     if (state.queueContext === "playlist") {
       if (state.playMode === "repeat_one" && !manual) {
@@ -2184,20 +2266,19 @@
       } else {
         nextIndex = (state.index + 1) % state.queue.length;
       }
-      await transitionWithCrossfade(() => {
-        state.index = nextIndex;
-        state.time = 0;
-        return applySong(true, { manual: !!manual });
-      });
+      await navigateToIndex(nextIndex, { manual: !!manual, useCrossfade: !manual });
       return;
     }
 
     if (state.index < state.queue.length - 1) {
-      await transitionWithCrossfade(() => {
-        state.index += 1;
-        state.time = 0;
-        return applySong(true, { manual: !!manual });
-      });
+      await navigateToIndex(state.index + 1, { manual: !!manual, useCrossfade: !manual });
+      return;
+    }
+
+    // En navigation manuelle, si on est à la fin d'une file "auto",
+    // on boucle sur le début pour éviter un bouton next "inerte".
+    if (manual && state.queue.length > 1) {
+      await navigateToIndex(0, { manual: true, useCrossfade: false });
       return;
     }
 
@@ -2207,47 +2288,60 @@
       const rec = await fetchRecommendation(current.id, excludeIds);
       if (rec) {
         state.queue.push(rec);
-        await transitionWithCrossfade(() => {
-          state.index = state.queue.length - 1;
-          state.time = 0;
-          return applySong(true, { manual: !!manual });
-        });
+        await navigateToIndex(state.queue.length - 1, { manual: !!manual, useCrossfade: !manual });
       }
     }
   }
 
+  function resolvePreviousIndex() {
+    if (!state.queue.length) return -1;
+
+    if (state.queueContext === "playlist") {
+      if (state.playMode === "shuffle" && state.shuffleHistory.length) {
+        return state.shuffleHistory[state.shuffleHistory.length - 1];
+      }
+      if (state.playMode === "shuffle") {
+        return pickRandomIndex(state.index);
+      }
+      return (state.index - 1 + state.queue.length) % state.queue.length;
+    }
+
+    if (state.index > 0) {
+      return state.index - 1;
+    }
+
+    // En contexte "auto", on autorise aussi le bouclage si la file a > 1 élément
+    // afin que previous ne paraisse pas bloqué sur le premier élément.
+    if (state.queue.length > 1) {
+      return state.queue.length - 1;
+    }
+
+    return -1;
+  }
+
   async function prev() {
+    if (state.playlistModalOpen && playlistModal && playlistModal.classList.contains("hidden")) {
+      state.playlistModalOpen = false;
+    }
     if (state.playlistModalOpen) return;
     if (!state.queue.length) return;
+    hydrateQueueFromPageIfNeeded();
 
-    if (getPlaybackTimeSeconds() >= 5) {
+    const prevIndexCandidate = resolvePreviousIndex();
+    const hasPreviousTrack = prevIndexCandidate >= 0 && prevIndexCandidate !== state.index;
+
+    if (getPlaybackTimeSeconds() >= 5 || !hasPreviousTrack) {
       restartCurrentSongFromStart();
       return;
     }
 
-    let prevIndex = state.index;
-    if (state.queueContext === "playlist") {
-      if (state.playMode === "shuffle" && state.shuffleHistory.length) {
-        prevIndex = state.shuffleHistory.pop();
-      } else if (state.playMode === "shuffle") {
-        prevIndex = pickRandomIndex(state.index);
-      } else {
-        prevIndex = (state.index - 1 + state.queue.length) % state.queue.length;
-      }
-    } else {
-      if (state.index > 0) {
-        prevIndex = state.index - 1;
-      } else {
-        restartCurrentSongFromStart();
-        return;
-      }
+    let prevIndex = prevIndexCandidate;
+    if (state.queueContext === "playlist" && state.playMode === "shuffle" && state.shuffleHistory.length) {
+      // En mode shuffle, on consomme bien l'historique au moment du déplacement.
+      prevIndex = state.shuffleHistory.pop();
     }
 
-    await transitionWithCrossfade(() => {
-      state.index = prevIndex;
-      state.time = 0;
-      return applySong(true, { manual: true });
-    });
+    await navigateToIndex(prevIndex, { manual: true, useCrossfade: false });
   }
 
   function invokePrevTrack() {

@@ -1,3 +1,5 @@
+import re
+
 from flask import has_request_context, request
 
 DEFAULT_LANG = "fr"
@@ -1228,17 +1230,30 @@ def _fr_courrielize(value: str):
         return value
     out = value
     replacements = [
-        ("E-mails", "Courriels"),
-        ("e-mails", "courriels"),
-        ("E-mail", "Courriel"),
-        ("e-mail", "courriel"),
-        ("Emails", "Courriels"),
-        ("emails", "courriels"),
-        ("Email", "Courriel"),
-        ("email", "courriel"),
+        (r"\bE-mails\b", "Courriels"),
+        (r"\be-mails\b", "courriels"),
+        (r"\bE-mail\b", "Courriel"),
+        (r"\be-mail\b", "courriel"),
+        (r"\bEmails\b", "Courriels"),
+        (r"\bemails\b", "courriels"),
+        (r"\bEmail\b", "Courriel"),
+        (r"\bemail\b", "courriel"),
     ]
-    for old, new in replacements:
-        out = out.replace(old, new)
+    for pattern, replacement in replacements:
+        out = re.sub(pattern, replacement, out)
+
+    grammar_fixes = [
+        (r"\bL['’]courriel\b", "Le courriel"),
+        (r"\bl['’]courriel\b", "le courriel"),
+        (r"\bD['’]courriel\b", "De courriel"),
+        (r"\bd['’]courriel\b", "de courriel"),
+        (r"\bCet courriel\b", "Ce courriel"),
+        (r"\bcet courriel\b", "ce courriel"),
+        (r"\bAdresse courriel\b", "Adresse de courriel"),
+        (r"\badresse courriel\b", "adresse de courriel"),
+    ]
+    for pattern, replacement in grammar_fixes:
+        out = re.sub(pattern, replacement, out)
     return out
 
 
@@ -1263,7 +1278,6 @@ def t(key: str, lang: str | None = None, **kwargs):
 
 def tr(key: str, **kwargs):
     return t(key, get_lang(), **kwargs)
-
 
 
 

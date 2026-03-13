@@ -195,6 +195,7 @@ def create_app():
         "SESSION_COOKIE_SECURE",
         "1" if app.config.get("APP_BASE_URL", "").strip().lower().startswith("https://") else "0",
     ) == "1"
+    app.config["JS_SERVE_OBFUSCATED"] = os.getenv("JS_SERVE_OBFUSCATED", "1") == "1"
 
     extensions.init_mongo(app)
     now = datetime.now(UTC)
@@ -382,6 +383,17 @@ def create_app():
 
     @app.context_processor
     def inject_global_data():
+        def client_js_asset(name: str):
+            safe_name = (name or "").strip()
+            if not safe_name:
+                return ""
+            obfuscated_filename = f"dist/{safe_name}.obf.js"
+            source_filename = f"js/{safe_name}.js"
+            obfuscated_path = os.path.join(app.static_folder, "dist", f"{safe_name}.obf.js")
+            if app.config.get("JS_SERVE_OBFUSCATED", True) and os.path.exists(obfuscated_path):
+                return obfuscated_filename
+            return source_filename
+
         csrf_token = session.get("csrf_token", "")
         if not csrf_token:
             csrf_token = secrets.token_urlsafe(32)
@@ -401,6 +413,7 @@ def create_app():
             "t": t,
             "setup_required": not root_admin_exists(),
             "csrf_token": csrf_token,
+            "client_js_asset": client_js_asset,
         }
 
     return app

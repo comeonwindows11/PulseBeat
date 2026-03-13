@@ -54,6 +54,7 @@ Application de streaming musical en `Flask` + `Jinja`, inspirée de YouTube Musi
 - Profils publics utilisateurs avec chansons et playlists accessibles selon les permissions
 - Validations JavaScript en direct sur les formulaires, avec validation serveur conservée
 - Blocage complet du site si JavaScript est désactivé
+- Sources JavaScript conservées lisibles côté projet, avec bundles obfusqués servis au navigateur
 - Unicité des `username` et `email` garantie côté serveur et par index MongoDB
 - Zone admin séparée
 - Interface bilingue français / anglais
@@ -225,6 +226,12 @@ Cela réduit les risques de bascule 2FA non autorisée même si la session web e
 Le lecteur flottant persiste entre les pages et conserve son état en local.
 
 Comportement notable :
+- le lecteur n'apparaît pas du tout tant qu'aucune chanson n'est chargée
+- au premier lancement manuel d'une chanson, le lecteur apparaît avec animation puis démarre automatiquement la lecture
+- cette auto-lecture initiale reste bloquée sur un 2e onglet PulseBeat si la garde audio multi-onglets est active
+- certaines actions du lecteur sont réservées aux comptes connectés :
+  - ajout de la chanson courante à une playlist
+  - préférences du menu contextuel pour ne plus recommander une chanson ou un artiste
 - en lecture de playlist : modes `normal`, `shuffle` et `repeat one` disponibles
 - hors playlist : lecture automatique avec recherche de recommandations
 - gestion d'erreur de stream côté lecteur avec bannière visible au-dessus des contrôles
@@ -307,6 +314,20 @@ Le bouton `Lecture` cherche désormais la meilleure file dans cet ordre :
 
 Cela évite les mauvais index de lecture dans les blocs de recommandations (accueil et page détail).
 
+### Déduplication de la file et recommandations automatiques
+
+PulseBeat empêche désormais les doublons dans une même file d'attente :
+
+- au moment où une file est créée depuis une page (`PAGE_SONG_OBJECTS`, recommandations, playlist)
+- au moment où l'état du lecteur est restauré depuis le stockage local
+- avant d'ajouter une recommandation automatique en fin de file
+
+La déduplication est faite par `song.id`.
+
+Effet pratique :
+- une même chanson ne peut pas apparaître deux fois dans la même file automatique
+- les restaurations de session nettoient aussi les doublons anciens si nécessaire
+
 ### Sous-titres en plein écran (cas par cas)
 
 Le lecteur charge les sous-titres via `GET /songs/<song_id>/lyrics` à chaque changement de chanson.
@@ -374,6 +395,29 @@ Si JavaScript est désactivé :
 - un écran bloquant s'affiche sur toutes les routes utilisant le layout principal
 - l'application reste volontairement inutilisable tant que JavaScript n'est pas réactivé
 
+### Code client obfusqué
+
+Les sources JavaScript restent volontairement simples à modifier dans le dépôt :
+
+- `static/js/app.js`
+- `static/js/player.js`
+- `static/js/admin.js`
+
+Pour le navigateur, PulseBeat peut servir à la place des bundles obfusqués générés dans :
+
+- `static/dist/app.obf.js`
+- `static/dist/player.obf.js`
+- `static/dist/admin.obf.js`
+
+Objectif :
+- garder un workflow de développement confortable côté projet
+- éviter d'exposer les sources lisibles directement au public
+
+Limite importante :
+- le JavaScript exécuté par le navigateur ne peut jamais être totalement "inaccessible"
+- l'obfuscation réduit la lisibilité et le reverse engineering facile, mais ne remplace pas la sécurité serveur
+- aucune logique sensible ne doit dépendre du secret du code client
+
 ## Modération automatique
 
 - Les créations/modifications de chansons et playlists, ainsi que les commentaires, sont bloqués si des termes vulgaires connus sont détectés.
@@ -413,6 +457,10 @@ PulseBeat peut envoyer des e-mails pour :
 - `templates/accounts/public_profile.jinja` : page publique utilisateur
 - `static/js/player.js` : lecteur audio flottant
 - `static/js/app.js` : interactions UI et validations côté client
+- `static/js/admin.js` : interactions UI de la zone admin
+- `scripts/build-client-js.mjs` : build des bundles JavaScript obfusqués
+- `static/dist/` : bundles JavaScript servis au client quand l'obfuscation est activée
+- `package.json` : dépendances/scripts Node du pipeline JavaScript client
 - `static/css/styles.css` : styles
 
 ## Installation
@@ -421,11 +469,21 @@ PulseBeat peut envoyer des e-mails pour :
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
+npm install
 copy .env.example .env
+npm run build:client-js
 python app.py
 ```
 
 Puis ouvrir `http://127.0.0.1:5000`.
+
+Workflow recommandé après modification d'un fichier dans `static/js/` :
+
+```bash
+npm run build:client-js
+```
+
+Cela régénère les bundles obfusqués servis au navigateur.
 
 
 ## Recommandation d'hébergement
@@ -444,6 +502,10 @@ Non recommandé :
 - Dashboard admin : les alertes sécurité/modération en haut de page peuvent être fermées individuellement (`X`) sans impacter les autres admins.
 - Un toast de confirmation apparaît 10 secondes avec bouton `Annuler` pour restaurer immédiatement l'alerte.
 - Correction du lecteur pour garantir le bon fonctionnement de `previous` et `next` (UI + contrôles média système).
+- Le lecteur est maintenant masqué tant qu'aucune chanson n'est chargée, puis apparaît avec animation au premier lancement.
+- Le premier lancement manuel d'une chanson démarre automatiquement la lecture sur l'onglet principal.
+- Les recommandations et restaurations de file empêchent désormais les doublons de chansons dans une même file.
+- Les bundles JavaScript obfusqués peuvent maintenant être servis au navigateur tout en gardant les sources projet éditables.
 
 
 ## Variables d'environnement
@@ -522,6 +584,16 @@ Variables disponibles :
 - `TWO_FACTOR_TOGGLE_TOKEN_MAX_AGE=3600` (durée de validité du lien de confirmation activation/désactivation 2FA, en secondes)
 - `TWO_FACTOR_TOGGLE_SALT=pulsebeat-two-factor-toggle` (salt du token de confirmation 2FA)
 
+### JavaScript client (optionnel)
+
+Variables disponibles :
+- `JS_SERVE_OBFUSCATED=1` (sert les bundles obfusqués du dossier `static/dist/` si disponibles)
+
+Comportement :
+- si la variable vaut `1` et que les bundles existent, PulseBeat sert `static/dist/*.obf.js`
+- sinon, PulseBeat retombe automatiquement sur les sources lisibles de `static/js/`
+- cela permet de garder un workflow simple en développement tout en réduisant l'exposition des sources côté navigateur
+
 ### Sync bibliothèque YouTube (optionnel)
 
 Pour activer la connexion de bibliothèques externes depuis `Gérer mon compte` :
@@ -579,6 +651,12 @@ Vérifier la syntaxe Python :
 
 ```bash
 python -m py_compile app.py auth_helpers.py blueprints\accounts.py blueprints\admin.py blueprints\main.py blueprints\songs.py blueprints\playlists.py i18n.py
+```
+
+Construire les bundles JavaScript obfusqués :
+
+```bash
+npm run build:client-js
 ```
 
 ## Fiabilité API

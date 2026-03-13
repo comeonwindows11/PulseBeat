@@ -157,6 +157,8 @@
   let lastPrevActionAt = 0;
   let creatingPlaylist = false;
   let tabGuardNoticeAt = 0;
+  let playerShellVisible = false;
+  let manualPlaybackAssistTimers = [];
   const tabGuardState = {
     tabId: "",
     runtimeId: "",
@@ -707,7 +709,10 @@
   function syncPlayerOffset() {
     const root = document.documentElement;
     if (!root || !playerShell) return;
-    const offset = state.viewMode === "fullscreen" ? 0 : playerShell.offsetHeight || 0;
+    const song = currentSong();
+    const offset = (!song || !song.id || playerShell.classList.contains("player-shell-hidden") || state.viewMode === "fullscreen")
+      ? 0
+      : playerShell.offsetHeight || 0;
     root.style.setProperty("--player-offset", `${offset}px`);
   }
 
@@ -1123,6 +1128,7 @@
   }
 
   function setPlaylistModalOpen(opened) {
+    if (opened && !requireAuthenticatedPlayerAction()) return;
     state.playlistModalOpen = !!opened;
     if (!playlistModal) return;
     if (opened) {
@@ -1157,7 +1163,36 @@
     if (createPlaylistCancelBtn) createPlaylistCancelBtn.disabled = false;
   }
 
+  function closeRestrictedPlayerPanels() {
+    state.playlistModalOpen = false;
+    if (playlistModal) {
+      playlistModal.classList.add("hidden");
+      playlistModal.setAttribute("aria-hidden", "true");
+    }
+    if (playlistSuggestions) playlistSuggestions.innerHTML = "";
+    if (playlistStatus) playlistStatus.textContent = "";
+    if (playlistSearch) playlistSearch.value = "";
+    if (playlistToast) playlistToast.classList.add("hidden");
+
+    state.queueEditorOpen = false;
+    if (queueEditorModal) {
+      queueEditorModal.classList.add("hidden");
+      queueEditorModal.setAttribute("aria-hidden", "true");
+    }
+
+    setCreatePlaylistModalOpen(false);
+  }
+
+  function requireAuthenticatedPlayerAction() {
+    if (isAuthenticated) return true;
+    closeRestrictedPlayerPanels();
+    if (playlistStatus) playlistStatus.textContent = i18n.authRequired || "Please sign in to continue.";
+    showPlaylistToast(i18n.authRequired || "Please sign in to continue.", "error");
+    return false;
+  }
+
   function setQueueEditorOpen(opened) {
+    if (opened && !requireAuthenticatedPlayerAction()) return;
     state.queueEditorOpen = !!opened;
     if (!queueEditorModal) return;
     if (opened) {
@@ -1543,11 +1578,102 @@
     }
   }
 
+  function normalizeSongId(value) {
+    return String(value || "").trim();
+  }
+
+  function clearManualPlaybackAssist() {
+    if (!manualPlaybackAssistTimers.length) return;
+    manualPlaybackAssistTimers.forEach((timerId) => {
+      window.clearTimeout(timerId);
+    });
+    manualPlaybackAssistTimers = [];
+  }
+
+  function isSongActuallyPlaying(song) {
+    if (!song) return false;
+    if (isYouTubeSong(song)) {
+      return !!state.isPlaying;
+    }
+    return !audio.paused;
+  }
+
+  function scheduleManualPlaybackAssist(songId) {
+    const expectedId = normalizeSongId(songId);
+    if (!expectedId) return;
+    clearManualPlaybackAssist();
+    const delays = [180, 700, 1400];
+    delays.forEach((delay) => {
+      const timerId = window.setTimeout(() => {
+        const song = currentSong();
+        if (!song || normalizeSongId(song.id) !== expectedId) return;
+        if (isPlaybackBlocked(false)) return;
+        if (isSongActuallyPlaying(song)) return;
+        if (!isYouTubeSong(song) && audio.readyState < 2) return;
+        togglePlayPause().catch(() => {});
+      }, delay);
+      manualPlaybackAssistTimers.push(timerId);
+    });
+  }
+
+  function getUniqueQueue(items) {
+    if (!Array.isArray(items) || !items.length) return [];
+    const seen = new Set();
+    const unique = [];
+    items.forEach((item) => {
+      if (!item) return;
+      const id = normalizeSongId(item.id);
+      if (!id || seen.has(id)) return;
+      seen.add(id);
+      unique.push(item);
+    });
+    return unique;
+  }
+
+  function sanitizeQueueState(preferredSongId = "") {
+    const uniqueQueue = getUniqueQueue(state.queue);
+    if (!uniqueQueue.length) {
+      state.queue = [];
+      state.index = 0;
+      return;
+    }
+    const preferredId = normalizeSongId(preferredSongId);
+    let nextIndex = Math.max(0, Math.min(Number(state.index) || 0, uniqueQueue.length - 1));
+    if (preferredId) {
+      const preferredIndex = uniqueQueue.findIndex((item) => normalizeSongId(item && item.id) === preferredId);
+      if (preferredIndex >= 0) {
+        nextIndex = preferredIndex;
+      }
+    }
+    state.queue = uniqueQueue;
+    state.index = nextIndex;
+  }
+
   function currentSong() {
     return state.queue[state.index] || null;
   }
 
+  function updatePlayerShellVisibility(song) {
+    if (!playerShell) return;
+    const shouldShow = Boolean(song && song.id);
+    playerShell.classList.toggle("player-shell-hidden", !shouldShow);
+    playerShell.setAttribute("aria-hidden", shouldShow ? "false" : "true");
+    if (shouldShow && !playerShellVisible) {
+      playerShell.classList.remove("player-shell-entering");
+      void playerShell.offsetWidth;
+      playerShell.classList.add("player-shell-entering");
+      window.setTimeout(() => {
+        if (playerShell) playerShell.classList.remove("player-shell-entering");
+      }, 380);
+    } else if (!shouldShow) {
+      playerShell.classList.remove("player-shell-entering");
+    }
+    playerShellVisible = shouldShow;
+    syncPlayerOffset();
+  }
+
   function updateMeta(song) {
+    updatePlayerShellVisibility(song);
     titleEl.textContent = song ? song.title : i18n.playerNoSong;
     artistEl.textContent = song ? (song.artist || i18n.playerUnknown) : "-";
     playPauseBtn.dataset.state = state.isPlaying ? "playing" : "paused";
@@ -1740,6 +1866,7 @@
           if (!song || !isYouTubeSong(song)) return;
           const YTState = (window.YT && window.YT.PlayerState) || {};
           if (event.data === YTState.PLAYING) {
+            clearManualPlaybackAssist();
             state.isPlaying = true;
             state.activeEngine = "youtube";
             youtubeSkipLocked = false;
@@ -1958,6 +2085,7 @@
     hidePlayerContextMenu();
     const song = currentSong();
     if (!song) {
+      clearManualPlaybackAssist();
       stopYouTubePlayback();
       audio.removeAttribute("src");
       audio.load();
@@ -1970,6 +2098,7 @@
     }
 
     if (autoplay && isPlaybackBlocked(true)) {
+      clearManualPlaybackAssist();
       state.isPlaying = false;
       updateMeta(song);
       saveState();
@@ -1980,9 +2109,13 @@
     const manualStart = !!options.manual || (state.manualStartSongId && String(state.manualStartSongId) === String(song.id));
     if (manualStart) {
       state.manualStartSongId = "";
+      if (autoplay) {
+        scheduleManualPlaybackAssist(song.id);
+      }
     }
 
     if (!isSongAvailable(song) && !manualStart) {
+      clearManualPlaybackAssist();
       state.isPlaying = false;
       updateMeta(song);
       saveState();
@@ -2016,6 +2149,7 @@
       const player = await ensureYouTubePlayer();
       const videoId = song.youtube_video_id || extractYouTubeVideoId(song.source_url || song.external_url || "");
       if (!player || !videoId) {
+        clearManualPlaybackAssist();
         showPlayerError(404);
         state.isPlaying = false;
         updateMeta(song);
@@ -2042,6 +2176,7 @@
         startYoutubeTimer();
         saveState();
       } catch (_e) {
+        clearManualPlaybackAssist();
         showPlayerError(404);
         state.isPlaying = false;
         updateMeta(song);
@@ -2054,6 +2189,7 @@
     stopYouTubePlayback();
 
     if (!song.url) {
+      clearManualPlaybackAssist();
       audio.removeAttribute("src");
       audio.load();
       state.isPlaying = false;
@@ -2096,6 +2232,7 @@
         setMasterGain(baseTargetGain, 0).catch(() => {});
       }
       audio.play().then(() => {
+        clearManualPlaybackAssist();
         clearPlayerError();
         state.isPlaying = true;
         updateMeta(song);
@@ -2113,10 +2250,19 @@
           state.manualRecoverySongId = "";
         }
         saveState();
-      }).catch(() => {
+      }).catch((error) => {
+        const errorName = String((error && error.name) || "");
+        if (manualStart && (errorName === "NotAllowedError" || errorName === "AbortError")) {
+          state.isPlaying = false;
+          updateMeta(song);
+          saveState();
+          return;
+        }
+        clearManualPlaybackAssist();
         handleSongStreamError(song);
       });
     } else {
+      clearManualPlaybackAssist();
       const targetGain = state.normalizeVolumeEnabled ? Number(state.normalizationGain || 1) : 1;
       setMasterGain(targetGain, 0).catch(() => {});
       state.isPlaying = false;
@@ -2127,8 +2273,15 @@
 
   function setQueue(queue, startIndex, context, manualStart = false) {
     if (!Array.isArray(queue) || queue.length === 0) return;
-    state.queue = queue;
-    state.index = Math.max(0, Math.min(startIndex || 0, queue.length - 1));
+    const rawIndex = Math.max(0, Math.min(startIndex || 0, queue.length - 1));
+    const preferredSongId = normalizeSongId(queue[rawIndex] && queue[rawIndex].id);
+    state.queue = getUniqueQueue(queue);
+    if (!state.queue.length) return;
+    let nextIndex = state.queue.findIndex((item) => normalizeSongId(item && item.id) === preferredSongId);
+    if (nextIndex < 0) {
+      nextIndex = Math.max(0, Math.min(rawIndex, state.queue.length - 1));
+    }
+    state.index = nextIndex;
     state.time = 0;
     state.shuffleHistory = [];
     state.queueContext = context === "playlist" ? "playlist" : "auto";
@@ -2148,7 +2301,7 @@
 
   function pickPageRecommendation(excludeIds) {
     const pool = Array.isArray(window.PAGE_RECOMMENDED_SONGS) ? window.PAGE_RECOMMENDED_SONGS : [];
-    return pool.find((item) => !excludeIds.has(item.id)) || null;
+    return pool.find((item) => !excludeIds.has(normalizeSongId(item && item.id))) || null;
   }
 
   async function fetchRecommendation(currentSongId, excludeIds) {
@@ -2161,7 +2314,7 @@
       if (!res.ok) return null;
       const data = await res.json();
       const items = Array.isArray(data.items) ? data.items : [];
-      return items.find((item) => !excludeIds.has(item.id)) || null;
+      return items.find((item) => !excludeIds.has(normalizeSongId(item && item.id))) || null;
     } catch (_e) {
       return null;
     }
@@ -2175,24 +2328,13 @@
     if (Array.isArray(window.PAGE_RECOMMENDED_SONGS) && window.PAGE_RECOMMENDED_SONGS.length) {
       sources.push(...window.PAGE_RECOMMENDED_SONGS);
     }
-    if (!sources.length) return [];
-
-    const seen = new Set();
-    const pool = [];
-    sources.forEach((item) => {
-      if (!item) return;
-      const id = String(item.id || "").trim();
-      if (!id || seen.has(id)) return;
-      seen.add(id);
-      pool.push(item);
-    });
-    return pool;
+    return getUniqueQueue(sources);
   }
 
   function hydrateQueueFromPageIfNeeded() {
     if (state.queue.length > 1) return false;
     const current = currentSong();
-    const currentId = String((current && current.id) || "").trim();
+    const currentId = normalizeSongId(current && current.id);
     if (!currentId) return false;
 
     const pool = buildPageNavigationPool();
@@ -2283,11 +2425,12 @@
     }
 
     const current = currentSong();
-    const excludeIds = new Set(state.queue.map((s) => s.id));
+    const excludeIds = new Set(state.queue.map((s) => normalizeSongId(s && s.id)).filter(Boolean));
     if (current) {
       const rec = await fetchRecommendation(current.id, excludeIds);
-      if (rec) {
+      if (rec && !excludeIds.has(normalizeSongId(rec.id))) {
         state.queue.push(rec);
+        sanitizeQueueState(current.id);
         await navigateToIndex(state.queue.length - 1, { manual: !!manual, useCrossfade: !manual });
       }
     }
@@ -2903,6 +3046,7 @@
 
   async function initializePlayerState() {
     loadState();
+    sanitizeQueueState();
     ensureWaveformLoop();
 
     if (state.queue.length) {

@@ -163,7 +163,7 @@
     </div>
   </div>
 
-  <div class="player-shell">
+  <div class="player-shell player-shell-hidden" aria-hidden="true">
     <div id="youtube-player-host" class="youtube-player-host" aria-hidden="true"></div>
     <audio id="global-audio" preload="metadata"></audio>
     <div id="player-error-banner" class="player-error-banner hidden" role="status" aria-live="polite">
@@ -212,16 +212,20 @@
           <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8a2 2 0 1 0 0-4 2 2 0 0 0 0 4zm0 6a2 2 0 1 0 0-4 2 2 0 0 0 0 4zm0 6a2 2 0 1 0 0-4 2 2 0 0 0 0 4z"></path></svg>
         </button>
         {% endif %}
+        {% if current_user %}
         <button id="add-to-playlist-btn" type="button" aria-label="{{ t('player.add_to_playlist') }}">
           <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M3 10h10v2H3v-2zm0-4h14v2H3V6zm0 8h10v2H3v-2zm16-1v-3h-2v3h-3v2h3v3h2v-3h3v-2h-3z"></path>
           </svg>
         </button>
+        {% endif %}
+        {% if current_user %}
         <button id="queue-editor-btn" type="button" aria-label="{{ t('player.queue') }}" title="{{ t('player.queue') }}">
           <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M3 6h14v2H3V6zm0 5h14v2H3v-2zm0 5h10v2H3v-2zm12 0l3-3 3 3h-2v3h-2v-3h-2z"></path>
           </svg>
         </button>
+        {% endif %}
         <button id="player-view-btn" class="player-view-btn" type="button" aria-label="{{ t('player.view.normal') }}" data-view-mode="normal" title="{{ t('player.view.normal') }}">
           <svg class="icon view-mini" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M4 7h16v10H4zM6 9h12v6H6z"></path>
@@ -260,12 +264,14 @@
           </label>
         </div>
       </div>
+      {% if current_user %}
       <div id="player-lyrics-panel" class="player-lyrics-panel hidden" aria-live="polite">
         <h4>{{ t('player.lyrics') }}</h4>
         <div id="player-lyrics-cues" class="player-lyrics-cues hidden"></div>
         <pre id="player-lyrics-full" class="player-lyrics-full hidden"></pre>
         <p id="player-lyrics-empty" class="muted small hidden">{{ t('player.lyrics_none') }}</p>
       </div>
+      {% endif %}
     </div>
   </div>
 
@@ -458,13 +464,8 @@
       shareOpen: {{ t('share.open')|tojson }}
     };
   </script>
-  <script src="{{ url_for('static', filename='js/app.js') }}"></script>
-  <script src="{{ url_for('static', filename='js/player.js') }}"></script>
+  <script src="{{ url_for('static', filename=client_js_asset('app')) }}"></script>
+  <script src="{{ url_for('static', filename=client_js_asset('player')) }}"></script>
 </body>
 </html>
-
-
-
-
-
 

@@ -36,6 +36,6 @@
       undo: {{ t('player.menu.undo')|tojson }}
     };
   </script>
-  <script src="{{ url_for('static', filename='js/admin.js') }}"></script>
+  <script src="{{ url_for('static', filename=client_js_asset('admin')) }}"></script>
 </body>
 </html>

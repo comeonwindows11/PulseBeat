@@ -1,0 +1,11 @@
+{
+  "name": "pulsebeat-client-build",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:client-js": "node scripts/build-client-js.mjs"
+  },
+  "devDependencies": {
+    "javascript-obfuscator": "^4.1.1"
+  }
+}

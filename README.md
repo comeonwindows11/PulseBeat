@@ -413,11 +413,6 @@ Objectif :
 - garder un workflow de développement confortable côté projet
 - éviter d'exposer les sources lisibles directement au public
 
-Limite importante :
-- le JavaScript exécuté par le navigateur ne peut jamais être totalement "inaccessible"
-- l'obfuscation réduit la lisibilité et le reverse engineering facile, mais ne remplace pas la sécurité serveur
-- aucune logique sensible ne doit dépendre du secret du code client
-
 ## Modération automatique
 
 - Les créations/modifications de chansons et playlists, ainsi que les commentaires, sont bloqués si des termes vulgaires connus sont détectés.

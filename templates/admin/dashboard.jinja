@@ -11,6 +11,7 @@
     </div>
     <nav class="dashboard-nav">
       <a href="#admin-settings">{{ t('admin.section_settings') }}</a>
+      {% if me.is_root_admin %}<a href="#admin-reset">{{ t('admin.reset_title') }}</a>{% endif %}
       <a href="#admin-users">{{ t('admin.users') }}</a>
       <a href="#admin-songs">{{ t('admin.songs') }}</a>
       <a href="#admin-comments">{{ t('admin.comments') }}</a>
@@ -54,6 +55,11 @@
 
     <section id="admin-settings" class="dashboard-panel card">
       <h2>{{ t('admin.section_settings') }}</h2>
+      {% if weak_recovery_accounts_count > 0 %}
+      <p class="admin-inline-warning">
+        {{ t('admin.recovery_warning_text', count=weak_recovery_accounts_count) }}
+      </p>
+      {% endif %}
       <div class="admin-settings-grid">
         <article class="sub-card admin-settings-card">
           <h3>{{ t('admin.youtube_settings_title') }}</h3>
@@ -93,6 +99,20 @@
         </article>
       </div>
     </section>
+
+    {% if me.is_root_admin %}
+    <section id="admin-reset" class="dashboard-panel card danger-panel">
+      <h2>{{ t('admin.reset_title') }}</h2>
+      <p class="muted">{{ t('admin.reset_hint') }}</p>
+      <p class="muted small">{{ t('admin.reset_hint_secondary') }}</p>
+      <form method="post" action="{{ url_for('admin.request_platform_reset') }}" class="stack compact-stack" data-validate-form="1">
+        <label>{{ t('admin.reset_password_label') }}
+          <input type="password" name="current_password" required>
+        </label>
+        <button type="submit" class="btn-danger">{{ t('admin.reset_request_cta') }}</button>
+      </form>
+    </section>
+    {% endif %}
 
     <section id="admin-users" class="dashboard-panel card">
       <h2>{{ t('admin.users') }}</h2>

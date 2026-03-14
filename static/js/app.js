@@ -86,6 +86,18 @@
     });
   }
 
+  document.querySelectorAll("[data-password-toggle-target]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const targetId = button.getAttribute("data-password-toggle-target");
+      const input = targetId ? document.getElementById(targetId) : null;
+      if (!input) return;
+      const reveal = input.type === "password";
+      input.type = reveal ? "text" : "password";
+      button.classList.toggle("active", reveal);
+      button.setAttribute("aria-pressed", reveal ? "true" : "false");
+    });
+  });
+
   const visibilitySelect = document.getElementById("visibility-select");
   const sharedWrap = document.getElementById("shared-with-wrap");
   if (visibilitySelect && sharedWrap) {
@@ -135,6 +147,103 @@
       }
     }, 5000);
   }
+
+  document.querySelectorAll(".playlist-sort-list[data-playlist-sort-url]").forEach((list) => {
+    let draggedSongId = "";
+    let committedOrder = Array.from(list.querySelectorAll(".playlist-sort-item[data-song-id]")).map((item) => item.dataset.songId);
+
+    function playlistItems() {
+      return Array.from(list.querySelectorAll(".playlist-sort-item[data-song-id]"));
+    }
+
+    function applyOrder(order) {
+      const byId = new Map(playlistItems().map((item) => [item.dataset.songId, item]));
+      order.forEach((songId) => {
+        const node = byId.get(songId);
+        if (node) list.appendChild(node);
+      });
+    }
+
+    async function persistOrder() {
+      const url = String(list.getAttribute("data-playlist-sort-url") || "").trim();
+      if (!url) return false;
+      const orderedSongIds = playlistItems().map((item) => item.dataset.songId).filter(Boolean);
+      if (!orderedSongIds.length) return false;
+      list.dataset.busy = "1";
+      try {
+        const response = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
+          body: JSON.stringify({
+            ordered_song_ids: orderedSongIds,
+            songs_page: Number(list.getAttribute("data-playlist-page") || "1"),
+            songs_q: String(list.getAttribute("data-playlist-search") || ""),
+          }),
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok || !payload.ok) {
+          applyOrder(committedOrder);
+          showClientNotice(payload.message || i18n.playlistReorderFailed || "Unable to save the new playlist order.", "warning");
+          return false;
+        }
+        committedOrder = orderedSongIds.slice();
+        showClientNotice(payload.message || i18n.playlistReordered || "Playlist order updated.", "success");
+        return true;
+      } catch (_err) {
+        applyOrder(committedOrder);
+        showClientNotice(i18n.playlistReorderFailed || "Unable to save the new playlist order.", "warning");
+        return false;
+      } finally {
+        delete list.dataset.busy;
+      }
+    }
+
+    function bindItem(item) {
+      item.addEventListener("dragstart", (event) => {
+        if (list.dataset.busy === "1") {
+          event.preventDefault();
+          return;
+        }
+        draggedSongId = item.dataset.songId || "";
+        item.classList.add("dragging");
+        if (event.dataTransfer) {
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData("text/plain", draggedSongId);
+        }
+      });
+
+      item.addEventListener("dragend", () => {
+        draggedSongId = "";
+        item.classList.remove("dragging");
+        playlistItems().forEach((row) => row.classList.remove("drop-target"));
+      });
+
+      item.addEventListener("dragover", (event) => {
+        if (!draggedSongId || draggedSongId === item.dataset.songId || list.dataset.busy === "1") return;
+        event.preventDefault();
+        const bounds = item.getBoundingClientRect();
+        const insertAfter = event.clientY > bounds.top + bounds.height / 2;
+        playlistItems().forEach((row) => row.classList.remove("drop-target"));
+        item.classList.add("drop-target");
+        item.dataset.dropPosition = insertAfter ? "after" : "before";
+      });
+
+      item.addEventListener("drop", async (event) => {
+        if (!draggedSongId || draggedSongId === item.dataset.songId || list.dataset.busy === "1") return;
+        event.preventDefault();
+        const dragged = list.querySelector(`.playlist-sort-item[data-song-id="${CSS.escape(draggedSongId)}"]`);
+        if (!dragged) return;
+        const insertAfter = item.dataset.dropPosition === "after";
+        item.classList.remove("drop-target");
+        if (insertAfter) list.insertBefore(dragged, item.nextSibling);
+        else list.insertBefore(dragged, item);
+        await persistOrder();
+      });
+    }
+
+    playlistItems().forEach(bindItem);
+  });
 
   document.addEventListener("submit", (event) => {
     const form = event.target.closest(".delete-song-form");
@@ -1751,6 +1860,10 @@
       message = i18n.validationPasswordPolicy || "Invalid password.";
     }
 
+    if (!message && field.dataset.blockDisposable === "1" && field.value.trim() && isDisposableEmail(field.value)) {
+      message = i18n.validationBackupEmailDisposable || "Temporary email addresses are not allowed here.";
+    }
+
     if (!message && field.dataset.matchTarget) {
       const other = document.getElementById(field.dataset.matchTarget);
       if (other && field.value !== other.value) {
@@ -1903,8 +2016,6 @@
     closeNotificationsPanel();
   });
 })();
-
-
 
 
 

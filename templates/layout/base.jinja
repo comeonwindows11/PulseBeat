@@ -484,6 +484,7 @@
       validationPrivateUsersRequired: {{ t('validation.private_users_required')|tojson }},
       validationTooShort: {{ t('validation.too_short')|tojson }},
       validationUsernameInvalid: {{ t('flash.accounts.username_invalid')|tojson }},
+      validationBackupEmailDisposable: {{ t('validation.backup_email_disposable')|tojson }},
       appLoadingTags: {{ t('song.id3_loading')|tojson }},
       appTagsDone: {{ t('song.id3_done')|tojson }},
       appTagsFail: {{ t('song.id3_fail')|tojson }},
@@ -514,7 +515,9 @@
       shareDiscordHint: {{ t('share.discord_hint')|tojson }},
       shareMessengerHint: {{ t('share.messenger_hint')|tojson }},
       shareModalTitle: {{ t('share.modal_title')|tojson }},
-      shareOpen: {{ t('share.open')|tojson }}
+      shareOpen: {{ t('share.open')|tojson }},
+      playlistReordered: {{ t('flash.playlists.reordered')|tojson }},
+      playlistReorderFailed: {{ t('flash.playlists.reorder_failed')|tojson }}
     };
   </script>
   <script src="{{ url_for('static', filename=client_js_asset('app')) }}"></script>

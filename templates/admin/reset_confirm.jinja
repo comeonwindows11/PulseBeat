@@ -1,0 +1,47 @@
+{% extends "admin/base.jinja" %}
+{% block title %}{{ t('admin.reset_title') }} - {{ app_name }}{% endblock %}
+
+{% block content %}
+<section
+  id="platform-reset-flow"
+  class="platform-reset-flow"
+  data-execute-url="{{ url_for('admin.execute_platform_reset', token=reset_token) }}"
+  data-cancel-url="{{ url_for('admin.cancel_platform_reset', token=reset_token) }}"
+>
+  <div class="force-modal">
+    <div class="modal-card admin-reset-card">
+      <div class="platform-reset-step" data-step="confirm">
+        <h1>{{ t('admin.reset_confirm_title') }}</h1>
+        <p>{{ t('admin.reset_confirm_body', username=reset_owner.username, email=reset_owner.email) }}</p>
+        <p class="muted small">{{ t('admin.reset_confirm_warning') }}</p>
+        <div class="row-actions top-gap">
+          <form method="post" action="{{ url_for('admin.cancel_platform_reset', token=reset_token) }}">
+            <button type="submit" class="btn secondary">{{ t('admin.reset_confirm_no') }}</button>
+          </form>
+          <button type="button" id="platform-reset-confirm-btn" class="btn-danger">{{ t('admin.reset_confirm_yes') }}</button>
+        </div>
+      </div>
+
+      <div class="platform-reset-step hidden" data-step="progress">
+        <div class="platform-reset-spinner" aria-hidden="true"></div>
+        <h1>{{ t('admin.reset_progress_title') }}</h1>
+        <p>{{ t('admin.reset_progress_body') }}</p>
+      </div>
+
+      <div class="platform-reset-step hidden" data-step="complete">
+        <h1>{{ t('admin.reset_complete_title') }}</h1>
+        <p>{{ t('admin.reset_complete_body') }}</p>
+        <p class="muted small">{{ t('admin.reset_complete_note') }}</p>
+      </div>
+
+      <div class="platform-reset-step hidden" data-step="error">
+        <h1>{{ t('errors.500.title') }}</h1>
+        <p id="platform-reset-error-text">{{ t('admin.reset_execute_failed') }}</p>
+        <div class="row-actions top-gap">
+          <a href="{{ url_for('main.index') }}" class="btn secondary">{{ t('errors.back_home') }}</a>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+{% endblock %}

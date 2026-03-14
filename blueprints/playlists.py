@@ -3,6 +3,7 @@ from html import escape
 import re
 from math import ceil
 from flask import Blueprint, current_app, flash, jsonify, redirect, render_template, request, url_for
+from pymongo.errors import PyMongoError
 
 from auth_helpers import (
     can_access_song,
@@ -15,6 +16,7 @@ from auth_helpers import (
     login_required,
     parse_object_id,
     register_auto_moderation_violation,
+    safe_mongo_update_one,
     serialize_song,
     song_stream_url,
     send_email_message,
@@ -77,6 +79,7 @@ def playlist_public_data(playlist, user_oid):
         "song_count": len(playlist.get("song_ids", [])),
         "import_status": (playlist.get("import_status") or "").strip(),
         "import_total_tracks": int(playlist.get("import_total_tracks", 0) or 0),
+        "import_processed_count": int(playlist.get("import_processed_count", 0) or 0),
         "import_added_count": int(playlist.get("import_added_count", 0) or 0),
         "import_error": (playlist.get("import_error") or "").strip(),
     }
@@ -583,6 +586,77 @@ def remove_song_from_playlist(playlist_id, song_id):
     )
     flash(tr("flash.playlists.song_removed"), "success")
     return redirect(url_for("playlists.playlist_detail", playlist_id=playlist_id))
+
+
+@bp.route("/<playlist_id>/reorder", methods=["POST"])
+@login_required
+def reorder_playlist_songs(playlist_id):
+    user_oid = get_session_user_oid()
+    playlist_oid = parse_object_id(playlist_id)
+    if not playlist_oid:
+        return jsonify({"ok": False, "message": tr("flash.playlists.invalid")}), 400
+
+    payload = request.get_json(silent=True) or {}
+    ordered_song_ids = payload.get("ordered_song_ids")
+    songs_q = (payload.get("songs_q", "") or "").strip()
+    page_raw = str(payload.get("songs_page", "1") or "1").strip()
+    page = max(1, int(page_raw)) if page_raw.isdigit() else 1
+    if songs_q:
+        return jsonify({"ok": False, "message": tr("flash.playlists.reorder_search_disabled")}), 400
+    if not isinstance(ordered_song_ids, list) or not ordered_song_ids:
+        return jsonify({"ok": False, "message": tr("flash.songs.invalid_request")}), 400
+
+    playlist = extensions.playlists_col.find_one({"_id": playlist_oid})
+    if not playlist or playlist_hidden_by_feature_toggle(playlist) or not can_edit_playlist(playlist, user_oid):
+        return jsonify({"ok": False, "message": tr("flash.playlists.not_found")}), 404
+
+    parsed_song_ids = [parse_object_id(value) for value in ordered_song_ids]
+    if any(song_oid is None for song_oid in parsed_song_ids):
+        return jsonify({"ok": False, "message": tr("flash.songs.invalid_request")}), 400
+
+    current_song_ids = list(playlist.get("song_ids", []) or [])
+    per_page = int(current_app.config.get("PAGE_SIZE", 50))
+    start = max(0, (page - 1) * per_page)
+    end = min(len(current_song_ids), start + per_page)
+    current_slice = current_song_ids[start:end]
+
+    requested_keys = [str(song_oid) for song_oid in parsed_song_ids]
+    current_keys = [str(song_oid) for song_oid in current_slice]
+    if len(parsed_song_ids) != len(current_slice) or sorted(requested_keys) != sorted(current_keys):
+        return jsonify({"ok": False, "message": tr("flash.playlists.reorder_conflict")}), 409
+
+    updated_song_ids = current_song_ids[:start] + parsed_song_ids + current_song_ids[end:]
+    original_updated_at = playlist.get("updated_at")
+    now = datetime.utcnow()
+
+    try:
+        result = safe_mongo_update_one(
+            extensions.playlists_col,
+            {"_id": playlist_oid, "updated_at": original_updated_at},
+            {"$set": {"song_ids": updated_song_ids, "updated_at": now}},
+        )
+        if result.matched_count == 0:
+            refreshed = extensions.playlists_col.find_one({"_id": playlist_oid}, {"song_ids": 1, "updated_at": 1})
+            if not refreshed:
+                return jsonify({"ok": False, "message": tr("flash.playlists.not_found")}), 404
+            refreshed_song_ids = list(refreshed.get("song_ids", []) or [])
+            refreshed_slice = refreshed_song_ids[start:min(len(refreshed_song_ids), start + per_page)]
+            refreshed_keys = [str(song_oid) for song_oid in refreshed_slice]
+            if len(parsed_song_ids) != len(refreshed_slice) or sorted(requested_keys) != sorted(refreshed_keys):
+                return jsonify({"ok": False, "message": tr("flash.playlists.reorder_conflict")}), 409
+            updated_song_ids = refreshed_song_ids[:start] + parsed_song_ids + refreshed_song_ids[min(len(refreshed_song_ids), start + per_page):]
+            result = safe_mongo_update_one(
+                extensions.playlists_col,
+                {"_id": playlist_oid, "updated_at": refreshed.get("updated_at")},
+                {"$set": {"song_ids": updated_song_ids, "updated_at": now}},
+            )
+            if result.matched_count == 0:
+                return jsonify({"ok": False, "message": tr("flash.playlists.reorder_conflict")}), 409
+    except PyMongoError:
+        current_app.logger.warning("Unable to reorder playlist songs", exc_info=True)
+        return jsonify({"ok": False, "message": tr("flash.playlists.reorder_failed")}), 503
+
+    return jsonify({"ok": True, "message": tr("flash.playlists.reordered")})
 
 
 

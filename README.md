@@ -8,15 +8,17 @@ Application de streaming musical en `Flask` + `Jinja`, inspirée de YouTube Musi
 - Vérification d'adresse e-mail obligatoire avant connexion
 - Connexion Google OAuth
 - Les comptes Google ne gèrent pas leur mot de passe dans PulseBeat : pas de changement de mot de passe local, pas de lockout lié aux mots de passe compromis
-- Authentification 2 facteurs (2FA) optionnelle par code courriel pour les comptes locaux
-- Activation/désactivation de la 2FA confirmée par courriel puis mot de passe
-- Réinitialisation de mot de passe par e-mail
+- Authentification 2 facteurs (2FA) optionnelle pour les comptes locaux : code par courriel, application d'authentification (TOTP), ou les deux avec méthode favorite
+- Activation/désactivation de chaque méthode 2FA confirmée par courriel puis mot de passe
+- Courriel principal modifiable et courriel de secours vérifiable pour récupérer l'accès au compte
+- Réinitialisation / récupération de mot de passe par courriel principal, courriel de secours, 2FA courriel ou 2FA TOTP
 - Avertissement à l'inscription pour e-mail temporaire avec confirmation explicite avant création du compte
 - Vérification des mots de passe compromis
 - Verrouillage progressif de connexion par adresse e-mail après échecs répétés (6 tentatives), avec durée doublée à chaque cycle
 - Envoi automatique d'un e-mail de déverrouillage après verrouillage, avec lien sécurisé de déverrouillage + connexion
 - Changement de mot de passe et lock de sécurité si mot de passe compromis
 - Changement du nom d'utilisateur depuis `Gérer mon compte`, avec validation JavaScript en direct + validation serveur
+- Option `Se souvenir de moi` à la connexion, avec durée de session prolongée et avertissement de sécurité explicite
 - Invalidation globale des sessions après changement ou réinitialisation de mot de passe
 - Protection anti-vol de session par appareil de confiance + approbation par courriel des nouveaux appareils
 - Invalidation des sessions suspectes si un cookie semble rejoué depuis un autre environnement
@@ -46,6 +48,7 @@ Application de streaming musical en `Flask` + `Jinja`, inspirée de YouTube Musi
 - Alertes admin (sécurité/modération) masquables individuellement avec bouton `X`, persistance par admin et annulation rapide (toast 10s)
 - Playlists publiques, privées ou non répertoriées
 - Collaborateurs de playlist
+- Réorganisation persistante des chansons dans une playlist par glisser-déposer pour le propriétaire et les collaborateurs
 - Partage externe des chansons/playlists publiques ou non répertoriées (copie de lien + plateformes)
 - Préférences utilisateur pour exclure des chansons ou artistes des recommandations
 - Recommandations v2 équilibrées (mix préférences personnelles + populaires + découverte)
@@ -55,6 +58,7 @@ Application de streaming musical en `Flask` + `Jinja`, inspirée de YouTube Musi
 - Détection des doublons audio à l'upload via fingerprint SHA-256
 - Export des données de compte en JSON et CSV
 - Synchronisation de bibliothèque externe YouTube avec import de playlists (fonctionnelle), avec lecture partielle de certaines pistes selon les limites YouTube/Google
+- Workers persistants d'import YouTube : reprise automatique après redémarrage du serveur, suivi d'état dans `Gérer mon compte`, pause/reprise/annulation par playlist
 - Notifications e-mail lors des partages de playlist
 - Recherche, suggestions, tri et pagination (incluant recherche insensible à la casse dans les paroles)
 - Profils publics utilisateurs avec chansons et playlists accessibles selon les permissions
@@ -63,6 +67,7 @@ Application de streaming musical en `Flask` + `Jinja`, inspirée de YouTube Musi
 - Sources JavaScript conservées lisibles côté projet, avec bundles obfusqués servis au navigateur
 - Unicité des `username` et `email` garantie côté serveur et par index MongoDB
 - Zone admin séparée
+- Réinitialisation complète de PulseBeat par le root admin, avec confirmation par mot de passe + courriel avant destruction des données
 - Interface bilingue français / anglais
 - Pages d'erreur personnalisées
 
@@ -400,62 +405,305 @@ Si une écriture Mongo échoue malgré tout :
 - si la récupération échoue, l'utilisateur reçoit un message clair
 - la page d'erreur globale ne doit apparaître qu'en dernier recours, si la gestion locale ne suffit pas
 
+## Gestion des courriels du compte et récupération
+
+### Courriel principal
+
+Un compte local peut maintenant changer son **courriel principal** depuis `Gérer mon compte`.
+
+Flux :
+1. l'utilisateur saisit son nouveau courriel principal
+2. PulseBeat vérifie côté client puis côté serveur que l'adresse n'est pas déjà utilisée
+3. un courriel de confirmation signé est envoyé à la nouvelle adresse
+4. après clic sur le lien, le nouveau courriel devient le courriel principal du compte
+
+Garanties :
+- un courriel déjà utilisé comme courriel principal, courriel secondaire ou changement en attente est refusé
+- les collisions tardives MongoDB sont rattrapées et renvoyées en message utilisateur propre
+- les comptes Google ne passent pas par le changement de mot de passe local, mais gardent leur logique de contact cohérente
+
+### Courriel de secours
+
+PulseBeat permet aussi d'enregistrer un **courriel de secours** vérifié, destiné à la récupération de compte.
+
+Comportement :
+- le courriel de secours se configure dans `Gérer mon compte`
+- il doit être confirmé par lien signé avant d'être considéré comme valide
+- il peut être retiré explicitement par l'utilisateur
+- il est traité comme une adresse sensible : unicité contrôlée côté serveur
+
+Sécurité spécifique :
+- les courriels temporaires restent tolérés pour le courriel principal
+- ils sont en revanche **bloqués** pour le courriel de secours
+- la détection est faite côté JavaScript et confirmée côté serveur
+
+### Incitation à configurer une méthode de récupération
+
+Après la première connexion d'un nouveau compte local, PulseBeat affiche un message dédié invitant l'utilisateur à configurer au moins une solution de récupération :
+- 2FA par courriel
+- 2FA par application d'authentification
+- ou courriel de secours vérifié
+
+En parallèle, le dashboard admin signale clairement les comptes locaux n'ayant ni 2FA active ni courriel de secours vérifié.
+
+### Mot de passe oublié / récupération d'accès
+
+La récupération d'accès supporte désormais plusieurs méthodes selon ce que le compte a configuré :
+
+- courriel principal
+- courriel de secours
+- 2FA par courriel
+- 2FA par application d'authentification (TOTP)
+
+Comportement général :
+1. l'utilisateur lance `Mot de passe oublié` avec son courriel ou son nom d'utilisateur
+2. PulseBeat calcule les méthodes réellement disponibles pour ce compte
+3. l'utilisateur choisit la méthode souhaitée
+4. une preuve de possession est demandée
+5. après validation, PulseBeat autorise la définition d'un nouveau mot de passe
+
+Important : les comptes Google ne peuvent pas utiliser la réinitialisation locale de mot de passe. PulseBeat répond alors par une erreur générique côté serveur sans révéler publiquement le provider du compte.
+
 ## Authentification 2 facteurs (2FA)
 
 ### Vue d'ensemble
 
-PulseBeat propose une 2FA **optionnelle** pour les comptes locaux (non Google).  
-Quand elle est activée, une connexion par mot de passe nécessite aussi un **code de vérification à 6 chiffres envoyé par courriel**.
+PulseBeat propose une 2FA **optionnelle** pour les comptes locaux (non Google).
+
+Méthodes disponibles :
+- **courriel** : un code à 6 chiffres envoyé au courriel principal
+- **application d'authentification** : code TOTP compatible Google Authenticator / Microsoft Authenticator
+- **mode combiné** : les deux méthodes peuvent être activées en même temps
+
+L'utilisateur peut définir une **méthode favorite**. C'est celle que PulseBeat demandera par défaut au login, avec un bouton pour basculer temporairement vers l'autre méthode si elle est aussi configurée.
 
 Important :
-- les comptes Google ne peuvent pas activer la 2FA PulseBeat (la 2FA est gérée côté Google)
-- la 2FA locale s'applique uniquement après une authentification primaire correcte (email/username + mot de passe)
+- les comptes Google ne peuvent pas activer la 2FA PulseBeat (la sécurité 2FA est gérée côté Google)
+- la 2FA locale s'applique uniquement après une authentification primaire correcte (`courriel ou username + mot de passe`)
 
-### Comment activer la 2FA
+### Activation / désactivation de la 2FA courriel
 
-1. Aller dans `Gérer mon compte` > section `Authentification 2 facteurs`.
-2. Cliquer `Activer la 2FA`.
-3. PulseBeat envoie un **courriel de confirmation** contenant un lien signé temporaire.
-4. Ouvrir ce lien puis entrer le **mot de passe actuel** pour finaliser.
-5. La 2FA passe à l'état `activée`.
+Flux :
+1. l'utilisateur ouvre `Gérer mon compte` > `Authentification 2 facteurs`
+2. il demande l'activation ou la désactivation de la méthode courriel
+3. PulseBeat envoie un **lien signé temporaire** de confirmation
+4. l'utilisateur ouvre ce lien
+5. le système demande le **mot de passe actuel** pour finaliser
+6. la méthode courriel devient active ou inactive
 
-Après la création d'un compte local, PulseBeat affiche aussi un modal de recommandation pour encourager l'activation.
+Cela évite une bascule 2FA silencieuse si la session web est déjà ouverte sur un poste compromis.
 
-### Comment désactiver la 2FA
+### Activation de la 2FA par application d'authentification
 
-Le flux est symétrique à l'activation :
-1. Cliquer `Désactiver la 2FA`.
-2. Confirmer via le lien reçu par courriel.
-3. Entrer le mot de passe actuel sur l'écran de confirmation.
-4. La 2FA passe à l'état `désactivée`.
+Flux :
+1. dans `Gérer mon compte`, l'utilisateur démarre le setup `Application d'authentification`
+2. PulseBeat génère un secret TOTP temporaire
+3. l'interface affiche :
+   - la **clé secrète**
+   - l'**URI de provisioning**
+4. l'utilisateur ajoute ce secret dans son application d'authentification
+5. il saisit ensuite un code TOTP valide pour confirmer l'appairage
+6. la méthode TOTP est activée et peut devenir la méthode favorite
+
+Si l'utilisateur abandonne en cours de route, il peut annuler le setup. Le secret de setup en attente expire automatiquement après `TWO_FACTOR_TOTP_PENDING_MAX_AGE`.
+
+### Désactivation de la 2FA par application
+
+La désactivation suit un flux direct depuis `Gérer mon compte`.
+Si la méthode TOTP était la favorite et que la méthode courriel reste active, PulseBeat bascule automatiquement la méthode favorite vers `courriel`.
 
 ### Technique 2FA utilisée
 
-- code OTP numérique à `6` chiffres (`TWO_FACTOR_CODE_LENGTH = 6`)
+#### Méthode courriel
+
+- code OTP numérique à `6` chiffres
 - code généré côté serveur via `secrets.randbelow(...)`
 - le code n'est **pas stocké en clair** en session :
   - PulseBeat stocke un hash SHA-256 basé sur `user_id + code + FLASK_SECRET_KEY`
-- durée de validité du code configurable via `TWO_FACTOR_CODE_MAX_AGE` (défaut `600` secondes)
-- page challenge dédiée (`/two-factor/challenge`) avec possibilité de renvoyer un nouveau code
+- durée de validité configurable via `TWO_FACTOR_CODE_MAX_AGE`
+- possibilité de renvoyer un nouveau code depuis l'écran de challenge
+
+#### Méthode TOTP
+
+- secret compatible RFC TOTP via `pyotp`
+- codes générés côté application d'authentification de l'utilisateur
+- vérification serveur avec fenêtre de tolérance courte (`valid_window=1`)
+- aucun code TOTP ponctuel n'est stocké côté PulseBeat
 
 ### Mauvais code / trop de tentatives
 
+Le challenge 2FA applique les mêmes garde-fous quelle que soit la méthode choisie :
+
 - chaque code invalide incrémente un compteur en session
-- message utilisateur avec le nombre de tentatives restantes
-- limite stricte : `6` erreurs (`TWO_FACTOR_CODE_MAX_ATTEMPTS = 6`)
+- un message explicite indique le nombre de tentatives restantes
+- limite stricte : `6` erreurs
 - à la limite atteinte :
-  - session 2FA invalidée
+  - la session de challenge 2FA est invalidée
   - retour à la page de connexion
-  - il faut recommencer le login pour obtenir un nouveau code
-- si le code expire, même comportement : challenge invalidé et retour login
+  - il faut recommencer le login complet
+- si le code expire, même comportement
 
-### Confirmation par courriel pour activation/désactivation
+### Méthode favorite et fallback
 
-Les opérations sensibles d'activation/désactivation 2FA exigent :
-- un **lien signé temporaire** envoyé par courriel (`TWO_FACTOR_TOGGLE_TOKEN_MAX_AGE`, défaut `3600` secondes)
-- puis une **vérification du mot de passe**
+Quand les deux méthodes sont actives :
+- PulseBeat demande d'abord la méthode favorite
+- l'utilisateur peut cliquer pour basculer vers l'autre méthode disponible
+- ce basculement est **temporaire** pour le challenge en cours et ne change pas forcément la préférence enregistrée
 
-Cela réduit les risques de bascule 2FA non autorisée même si la session web est déjà ouverte.
+Effet pratique :
+- la 2FA reste flexible si le courriel tarde à arriver
+- ou si l'application d'authentification n'est pas immédiatement accessible
+
+## Réorganisation persistante des playlists
+
+Les chansons d'une playlist peuvent maintenant être réordonnées par **glisser-déposer** directement dans la page de détail de la playlist.
+
+Qui peut réordonner :
+- le propriétaire de la playlist
+- les collaborateurs autorisés
+
+Comportement :
+- le drag and drop s'effectue directement dans la liste de chansons
+- le nouvel ordre est envoyé au serveur puis persisté en base MongoDB
+- l'ordre est conservé pour toutes les lectures futures de cette playlist
+
+Limite volontaire :
+- quand une recherche interne de playlist est active, le drag and drop est désactivé
+- cela évite de réordonner une vue filtrée partielle et de créer un ordre ambigu
+
+### Résistance aux courses MongoDB
+
+Le réordonnancement a été conçu pour limiter les conflits :
+- la route refuse les vues filtrées
+- le serveur vérifie que la liste transmise correspond bien à l'ensemble attendu
+- si l'ordre a changé entre-temps, PulseBeat renvoie un conflit propre (`409`) au lieu de corrompre la playlist
+- en cas d'échec inattendu MongoDB, la route retourne un message propre et journalise l'incident
+
+## Workers persistants d'import YouTube
+
+Les imports de grosses playlists YouTube ne dépendent plus uniquement d'un thread éphémère lié à la requête HTTP. Ils sont maintenant gérés comme de **vrais jobs persistants**.
+
+### Principe
+
+Quand un utilisateur importe une playlist YouTube vers une playlist locale :
+
+1. la playlist locale est créée immédiatement
+2. un document de job est enregistré dans la collection `external_import_jobs`
+3. le traitement continue en arrière-plan
+4. le dashboard `Gérer mon compte` permet de suivre et piloter ce job
+
+### Survie au redémarrage de Flask
+
+Au démarrage de l'application :
+- un scheduler léger redémarre automatiquement
+- il inspecte les jobs `queued` et les jobs `running` devenus orphelins
+- les jobs interrompus sont repris sans intervention utilisateur
+
+Important :
+- si l'utilisateur avait demandé une **pause** ou une **annulation** juste avant le redémarrage, cette intention est conservée
+- le système n'écrase pas cette demande en re-lançant aveuglément le job
+
+### États possibles
+
+Les jobs d'import peuvent être dans les états suivants :
+- `queued`
+- `running`
+- `paused`
+- `completed`
+- `failed`
+- `canceled`
+
+Ces états sont reflétés à la fois :
+- dans la collection `external_import_jobs`
+- dans la playlist locale liée (`import_status`, progression, erreur éventuelle)
+
+### Contrôle utilisateur
+
+Depuis `Gérer mon compte`, l'utilisateur voit :
+- le nom de la playlist locale
+- la source YouTube
+- l'état courant
+- le nombre de pistes traitées
+- le nombre de chansons réellement ajoutées
+- un lien direct vers la playlist locale
+
+Actions disponibles :
+- `Pause`
+- `Reprendre`
+- `Annuler`
+
+### Matching intelligent pendant l'import
+
+Pendant l'import :
+- PulseBeat tente d'abord de réutiliser une chanson locale publique équivalente
+- le matching repose sur une normalisation `titre + artiste`
+- si un match local est trouvé, aucune chanson externe doublon n'est créée
+- la playlist importée référence alors directement la chanson locale déjà présente sur le serveur
+
+### Résistance aux courses et crashs
+
+Les workers ont été durcis pour rester cohérents :
+- réservation atomique d'un job `queued` vers `running`
+- heartbeat régulier pour détecter les jobs orphelins
+- reprise automatique seulement si le job n'a pas été explicitement mis en pause ou annulé
+- `pause` / `resume` / `cancel` utilisent des transitions filtrées côté MongoDB pour éviter les changements d'état incohérents
+
+Si un échec MongoDB ou un crash survient malgré tout :
+- PulseBeat tente de remettre le job dans un état cohérent
+- si cela échoue, le job passe en `failed` avec un message d'erreur stable
+- l'interface doit montrer cet échec au lieu de rester bloquée silencieusement
+
+## Réinitialisation complète de PulseBeat par le root admin
+
+Le `root admin` dispose désormais d'une opération de **réinitialisation complète** de l'instance PulseBeat.
+
+### Ce que fait cette action
+
+La réinitialisation complète :
+- efface les données MongoDB de l'application
+- supprime les fichiers audio stockés côté serveur
+- remet l'instance dans un état proche d'un premier lancement
+
+Cette opération est volontairement extrêmement protégée.
+
+### Séquence de sécurité
+
+1. seul le **root admin** voit l'action dans la zone admin
+2. l'admin doit saisir son **mot de passe actuel**
+3. PulseBeat envoie ensuite un **courriel de confirmation** dédié
+4. après clic sur le lien reçu, une page de confirmation finale s'ouvre
+5. un dernier choix `Oui / Non` est demandé avant destruction réelle
+
+Même si la 2FA courriel n'est pas activée sur le compte, cette confirmation par courriel reste obligatoire pour le reset complet.
+
+### Expérience utilisateur
+
+Pendant l'exécution :
+- un modal bloquant indique que la réinitialisation est en cours
+
+À la fin :
+- un second modal bloquant demande explicitement de **redémarrer le serveur PulseBeat** pour repartir proprement
+
+### Journalisation et sécurité
+
+- l'action est journalisée dans l'audit admin
+- le token de reset est consommé une seule fois
+- si l'admin annule à la confirmation finale, le processus s'arrête sans effacer les données
+
+## Authentification persistante et option `Se souvenir de moi`
+
+La page de connexion propose désormais une option `Se souvenir de moi`.
+
+Comportement :
+- si la case est cochée, la session Flask devient persistante sur une durée plus longue
+- si elle n'est pas cochée, le comportement reste celui d'une session plus courte / classique
+- l'option est **désactivée par défaut**
+
+Pour aider l'utilisateur à faire un choix éclairé, un point d'aide `?` à côté de la case explique que :
+- cela évite de se reconnecter à chaque session
+- mais augmente le risque si le cookie de session venait à être volé
+
+Cette option complète le système de sessions liées aux appareils, sans le remplacer.
 
 ## Lecteur audio
 
@@ -671,6 +919,7 @@ PulseBeat peut envoyer des e-mails pour :
 - Flask
 - Jinja2
 - MongoDB / PyMongo
+- PyOTP (2FA par application d'authentification)
 - JavaScript vanilla
 - HTML / CSS
 
@@ -679,11 +928,11 @@ PulseBeat peut envoyer des e-mails pour :
 - `app.py` : création de l'application Flask, config, startup
 - `extensions.py` : connexion MongoDB et collections
 - `auth_helpers.py` : helpers auth, sécurité, mail, permissions
-- `blueprints/accounts.py` : auth, setup initial, reset password, vérification e-mail, Google OAuth, profils publics
+- `blueprints/accounts.py` : auth, setup initial, reset password, vérification e-mail, Google OAuth, profils publics, 2FA multi-méthodes, import YouTube persistant
 - `blueprints/main.py` : accueil et navigation principale
 - `blueprints/songs.py` : chansons, détails, votes, commentaires, signalements
-- `blueprints/playlists.py` : playlists, collaborateurs, recherche, partage
-- `blueprints/admin.py` : dashboard admin
+- `blueprints/playlists.py` : playlists, collaborateurs, recherche, partage, réordonnancement persistant
+- `blueprints/admin.py` : dashboard admin, réinitialisation complète de la plateforme
 - `templates/` : vues Jinja
 - `templates/accounts/public_profile.jinja` : page publique utilisateur
 - `static/js/player.js` : lecteur audio flottant
@@ -756,6 +1005,7 @@ Collections utilisées :
 - `playlists`
 - `external_integrations`
 - `external_playlists`
+- `external_import_jobs`
 - `data_exports`
 - `song_votes`
 - `song_comments`
@@ -808,20 +1058,33 @@ Important :
 - l'URI doit correspondre exactement, sinon Google retourne `redirect_uri_mismatch`
 - si un e-mail existe déjà avec un compte local, la connexion Google est refusée pour cet e-mail
 
+### Réinitialisation complète de la plateforme (optionnel, root admin)
+
+Variables disponibles :
+- `PLATFORM_RESET_TOKEN_MAX_AGE=1800` (durée de validité du lien envoyé au root admin pour confirmer le reset complet)
+- `PLATFORM_RESET_SALT=pulsebeat-platform-reset` (salt du token de confirmation du reset complet)
+
+Comportement :
+- seul le root admin peut initier cette action
+- l'opération exige mot de passe + courriel de confirmation
+- le lien n'est utilisable qu'une fois
+
 ### 2FA (optionnel, recommandé)
 
 Variables disponibles :
-- `TWO_FACTOR_CODE_MAX_AGE=600` (durée de validité du code 2FA, en secondes)
-- `TWO_FACTOR_TOGGLE_TOKEN_MAX_AGE=3600` (durée de validité du lien de confirmation activation/désactivation 2FA, en secondes)
-- `TWO_FACTOR_TOGGLE_SALT=pulsebeat-two-factor-toggle` (salt du token de confirmation 2FA)
+- `TWO_FACTOR_CODE_MAX_AGE=600` (durée de validité du code 2FA par courriel, en secondes)
+- `TWO_FACTOR_TOGGLE_TOKEN_MAX_AGE=3600` (durée de validité du lien de confirmation activation/désactivation de la méthode courriel)
+- `TWO_FACTOR_TOGGLE_SALT=pulsebeat-two-factor-toggle` (salt du token de confirmation 2FA courriel)
+- `TWO_FACTOR_TOTP_PENDING_MAX_AGE=900` (durée de vie du secret TOTP en attente de confirmation pendant le setup)
 
-### Sessions liées aux appareils (optionnel, recommandé)
+### Sessions liées aux appareils et connexions persistantes (optionnel, recommandé)
 
 Variables disponibles :
 - `DEVICE_COOKIE_NAME=pulsebeat_device_id` (nom du cookie d'appareil PulseBeat)
 - `DEVICE_COOKIE_MAX_AGE=31536000` (durée de vie du cookie d'appareil, en secondes)
 - `DEVICE_APPROVAL_TOKEN_MAX_AGE=1800` (durée de validité du lien d'approbation d'un nouvel appareil)
 - `DEVICE_APPROVAL_SALT=pulsebeat-device-approval` (salt du token d'approbation d'appareil)
+- `REMEMBER_ME_SESSION_DAYS=30` (durée des sessions persistantes quand `Se souvenir de moi` est coché)
 
 ### JavaScript client (optionnel)
 
@@ -853,11 +1116,18 @@ Détails techniques de l'import :
 - synchronisation OAuth vers les collections :
   - `external_integrations` (tokens)
   - `external_playlists` (playlists + tracks externes)
+  - `external_import_jobs` (jobs persistants d'import local)
 - import en playlist locale non bloquant :
   - la création démarre immédiatement
-  - le traitement est délégué à un worker en arrière-plan
-  - timeout court côté requête utilisateur (~2.8s), puis message "continue en arrière-plan"
-  - la playlist locale expose `import_status` (`pending`, `running`, `completed`, `failed`)
+  - le traitement est délégué à un worker persistant en arrière-plan
+  - l'utilisateur peut suivre les jobs dans `Gérer mon compte`
+  - chaque job peut être mis en pause, repris ou annulé
+- reprise après redémarrage :
+  - les jobs `queued` reprennent automatiquement
+  - les jobs `running` interrompus sont relancés par le scheduler
+  - les demandes `pause` / `cancel` déjà enregistrées sont respectées au redémarrage
+- états exposés côté interface :
+  - `pending`, `running`, `paused`, `completed`, `failed`, `canceled`
 - réutilisation intelligente des chansons locales publiques :
   - avant de créer une chanson externe, l'import cherche une chanson locale `upload` + `public`
   - matching par normalisation `titre + artiste` (sans accents, ponctuation neutralisée)

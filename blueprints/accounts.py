@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import html
 import io
@@ -5,6 +6,8 @@ import json
 import secrets
 import smtplib
 import csv
+import threading
+import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import datetime, timedelta
@@ -14,12 +17,21 @@ from urllib.parse import urlencode
 
 import re
 
+import pyotp
 import requests
 from flask import Blueprint, Response, abort, current_app, flash, jsonify, redirect, render_template, request, session, url_for
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
+from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError, PyMongoError
 from werkzeug.routing import BuildError
 from werkzeug.security import check_password_hash, generate_password_hash
+
+try:
+    import qrcode
+    from qrcode.image.svg import SvgPathImage
+except Exception:
+    qrcode = None
+    SvgPathImage = None
 
 import extensions
 from auth_helpers import (
@@ -61,8 +73,14 @@ from i18n import tr
 
 bp = Blueprint("accounts", __name__)
 IMPORT_EXECUTOR = ThreadPoolExecutor(max_workers=2)
+IMPORT_SCHEDULER_POLL_SECONDS = 3
+IMPORT_STALE_RUNNING_SECONDS = 90
+IMPORT_RUNNING_FUTURES = {}
+IMPORT_RUNNING_LOCK = threading.Lock()
 TWO_FACTOR_CODE_LENGTH = 6
 TWO_FACTOR_CODE_MAX_ATTEMPTS = 6
+SUPPORTED_TWO_FACTOR_METHODS = ("email", "totp")
+PASSWORD_RESET_RECOVERY_SESSION_MAX_AGE = 900
 
 
 def _normalize_track_identity(value: str) -> str:
@@ -305,14 +323,42 @@ def _bump_session_version(user_oid):
     safe_mongo_update_one(extensions.users_col, {"_id": user_oid}, {"$inc": {"session_token_version": 1}})
 
 
+def _two_factor_method_enabled(user, method: str) -> bool:
+    if not user or user.get("auth_provider") == "google":
+        return False
+    method_name = str(method or "").strip().lower()
+    if method_name == "email":
+        return bool(user.get("two_factor_email_enabled", user.get("two_factor_enabled", False)))
+    if method_name == "totp":
+        return bool(user.get("two_factor_totp_enabled", False) and str(user.get("two_factor_totp_secret", "") or "").strip())
+    return False
+
+
+def _enabled_two_factor_methods(user) -> list[str]:
+    return [method for method in SUPPORTED_TWO_FACTOR_METHODS if _two_factor_method_enabled(user, method)]
+
+
+def _preferred_two_factor_method(user, enabled_methods=None) -> str:
+    methods = list(enabled_methods if enabled_methods is not None else _enabled_two_factor_methods(user))
+    preferred = str((user or {}).get("two_factor_preferred_method", "") or "").strip().lower()
+    if preferred in methods:
+        return preferred
+    return methods[0] if methods else ""
+
+
+def _two_factor_sync_fields(user, overrides=None) -> dict:
+    snapshot = dict(user or {})
+    if isinstance(overrides, dict):
+        snapshot.update(overrides)
+    enabled_methods = _enabled_two_factor_methods(snapshot)
+    return {
+        "two_factor_enabled": bool(enabled_methods),
+        "two_factor_preferred_method": _preferred_two_factor_method(snapshot, enabled_methods),
+    }
+
+
 def _should_show_two_factor_prompt(user) -> bool:
-    if not user:
-        return False
-    if user.get("auth_provider") == "google":
-        return False
-    if bool(user.get("two_factor_enabled", False)):
-        return False
-    return bool(user.get("two_factor_prompt_pending", False))
+    return _recovery_prompt_pending(user)
 
 
 def _post_login_redirect(user):
@@ -322,8 +368,11 @@ def _post_login_redirect(user):
 
 
 def _complete_login(user):
+    remember_me = bool(session.get("pending_remember_me", False))
     try:
         begin_authenticated_session(user)
+        session.permanent = remember_me
+        session.pop("pending_remember_me", None)
     except PyMongoError:
         current_app.logger.warning("Unable to finalize authenticated session", exc_info=True)
         session.clear()
@@ -340,6 +389,13 @@ def find_user_by_email(email: str):
     return extensions.users_col.find_one({"email_normalized": normalized})
 
 
+def find_user_by_backup_email(email: str):
+    normalized = normalize_email(email)
+    if not normalized:
+        return None
+    return extensions.users_col.find_one({"backup_email_normalized": normalized})
+
+
 def find_user_by_username(username: str):
     normalized = normalize_username(username)
     if not normalized:
@@ -354,6 +410,42 @@ def find_user_by_login(identifier: str):
     if "@" in raw:
         return find_user_by_email(raw)
     return find_user_by_username(raw)
+
+
+def has_verified_backup_email(user) -> bool:
+    return bool(
+        user
+        and normalize_email(user.get("backup_email", ""))
+        and bool(user.get("backup_email_verified", False))
+    )
+
+
+def _user_has_recovery_config(user) -> bool:
+    if not user or user.get("auth_provider") == "google":
+        return True
+    return bool(_enabled_two_factor_methods(user) or has_verified_backup_email(user))
+
+
+def _recovery_prompt_pending(user) -> bool:
+    if not user or user.get("auth_provider") == "google":
+        return False
+    return bool(user.get("two_factor_prompt_pending", False)) and not _user_has_recovery_config(user)
+
+
+def _email_in_use_by_other_account(email: str, current_user_oid=None) -> bool:
+    normalized = normalize_email(email)
+    if not normalized:
+        return False
+    filters = [
+        {"email_normalized": normalized},
+        {"backup_email_normalized": normalized},
+        {"pending_backup_email_normalized": normalized},
+        {"pending_email_change_normalized": normalized},
+    ]
+    query = {"$or": filters}
+    if current_user_oid:
+        query["_id"] = {"$ne": current_user_oid}
+    return extensions.users_col.find_one(query, {"_id": 1}) is not None
 
 
 def validate_username_for_create(username: str):
@@ -604,26 +696,28 @@ def _two_factor_toggle_serializer():
     return URLSafeTimedSerializer(current_app.secret_key, salt=salt)
 
 
-def _two_factor_toggle_fingerprint(user, action: str):
+def _two_factor_toggle_fingerprint(user, action: str, method: str = "email"):
     raw = "|".join(
         [
             str(user.get("_id", "")),
             normalize_email(user.get("email", "")),
             str(user.get("password_hash", "")),
             str(user.get("auth_provider", "local")),
-            "1" if bool(user.get("two_factor_enabled", False)) else "0",
+            str(method or "").strip().lower(),
+            "1" if _two_factor_method_enabled(user, method) else "0",
             str(action or "").strip().lower(),
         ]
     )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def _build_two_factor_toggle_link(user, action: str):
+def _build_two_factor_toggle_link(user, action: str, method: str = "email"):
     token = _two_factor_toggle_serializer().dumps(
         {
             "uid": str(user.get("_id", "")),
             "action": str(action or "").strip().lower(),
-            "fp": _two_factor_toggle_fingerprint(user, action),
+            "method": str(method or "").strip().lower(),
+            "fp": _two_factor_toggle_fingerprint(user, action, method),
         }
     )
     base_url = current_app.config.get("APP_BASE_URL", "").strip()
@@ -632,12 +726,12 @@ def _build_two_factor_toggle_link(user, action: str):
     return url_for("accounts.confirm_two_factor_toggle", token=token, _external=True)
 
 
-def _send_two_factor_toggle_email(user, action: str):
+def _send_two_factor_toggle_email(user, action: str, method: str = "email"):
     recipient_email = normalize_email(user.get("email", ""))
     if not recipient_email:
         return False
     enable = str(action or "").strip().lower() == "enable"
-    link = _build_two_factor_toggle_link(user, action)
+    link = _build_two_factor_toggle_link(user, action, method)
     expires_minutes = int(current_app.config.get("TWO_FACTOR_TOGGLE_TOKEN_MAX_AGE", 3600) / 60)
     username = user.get("username", "user")
     username_safe = html.escape(username)
@@ -689,22 +783,23 @@ def _load_two_factor_toggle_user_from_token(token: str):
     try:
         payload = _two_factor_toggle_serializer().loads(token, max_age=max_age)
     except (SignatureExpired, BadSignature):
-        return None, "", tr("flash.accounts.two_factor_toggle_invalid")
+        return None, "", "", tr("flash.accounts.two_factor_toggle_invalid")
 
     user_oid = parse_object_id(payload.get("uid", ""))
     action = str(payload.get("action", "")).strip().lower()
-    if not user_oid or action not in {"enable", "disable"}:
-        return None, "", tr("flash.accounts.two_factor_toggle_invalid")
+    method = str(payload.get("method", "email")).strip().lower()
+    if not user_oid or action not in {"enable", "disable"} or method not in {"email"}:
+        return None, "", "", tr("flash.accounts.two_factor_toggle_invalid")
 
     user = extensions.users_col.find_one({"_id": user_oid})
     if not user:
-        return None, "", tr("flash.accounts.two_factor_toggle_invalid")
+        return None, "", "", tr("flash.accounts.two_factor_toggle_invalid")
     if user.get("auth_provider") == "google":
-        return None, "", tr("flash.accounts.two_factor_not_available_google")
+        return None, "", "", tr("flash.accounts.two_factor_not_available_google")
 
-    if payload.get("fp") != _two_factor_toggle_fingerprint(user, action):
-        return None, "", tr("flash.accounts.two_factor_toggle_invalid")
-    return user, action, ""
+    if payload.get("fp") != _two_factor_toggle_fingerprint(user, action, method):
+        return None, "", "", tr("flash.accounts.two_factor_toggle_invalid")
+    return user, action, method, ""
 
 
 def _mask_email(value: str):
@@ -724,9 +819,17 @@ def _two_factor_code_hash(user_id: str, code: str):
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def _clear_pending_two_factor_email_code():
+    for key in ["pending_2fa_code_hash", "pending_2fa_expires_at"]:
+        session.pop(key, None)
+
+
 def _clear_two_factor_session():
     for key in [
         "pending_2fa_user_id",
+        "pending_2fa_available_methods",
+        "pending_2fa_selected_method",
+        "pending_2fa_preferred_method",
         "pending_2fa_code_hash",
         "pending_2fa_expires_at",
         "pending_2fa_attempts",
@@ -734,7 +837,33 @@ def _clear_two_factor_session():
         session.pop(key, None)
 
 
-def _issue_two_factor_code(user):
+def _current_pending_two_factor_methods() -> list[str]:
+    methods = session.get("pending_2fa_available_methods", [])
+    if not isinstance(methods, list):
+        return []
+    return [method for method in methods if method in SUPPORTED_TWO_FACTOR_METHODS]
+
+
+def _prepare_two_factor_session(user, selected_method: str | None = None, reset_attempts: bool = True):
+    methods = _enabled_two_factor_methods(user)
+    if not methods:
+        _clear_two_factor_session()
+        return ""
+    chosen_method = str(selected_method or "").strip().lower()
+    if chosen_method not in methods:
+        chosen_method = _preferred_two_factor_method(user, methods)
+    session["pending_2fa_user_id"] = str(user.get("_id", ""))
+    session["pending_2fa_available_methods"] = methods
+    session["pending_2fa_selected_method"] = chosen_method
+    session["pending_2fa_preferred_method"] = _preferred_two_factor_method(user, methods)
+    if reset_attempts:
+        session["pending_2fa_attempts"] = 0
+    if chosen_method != "email":
+        _clear_pending_two_factor_email_code()
+    return chosen_method
+
+
+def _issue_two_factor_code(user, reset_attempts: bool = False):
     code = f"{secrets.randbelow(10 ** TWO_FACTOR_CODE_LENGTH):0{TWO_FACTOR_CODE_LENGTH}d}"
     ttl_seconds = int(current_app.config.get("TWO_FACTOR_CODE_MAX_AGE", 600))
     expires_at = datetime.utcnow() + timedelta(seconds=max(60, ttl_seconds))
@@ -746,11 +875,73 @@ def _issue_two_factor_code(user):
     )
     if not sent:
         return False
-    session["pending_2fa_user_id"] = str(user.get("_id", ""))
+    _prepare_two_factor_session(user, selected_method="email", reset_attempts=reset_attempts)
     session["pending_2fa_code_hash"] = _two_factor_code_hash(str(user.get("_id", "")), code)
     session["pending_2fa_expires_at"] = int(expires_at.timestamp())
-    session["pending_2fa_attempts"] = 0
     return True
+
+
+def _select_pending_two_factor_method(user, method: str, reset_attempts: bool = False):
+    method_name = str(method or "").strip().lower()
+    available = _enabled_two_factor_methods(user)
+    if method_name not in available:
+        return False
+    _prepare_two_factor_session(user, selected_method=method_name, reset_attempts=reset_attempts)
+    if method_name == "email":
+        return _issue_two_factor_code(user, reset_attempts=False)
+    return True
+
+
+def _totp_pending_secret(user) -> str:
+    secret = str((user or {}).get("two_factor_totp_pending_secret", "") or "").strip()
+    created_at = (user or {}).get("two_factor_totp_pending_created_at")
+    max_age = int(current_app.config.get("TWO_FACTOR_TOTP_PENDING_MAX_AGE", 900) or 900)
+    if not secret or not isinstance(created_at, datetime):
+        return ""
+    if created_at + timedelta(seconds=max(60, max_age)) <= datetime.utcnow():
+        return ""
+    return secret
+
+
+def _totp_provisioning_uri(user, secret: str) -> str:
+    account_name = normalize_email(user.get("email", "")) or user.get("username", "user")
+    issuer_name = current_app.config.get("APP_NAME", "PulseBeat")
+    return pyotp.TOTP(secret).provisioning_uri(name=account_name, issuer_name=issuer_name)
+
+
+def _totp_qr_svg_data_uri(provisioning_uri: str) -> str:
+    if not provisioning_uri or qrcode is None or SvgPathImage is None:
+        return ""
+    try:
+        qr = qrcode.QRCode(border=2, box_size=8)
+        qr.add_data(provisioning_uri)
+        qr.make(fit=True)
+        image = qr.make_image(image_factory=SvgPathImage)
+        output = io.BytesIO()
+        image.save(output)
+        encoded = base64.b64encode(output.getvalue()).decode("ascii")
+        return f"data:image/svg+xml;base64,{encoded}"
+    except Exception:
+        current_app.logger.warning("Unable to generate TOTP QR code", exc_info=True)
+        return ""
+
+
+def _clear_pending_totp_setup(user_oid):
+    safe_mongo_update_one(
+        extensions.users_col,
+        {"_id": user_oid},
+        {"$set": {"two_factor_totp_pending_secret": "", "two_factor_totp_pending_created_at": None}},
+    )
+
+
+def _verify_totp_code(secret: str, code: str) -> bool:
+    cleaned = re.sub(r"[^0-9]", "", code or "")
+    if len(cleaned) != TWO_FACTOR_CODE_LENGTH or not secret:
+        return False
+    try:
+        return bool(pyotp.TOTP(secret).verify(cleaned, valid_window=1))
+    except Exception:
+        return False
 
 
 def _load_pending_two_factor_user():
@@ -768,9 +959,16 @@ def _load_pending_two_factor_user():
     if not is_email_verified(user):
         _clear_two_factor_session()
         return None, tr("flash.accounts.email_not_verified")
-    if user.get("auth_provider") == "google" or not bool(user.get("two_factor_enabled", False)):
+    methods = _enabled_two_factor_methods(user)
+    if user.get("auth_provider") == "google" or not methods:
         _clear_two_factor_session()
         return None, tr("flash.accounts.two_factor_session_invalid")
+    current_methods = _current_pending_two_factor_methods()
+    if sorted(current_methods) != sorted(methods):
+        _prepare_two_factor_session(user, selected_method=_preferred_two_factor_method(user, methods), reset_attempts=False)
+    selected_method = str(session.get("pending_2fa_selected_method", "") or "").strip().lower()
+    if selected_method not in methods:
+        _prepare_two_factor_session(user, selected_method=_preferred_two_factor_method(user, methods), reset_attempts=False)
     return user, ""
 
 
@@ -1033,6 +1231,209 @@ def _load_verification_user_from_token(token: str):
         return None, tr("flash.accounts.email_verification_invalid")
 
     return user, ""
+
+
+def _contact_email_serializer():
+    return URLSafeTimedSerializer(current_app.secret_key, salt="pulsebeat-contact-email")
+
+
+def _contact_email_fingerprint(user, purpose: str, target_email: str):
+    raw = "|".join(
+        [
+            str(user.get("_id", "")),
+            str(user.get("password_hash", "")),
+            str(user.get("auth_provider", "local")),
+            str(purpose or "").strip().lower(),
+            normalize_email(target_email),
+        ]
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _build_contact_email_link(user, purpose: str, target_email: str):
+    token = _contact_email_serializer().dumps(
+        {
+            "uid": str(user.get("_id", "")),
+            "purpose": str(purpose or "").strip().lower(),
+            "target": normalize_email(target_email),
+            "fp": _contact_email_fingerprint(user, purpose, target_email),
+        }
+    )
+    endpoint = "accounts.confirm_primary_email_change" if str(purpose).strip().lower() == "primary" else "accounts.confirm_backup_email"
+    base_url = current_app.config.get("APP_BASE_URL", "").strip()
+    if base_url:
+        return f"{base_url.rstrip('/')}{url_for(endpoint, token=token)}"
+    return url_for(endpoint, token=token, _external=True)
+
+
+def _send_contact_email_confirmation(recipient_email: str, username: str, purpose: str, link: str):
+    normalized_purpose = str(purpose or "").strip().lower()
+    is_primary = normalized_purpose == "primary"
+    expires_minutes = int(current_app.config.get("EMAIL_VERIFICATION_TOKEN_MAX_AGE", 86400) / 60)
+    heading_key = "auth.primary_email_change_heading" if is_primary else "auth.backup_email_heading"
+    intro_key = "auth.primary_email_change_intro" if is_primary else "auth.backup_email_intro"
+    button_key = "auth.primary_email_change_button" if is_primary else "auth.backup_email_button"
+    plain_instruction_key = "auth.primary_email_change_plain_instruction" if is_primary else "auth.backup_email_plain_instruction"
+    username_safe = html.escape(username or "user")
+    link_safe = html.escape(link)
+    plain_text = (
+        f"{tr('auth.verification_email_plain_greeting', username=username)}\n\n"
+        f"{tr(plain_instruction_key)}\n{link}\n\n"
+        f"{tr('auth.verification_email_plain_expiry', expires_minutes=expires_minutes)}\n\n"
+        f"{tr('auth.verification_email_ignore')}"
+    )
+    html_body = f"""
+<!doctype html>
+<html>
+  <body style=\"margin:0;padding:0;background:#f3f6fb;font-family:Arial,Helvetica,sans-serif;color:#1b2430;\">
+    <table role=\"presentation\" width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" style=\"background:#f3f6fb;padding:24px 0;\">
+      <tr>
+        <td align=\"center\">
+          <table role=\"presentation\" width=\"640\" cellspacing=\"0\" cellpadding=\"0\" style=\"max-width:640px;width:100%;background:#ffffff;border-radius:14px;overflow:hidden;border:1px solid #e3eaf3;\">
+            <tr>
+              <td style=\"background:linear-gradient(135deg,#ff8a1f,#ff4f4f);padding:20px 28px;color:#fff;font-size:22px;font-weight:700;\">PulseBeat</td>
+            </tr>
+            <tr>
+              <td style=\"padding:28px;\">
+                <h1 style=\"margin:0 0 14px 0;font-size:22px;line-height:1.3;color:#101828;\">{html.escape(tr(heading_key))}</h1>
+                <p style=\"margin:0 0 12px 0;font-size:15px;line-height:1.6;\">{html.escape(tr('auth.verification_email_html_greeting', username=username_safe))}</p>
+                <p style=\"margin:0 0 18px 0;font-size:15px;line-height:1.6;\">{html.escape(tr(intro_key))}</p>
+                <p style=\"margin:0 0 22px 0;\">
+                  <a href=\"{link_safe}\" style=\"display:inline-block;background:#2563eb;color:#ffffff;text-decoration:none;padding:12px 18px;border-radius:10px;font-size:14px;font-weight:700;\">{html.escape(tr(button_key))}</a>
+                </p>
+                <p style=\"margin:0 0 8px 0;font-size:13px;line-height:1.5;color:#5b6472;\">{html.escape(tr('auth.verification_email_plain_expiry', expires_minutes=expires_minutes))}</p>
+                <p style=\"margin:0 0 14px 0;font-size:13px;line-height:1.5;color:#5b6472;\">{html.escape(tr('auth.verification_email_ignore'))}</p>
+                <p style=\"margin:0;font-size:12px;line-height:1.5;color:#7b8494;word-break:break-all;\">{link_safe}</p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>
+"""
+    subject_key = "auth.primary_email_change_subject" if is_primary else "auth.backup_email_subject"
+    return send_email_message(recipient_email, tr(subject_key), plain_text, html_body)
+
+
+def _load_contact_email_change(token: str):
+    max_age = int(current_app.config.get("EMAIL_VERIFICATION_TOKEN_MAX_AGE", 86400))
+    try:
+        payload = _contact_email_serializer().loads(token, max_age=max_age)
+    except (SignatureExpired, BadSignature):
+        return None, "", "", tr("flash.accounts.email_change_invalid")
+
+    user_oid = parse_object_id(payload.get("uid", ""))
+    purpose = str(payload.get("purpose", "") or "").strip().lower()
+    target = normalize_email(payload.get("target", ""))
+    if not user_oid or purpose not in {"primary", "backup"} or not target:
+        return None, "", "", tr("flash.accounts.email_change_invalid")
+
+    user = extensions.users_col.find_one({"_id": user_oid})
+    if not user:
+        return None, "", "", tr("flash.accounts.email_change_invalid")
+
+    if payload.get("fp") != _contact_email_fingerprint(user, purpose, target):
+        return None, "", "", tr("flash.accounts.email_change_invalid")
+
+    if purpose == "primary":
+        if normalize_email(user.get("pending_email_change", "")) != target:
+            return None, "", "", tr("flash.accounts.email_change_invalid")
+    else:
+        if normalize_email(user.get("pending_backup_email", "")) != target:
+            return None, "", "", tr("flash.accounts.backup_email_invalid")
+
+    return user, purpose, target, ""
+
+
+def _password_reset_recovery_methods(user) -> list[str]:
+    methods: list[str] = []
+    if _two_factor_method_enabled(user, "totp"):
+        methods.append("2fa_totp")
+    if _two_factor_method_enabled(user, "email"):
+        methods.append("2fa_email")
+    if normalize_email(user.get("email", "")):
+        methods.append("primary_email")
+    if has_verified_backup_email(user):
+        methods.append("backup_email")
+    return methods
+
+
+def _preferred_password_reset_method(user, methods: list[str]) -> str:
+    preferred_2fa = _preferred_two_factor_method(user)
+    if preferred_2fa == "totp" and "2fa_totp" in methods:
+        return "2fa_totp"
+    if preferred_2fa == "email" and "2fa_email" in methods:
+        return "2fa_email"
+    return methods[0] if methods else ""
+
+
+def _clear_password_reset_recovery_session():
+    for key in [
+        "pending_password_reset_user_id",
+        "pending_password_reset_methods",
+        "pending_password_reset_selected_method",
+        "pending_password_reset_code_hash",
+        "pending_password_reset_code_expires_at",
+        "pending_password_reset_attempts",
+        "password_reset_direct_user_id",
+        "password_reset_direct_expires_at",
+    ]:
+        session.pop(key, None)
+
+
+def _load_pending_password_reset_user():
+    user_oid = parse_object_id(session.get("pending_password_reset_user_id", ""))
+    if not user_oid:
+        return None
+    user = extensions.users_col.find_one({"_id": user_oid})
+    if not user or user.get("auth_provider") == "google":
+        _clear_password_reset_recovery_session()
+        return None
+    methods = _password_reset_recovery_methods(user)
+    if not methods:
+        _clear_password_reset_recovery_session()
+        return None
+    session["pending_password_reset_methods"] = methods
+    selected = str(session.get("pending_password_reset_selected_method", "") or "").strip().lower()
+    if selected not in methods:
+        session["pending_password_reset_selected_method"] = _preferred_password_reset_method(user, methods)
+    return user
+
+
+def _issue_password_reset_email_code(user):
+    code = "".join(secrets.choice("0123456789") for _ in range(TWO_FACTOR_CODE_LENGTH))
+    expires_minutes = max(1, int(current_app.config.get("TWO_FACTOR_CODE_MAX_AGE", 600) / 60))
+    expires_at = datetime.utcnow() + timedelta(seconds=int(current_app.config.get("TWO_FACTOR_CODE_MAX_AGE", 600)))
+    if not _send_two_factor_code_email(normalize_email(user.get("email", "")), user.get("username", "user"), code, expires_minutes):
+        return False
+    session["pending_password_reset_code_hash"] = _two_factor_code_hash(str(user.get("_id", "")), code)
+    session["pending_password_reset_code_expires_at"] = int(expires_at.timestamp())
+    session["pending_password_reset_attempts"] = 0
+    return True
+
+
+def _grant_direct_password_reset(user):
+    session["password_reset_direct_user_id"] = str(user.get("_id", ""))
+    session["password_reset_direct_expires_at"] = int((datetime.utcnow() + timedelta(seconds=PASSWORD_RESET_RECOVERY_SESSION_MAX_AGE)).timestamp())
+    for key in ["pending_password_reset_code_hash", "pending_password_reset_code_expires_at", "pending_password_reset_attempts"]:
+        session.pop(key, None)
+
+
+def _load_direct_password_reset_user():
+    user_oid = parse_object_id(session.get("password_reset_direct_user_id", ""))
+    expires_at = int(session.get("password_reset_direct_expires_at", 0) or 0)
+    if not user_oid or expires_at <= int(datetime.utcnow().timestamp()):
+        session.pop("password_reset_direct_user_id", None)
+        session.pop("password_reset_direct_expires_at", None)
+        return None
+    user = extensions.users_col.find_one({"_id": user_oid})
+    if not user or user.get("auth_provider") == "google":
+        session.pop("password_reset_direct_user_id", None)
+        session.pop("password_reset_direct_expires_at", None)
+        return None
+    return user
 
 
 def _account_unlock_serializer():
@@ -1400,7 +1801,7 @@ def setup_admin():
         if not ok_username:
             flash(username_msg, "danger")
             return redirect(url_for("accounts.setup_admin"))
-        if find_user_by_email(email):
+        if _email_in_use_by_other_account(email):
             flash(tr("flash.accounts.email_exists"), "danger")
             return redirect(url_for("accounts.setup_admin"))
 
@@ -1409,25 +1810,53 @@ def setup_admin():
             flash(msg, "danger")
             return redirect(url_for("accounts.setup_admin"))
 
-        admin_id = extensions.users_col.insert_one(
-            {
-                "username": username,
-                "username_normalized": normalize_username(username),
-                "email": email,
-                "email_normalized": normalize_email(email),
-                "password_hash": generate_password_hash(password),
-                "is_admin": True,
-                "is_root_admin": True,
-                "require_password_change": False,
-                "auth_provider": "local",
-                "email_verified": False,
-                "email_verified_at": None,
-                "email_verification_sent_at": None,
-                "two_factor_enabled": False,
-                "two_factor_prompt_pending": True,
-                "created_at": datetime.utcnow(),
-            }
-        ).inserted_id
+        try:
+            admin_id = extensions.users_col.insert_one(
+                {
+                    "username": username,
+                    "username_normalized": normalize_username(username),
+                    "email": email,
+                    "email_normalized": normalize_email(email),
+                    "password_hash": generate_password_hash(password),
+                    "is_admin": True,
+                    "is_root_admin": True,
+                    "require_password_change": False,
+                    "auth_provider": "local",
+                    "email_verified": False,
+                    "email_verified_at": None,
+                    "email_verification_sent_at": None,
+                    "two_factor_enabled": False,
+                    "two_factor_email_enabled": False,
+                    "two_factor_totp_enabled": False,
+                    "two_factor_totp_secret": "",
+                    "two_factor_totp_pending_secret": "",
+                    "two_factor_totp_pending_created_at": None,
+                    "two_factor_preferred_method": "",
+                    "two_factor_prompt_pending": True,
+                    "backup_email": "",
+                    "backup_email_normalized": "",
+                    "backup_email_verified": False,
+                    "backup_email_verified_at": None,
+                    "backup_email_verification_sent_at": None,
+                    "pending_backup_email": "",
+                    "pending_backup_email_normalized": "",
+                    "pending_backup_email_requested_at": None,
+                    "pending_email_change": "",
+                    "pending_email_change_normalized": "",
+                    "pending_email_change_requested_at": None,
+                    "created_at": datetime.utcnow(),
+                }
+            ).inserted_id
+        except DuplicateKeyError:
+            if find_user_by_username(username):
+                flash(tr("flash.accounts.username_exists"), "danger")
+            else:
+                flash(tr("flash.accounts.email_exists"), "danger")
+            return redirect(url_for("accounts.setup_admin"))
+        except PyMongoError:
+            current_app.logger.warning("Unable to create root admin account", exc_info=True)
+            flash(tr("errors.503.msg"), "warning")
+            return redirect(url_for("accounts.setup_admin"))
         user = extensions.users_col.find_one({"_id": admin_id})
         session["pending_verification_email"] = email
         if _send_email_verification(user):
@@ -1457,7 +1886,7 @@ def register():
         if not ok_username:
             flash(username_msg, "danger")
             return redirect(url_for("accounts.register"))
-        if find_user_by_email(email):
+        if _email_in_use_by_other_account(email):
             flash(tr("flash.accounts.email_exists"), "danger")
             return redirect(url_for("accounts.register"))
 
@@ -1470,25 +1899,53 @@ def register():
             flash(msg, "danger")
             return redirect(url_for("accounts.register"))
 
-        user_id = extensions.users_col.insert_one(
-            {
-                "username": username,
-                "username_normalized": normalize_username(username),
-                "email": email,
-                "email_normalized": normalize_email(email),
-                "password_hash": generate_password_hash(password),
-                "is_admin": False,
-                "is_root_admin": False,
-                "require_password_change": False,
-                "auth_provider": "local",
-                "email_verified": False,
-                "email_verified_at": None,
-                "email_verification_sent_at": None,
-                "two_factor_enabled": False,
-                "two_factor_prompt_pending": True,
-                "created_at": datetime.utcnow(),
-            }
-        ).inserted_id
+        try:
+            user_id = extensions.users_col.insert_one(
+                {
+                    "username": username,
+                    "username_normalized": normalize_username(username),
+                    "email": email,
+                    "email_normalized": normalize_email(email),
+                    "password_hash": generate_password_hash(password),
+                    "is_admin": False,
+                    "is_root_admin": False,
+                    "require_password_change": False,
+                    "auth_provider": "local",
+                    "email_verified": False,
+                    "email_verified_at": None,
+                    "email_verification_sent_at": None,
+                    "two_factor_enabled": False,
+                    "two_factor_email_enabled": False,
+                    "two_factor_totp_enabled": False,
+                    "two_factor_totp_secret": "",
+                    "two_factor_totp_pending_secret": "",
+                    "two_factor_totp_pending_created_at": None,
+                    "two_factor_preferred_method": "",
+                    "two_factor_prompt_pending": True,
+                    "backup_email": "",
+                    "backup_email_normalized": "",
+                    "backup_email_verified": False,
+                    "backup_email_verified_at": None,
+                    "backup_email_verification_sent_at": None,
+                    "pending_backup_email": "",
+                    "pending_backup_email_normalized": "",
+                    "pending_backup_email_requested_at": None,
+                    "pending_email_change": "",
+                    "pending_email_change_normalized": "",
+                    "pending_email_change_requested_at": None,
+                    "created_at": datetime.utcnow(),
+                }
+            ).inserted_id
+        except DuplicateKeyError:
+            if find_user_by_username(username):
+                flash(tr("flash.accounts.username_exists"), "danger")
+            else:
+                flash(tr("flash.accounts.email_exists"), "danger")
+            return redirect(url_for("accounts.register"))
+        except PyMongoError:
+            current_app.logger.warning("Unable to create local account", exc_info=True)
+            flash(tr("errors.503.msg"), "warning")
+            return redirect(url_for("accounts.register"))
         user = extensions.users_col.find_one({"_id": user_id})
         session["pending_verification_email"] = email
         if _send_email_verification(user):
@@ -1508,6 +1965,7 @@ def login():
     if request.method == "POST":
         login_id = (request.form.get("login_id", "") or request.form.get("email", "")).strip()
         password = request.form.get("password", "")
+        remember_me = request.form.get("remember_me", "0") == "1"
 
         user = find_user_by_login(login_id)
         now = datetime.utcnow()
@@ -1565,16 +2023,19 @@ def login():
             flash(tr("flash.accounts.password_check_unavailable"), "warning")
 
         _reset_login_lock(user["_id"])
+        session["pending_remember_me"] = remember_me
         device_allowed, device_message, device_category = _enforce_device_gate(user)
         if not device_allowed:
             flash(device_message, device_category or "warning")
             return redirect(url_for("accounts.login"))
-        if user.get("auth_provider") != "google" and bool(user.get("two_factor_enabled", False)):
+        if user.get("auth_provider") != "google" and _enabled_two_factor_methods(user):
             session.clear()
-            if not _issue_two_factor_code(user):
+            selected_method = _preferred_two_factor_method(user)
+            if not _select_pending_two_factor_method(user, selected_method, reset_attempts=True):
                 flash(tr("flash.accounts.two_factor_send_failed"), "danger")
                 return redirect(url_for("accounts.login"))
-            flash(tr("flash.accounts.two_factor_code_sent"), "info")
+            if selected_method == "email":
+                flash(tr("flash.accounts.two_factor_code_sent"), "info")
             return redirect(url_for("accounts.two_factor_challenge"))
         return _complete_login(user)
 
@@ -1592,16 +2053,29 @@ def two_factor_challenge():
             flash(error, "warning")
         return redirect(url_for("accounts.login"))
 
-    expires_at_ts = int(session.get("pending_2fa_expires_at", 0) or 0)
     now_ts = int(datetime.utcnow().timestamp())
-    if expires_at_ts <= now_ts:
-        _clear_two_factor_session()
-        flash(tr("flash.accounts.two_factor_code_expired"), "warning")
-        return redirect(url_for("accounts.login"))
+    enabled_methods = _enabled_two_factor_methods(user)
+    selected_method = str(session.get("pending_2fa_selected_method", _preferred_two_factor_method(user, enabled_methods)) or "").strip().lower()
+    if selected_method not in enabled_methods:
+        selected_method = _preferred_two_factor_method(user, enabled_methods)
+        _prepare_two_factor_session(user, selected_method=selected_method, reset_attempts=False)
 
     if request.method == "POST":
         action = (request.form.get("action", "verify") or "verify").strip().lower()
+        if action == "switch":
+            target_method = (request.form.get("method", "") or "").strip().lower()
+            if target_method not in enabled_methods or target_method == selected_method:
+                return redirect(url_for("accounts.two_factor_challenge"))
+            if not _select_pending_two_factor_method(user, target_method, reset_attempts=False):
+                flash(tr("flash.accounts.two_factor_send_failed"), "danger")
+                return redirect(url_for("accounts.login"))
+            if target_method == "email":
+                flash(tr("flash.accounts.two_factor_code_sent"), "success")
+            return redirect(url_for("accounts.two_factor_challenge"))
+
         if action == "resend":
+            if selected_method != "email":
+                return redirect(url_for("accounts.two_factor_challenge"))
             if _issue_two_factor_code(user):
                 flash(tr("flash.accounts.two_factor_code_sent"), "success")
             else:
@@ -1610,11 +2084,20 @@ def two_factor_challenge():
 
         code_raw = (request.form.get("code", "") or "").strip()
         code = re.sub(r"[^0-9]", "", code_raw)
-        expected_hash = str(session.get("pending_2fa_code_hash", "") or "").strip()
-        is_valid = bool(code) and len(code) == TWO_FACTOR_CODE_LENGTH and expected_hash and secrets.compare_digest(
-            _two_factor_code_hash(str(user.get("_id", "")), code),
-            expected_hash,
-        )
+        is_valid = False
+        if selected_method == "email":
+            expires_at_ts = int(session.get("pending_2fa_expires_at", 0) or 0)
+            if expires_at_ts <= now_ts:
+                _clear_pending_two_factor_email_code()
+                flash(tr("flash.accounts.two_factor_code_expired"), "warning")
+                return redirect(url_for("accounts.two_factor_challenge"))
+            expected_hash = str(session.get("pending_2fa_code_hash", "") or "").strip()
+            is_valid = bool(code) and len(code) == TWO_FACTOR_CODE_LENGTH and expected_hash and secrets.compare_digest(
+                _two_factor_code_hash(str(user.get("_id", "")), code),
+                expected_hash,
+            )
+        elif selected_method == "totp":
+            is_valid = _verify_totp_code(str(user.get("two_factor_totp_secret", "") or ""), code)
         if not is_valid:
             attempts = int(session.get("pending_2fa_attempts", 0) or 0) + 1
             session["pending_2fa_attempts"] = attempts
@@ -1629,9 +2112,13 @@ def two_factor_challenge():
         _clear_two_factor_session()
         return _complete_login(user)
 
-    expires_minutes = max(1, int((expires_at_ts - now_ts) / 60) + 1)
+    expires_at_ts = int(session.get("pending_2fa_expires_at", 0) or 0)
+    expires_minutes = max(1, int((expires_at_ts - now_ts) / 60) + 1) if selected_method == "email" and expires_at_ts > now_ts else 0
+    alternate_method = next((method for method in enabled_methods if method != selected_method), "")
     return render_template(
         "accounts/two_factor_challenge.jinja",
+        selected_method=selected_method,
+        alternate_method=alternate_method,
         masked_email=_mask_email(user.get("email", "")),
         expires_minutes=expires_minutes,
     )
@@ -1705,6 +2192,9 @@ def google_callback():
         return redirect(url_for("accounts.login"))
 
     existing = find_user_by_email(email)
+    if not existing and _email_in_use_by_other_account(email):
+        flash(tr("flash.auth.google_email_exists"), "danger")
+        return redirect(url_for("accounts.login"))
     if existing and existing.get("auth_provider") != "google":
         flash(tr("flash.auth.google_email_exists"), "danger")
         return redirect(url_for("accounts.login"))
@@ -1714,26 +2204,39 @@ def google_callback():
         return redirect(url_for("accounts.login"))
 
     if not existing:
-        user_id = extensions.users_col.insert_one(
-            {
-                "username": username,
-                "username_normalized": normalize_username(username),
-                "email": email,
-                "email_normalized": normalize_email(email),
-                "password_hash": generate_password_hash(secrets.token_hex(32)),
-                "is_admin": False,
-                "is_root_admin": False,
-                "require_password_change": False,
-                "auth_provider": "google",
-                "email_verified": True,
-                "email_verified_at": datetime.utcnow(),
-                "email_verification_sent_at": None,
-                "two_factor_enabled": False,
-                "two_factor_prompt_pending": False,
-                "created_at": datetime.utcnow(),
-            }
-        ).inserted_id
-        refreshed = extensions.users_col.find_one({"_id": user_id}) or {"_id": user_id}
+        try:
+            user_id = extensions.users_col.insert_one(
+                {
+                    "username": username,
+                    "username_normalized": normalize_username(username),
+                    "email": email,
+                    "email_normalized": normalize_email(email),
+                    "password_hash": generate_password_hash(secrets.token_hex(32)),
+                    "is_admin": False,
+                    "is_root_admin": False,
+                    "require_password_change": False,
+                    "auth_provider": "google",
+                    "email_verified": True,
+                    "email_verified_at": datetime.utcnow(),
+                    "email_verification_sent_at": None,
+                    "two_factor_enabled": False,
+                    "two_factor_email_enabled": False,
+                    "two_factor_totp_enabled": False,
+                    "two_factor_totp_secret": "",
+                    "two_factor_totp_pending_secret": "",
+                    "two_factor_totp_pending_created_at": None,
+                    "two_factor_preferred_method": "",
+                    "two_factor_prompt_pending": False,
+                    "created_at": datetime.utcnow(),
+                }
+            ).inserted_id
+            refreshed = extensions.users_col.find_one({"_id": user_id}) or {"_id": user_id}
+        except DuplicateKeyError:
+            existing = find_user_by_email(email)
+            if not existing:
+                flash(tr("flash.auth.google_email_exists"), "danger")
+                return redirect(url_for("accounts.login"))
+            refreshed = existing
     else:
         extensions.users_col.update_one(
             {"_id": existing["_id"]},
@@ -1744,6 +2247,12 @@ def google_callback():
                     "auth_provider": "google",
                     "require_password_change": False,
                     "two_factor_enabled": False,
+                    "two_factor_email_enabled": False,
+                    "two_factor_totp_enabled": False,
+                    "two_factor_totp_secret": "",
+                    "two_factor_totp_pending_secret": "",
+                    "two_factor_totp_pending_created_at": None,
+                    "two_factor_preferred_method": "",
                     "two_factor_prompt_pending": False,
                 },
                 "$unset": {"password_compromised_at": ""},
@@ -1778,14 +2287,16 @@ def unlock_account(token):
     if not device_allowed:
         flash(device_message, device_category or "warning")
         return redirect(url_for("accounts.login"))
-    if refreshed.get("auth_provider") != "google" and bool(refreshed.get("two_factor_enabled", False)):
-        session.clear()
-        if not _issue_two_factor_code(refreshed):
-            flash(tr("flash.accounts.two_factor_send_failed"), "danger")
-            return redirect(url_for("accounts.login"))
-        flash(tr("flash.accounts.unlock_success"), "success")
-        flash(tr("flash.accounts.two_factor_code_sent"), "info")
-        return redirect(url_for("accounts.two_factor_challenge"))
+        if refreshed.get("auth_provider") != "google" and _enabled_two_factor_methods(refreshed):
+            session.clear()
+            selected_method = _preferred_two_factor_method(refreshed)
+            if not _select_pending_two_factor_method(refreshed, selected_method, reset_attempts=True):
+                flash(tr("flash.accounts.two_factor_send_failed"), "danger")
+                return redirect(url_for("accounts.login"))
+            flash(tr("flash.accounts.unlock_success"), "success")
+            if selected_method == "email":
+                flash(tr("flash.accounts.two_factor_code_sent"), "info")
+            return redirect(url_for("accounts.two_factor_challenge"))
 
     try:
         begin_authenticated_session(refreshed)
@@ -1830,13 +2341,15 @@ def approve_device(token):
     )
     refreshed = extensions.users_col.find_one({"_id": user.get("_id")}) or user
     if same_device:
-        if refreshed.get("auth_provider") != "google" and bool(refreshed.get("two_factor_enabled", False)):
+        if refreshed.get("auth_provider") != "google" and _enabled_two_factor_methods(refreshed):
             session.clear()
-            if not _issue_two_factor_code(refreshed):
+            selected_method = _preferred_two_factor_method(refreshed)
+            if not _select_pending_two_factor_method(refreshed, selected_method, reset_attempts=True):
                 flash(tr("flash.accounts.two_factor_send_failed"), "danger")
                 return redirect(url_for("accounts.login"))
             flash(tr("flash.accounts.device_approved_login"), "success")
-            flash(tr("flash.accounts.two_factor_code_sent"), "info")
+            if selected_method == "email":
+                flash(tr("flash.accounts.two_factor_code_sent"), "info")
             return redirect(url_for("accounts.two_factor_challenge"))
         flash(tr("flash.accounts.device_approved_login"), "success")
         return _complete_login(refreshed)
@@ -1888,26 +2401,154 @@ def verify_email(token):
 @bp.route("/forgot-password", methods=["GET", "POST"])
 def forgot_password():
     if request.method == "POST":
-        email = normalize_email(request.form.get("email", ""))
-        user = find_user_by_email(email) if email else None
+        login_id = (request.form.get("login_id", "") or request.form.get("email", "")).strip()
+        user = find_user_by_login(login_id) if login_id else None
 
         # Do not reveal auth provider details; this request type is unsupported here.
         if user and user.get("auth_provider") == "google":
             abort(501)
 
-        sent = False
         if user:
-            reset_link = _build_password_reset_link(user)
-            sent = _send_password_reset_email(user.get("email", ""), user.get("username", "user"), reset_link)
+            methods = _password_reset_recovery_methods(user)
+            if methods:
+                _clear_password_reset_recovery_session()
+                session["pending_password_reset_user_id"] = str(user["_id"])
+                session["pending_password_reset_methods"] = methods
+                session["pending_password_reset_selected_method"] = _preferred_password_reset_method(user, methods)
+                return redirect(url_for("accounts.password_reset_recovery"))
 
-        if user and not sent:
-            flash(tr("flash.accounts.password_reset_email_failed"), "warning")
-        else:
-            flash(tr("flash.accounts.password_reset_email_sent"), "success")
-
+        flash(tr("flash.accounts.password_reset_email_sent"), "success")
         return redirect(url_for("accounts.login"))
 
     return render_template("accounts/forgot_password.jinja")
+
+
+@bp.route("/forgot-password/recovery", methods=["GET", "POST"])
+def password_reset_recovery():
+    user = _load_pending_password_reset_user()
+    if not user:
+        flash(tr("flash.accounts.password_reset_invalid"), "warning")
+        return redirect(url_for("accounts.forgot_password"))
+
+    methods = list(session.get("pending_password_reset_methods", []) or [])
+    selected_method = str(session.get("pending_password_reset_selected_method", "") or "").strip().lower()
+    if selected_method not in methods:
+        selected_method = _preferred_password_reset_method(user, methods)
+        session["pending_password_reset_selected_method"] = selected_method
+
+    if request.method == "POST":
+        action = str(request.form.get("action", "verify") or "verify").strip().lower()
+        if action == "switch":
+            target_method = str(request.form.get("method", "") or "").strip().lower()
+            if target_method in methods:
+                session["pending_password_reset_selected_method"] = target_method
+                if target_method == "2fa_email":
+                    if not _issue_password_reset_email_code(user):
+                        flash(tr("flash.accounts.password_reset_email_failed"), "warning")
+                    else:
+                        flash(tr("flash.accounts.two_factor_code_sent"), "info")
+            return redirect(url_for("accounts.password_reset_recovery"))
+
+        if selected_method in {"primary_email", "backup_email"}:
+            recipient_email = normalize_email(user.get("email", "")) if selected_method == "primary_email" else normalize_email(user.get("backup_email", ""))
+            sent = False
+            if recipient_email:
+                reset_link = _build_password_reset_link(user)
+                sent = _send_password_reset_email(recipient_email, user.get("username", "user"), reset_link)
+            _clear_password_reset_recovery_session()
+            flash(tr("flash.accounts.password_reset_email_sent" if sent else "flash.accounts.password_reset_email_failed"), "success" if sent else "warning")
+            return redirect(url_for("accounts.login"))
+
+        if selected_method == "2fa_email" and action == "resend":
+            if _issue_password_reset_email_code(user):
+                flash(tr("flash.accounts.two_factor_code_sent"), "info")
+            else:
+                flash(tr("flash.accounts.password_reset_email_failed"), "warning")
+            return redirect(url_for("accounts.password_reset_recovery"))
+
+        code = (request.form.get("code", "") or "").strip()
+        verified = False
+        if selected_method == "2fa_totp":
+            verified = _verify_totp_code(str(user.get("two_factor_totp_secret", "") or ""), code)
+        elif selected_method == "2fa_email":
+            expires_at_ts = int(session.get("pending_password_reset_code_expires_at", 0) or 0)
+            expected_hash = str(session.get("pending_password_reset_code_hash", "") or "").strip()
+            if expires_at_ts <= int(datetime.utcnow().timestamp()):
+                flash(tr("flash.accounts.two_factor_code_expired"), "warning")
+                return redirect(url_for("accounts.password_reset_recovery"))
+            verified = bool(expected_hash and expected_hash == _two_factor_code_hash(str(user.get("_id", "")), code))
+            if not verified:
+                attempts = int(session.get("pending_password_reset_attempts", 0) or 0) + 1
+                session["pending_password_reset_attempts"] = attempts
+                if attempts >= TWO_FACTOR_CODE_MAX_ATTEMPTS:
+                    _clear_password_reset_recovery_session()
+                    flash(tr("flash.accounts.two_factor_too_many_attempts"), "danger")
+                    return redirect(url_for("accounts.forgot_password"))
+
+        if not verified:
+            flash(tr("flash.accounts.two_factor_code_invalid"), "danger")
+            return redirect(url_for("accounts.password_reset_recovery"))
+
+        _grant_direct_password_reset(user)
+        return redirect(url_for("accounts.password_reset_direct"))
+
+    masked_primary_email = _mask_email(user.get("email", ""))
+    masked_backup_email = _mask_email(user.get("backup_email", ""))
+    method_labels = {
+        "2fa_totp": tr("account.two_factor_method_totp"),
+        "2fa_email": tr("account.two_factor_method_email"),
+        "primary_email": tr("account.primary_email"),
+        "backup_email": tr("account.backup_email"),
+    }
+    return render_template(
+        "accounts/password_reset_recovery.jinja",
+        selected_method=selected_method,
+        methods=methods,
+        method_labels=method_labels,
+        masked_primary_email=masked_primary_email,
+        masked_backup_email=masked_backup_email,
+        expires_minutes=max(1, int(current_app.config.get("TWO_FACTOR_CODE_MAX_AGE", 600) / 60)),
+    )
+
+
+@bp.route("/forgot-password/change", methods=["GET", "POST"])
+def password_reset_direct():
+    user = _load_direct_password_reset_user()
+    if not user:
+        flash(tr("flash.accounts.password_reset_invalid"), "warning")
+        return redirect(url_for("accounts.forgot_password"))
+
+    if request.method == "POST":
+        new_password = request.form.get("new_password", "")
+        confirm_password = request.form.get("confirm_password", "")
+
+        if not new_password or not confirm_password:
+            flash(tr("flash.accounts.fields_required"), "danger")
+            return redirect(url_for("accounts.password_reset_direct"))
+
+        ok, msg = validate_password_for_set(new_password, confirm_password, allow_unavailable=True)
+        if not ok:
+            flash(msg, "danger")
+            return redirect(url_for("accounts.password_reset_direct"))
+
+        extensions.users_col.update_one(
+            {"_id": user["_id"]},
+            {
+                "$set": {
+                    "password_hash": generate_password_hash(new_password),
+                    "require_password_change": False,
+                    "password_reset_at": datetime.utcnow(),
+                    "active_sessions": [],
+                    "pending_device_approvals": [],
+                }
+            },
+        )
+        _bump_session_version(user["_id"])
+        _clear_password_reset_recovery_session()
+        flash(tr("flash.accounts.password_reset_success"), "success")
+        return redirect(url_for("accounts.login"))
+
+    return render_template("accounts/reset_password.jinja", token="")
 
 
 @bp.route("/reset-password/<token>", methods=["GET", "POST"])
@@ -2083,117 +2724,414 @@ def external_provider_disconnect(provider):
     return redirect(url_for("accounts.manage_account"))
 
 
-def _import_external_playlist_into_local(user_oid, provider, external_playlist_id, local_playlist_id):
-    try:
-        now = datetime.utcnow()
-        playlist_doc = extensions.external_playlists_col.find_one(
-            {"user_id": user_oid, "provider": provider, "external_playlist_id": str(external_playlist_id)},
+def _external_import_job_public_data(job):
+    total_tracks = int(job.get("progress_total_tracks", 0) or 0)
+    processed_tracks = int(job.get("progress_processed_tracks", 0) or 0)
+    added_count = int(job.get("progress_added_count", 0) or 0)
+    percent = int(round((processed_tracks / total_tracks) * 100)) if total_tracks > 0 else 0
+    status = str(job.get("status", "queued") or "queued").strip().lower()
+    return {
+        "id": str(job.get("_id")),
+        "provider": str(job.get("provider", "") or ""),
+        "provider_name": _external_provider_name(str(job.get("provider", "") or "")),
+        "external_playlist_id": str(job.get("external_playlist_id", "") or ""),
+        "external_playlist_name": (job.get("external_playlist_name") or tr("defaults.unnamed")).strip() or tr("defaults.unnamed"),
+        "local_playlist_id": str(job.get("local_playlist_id", "") or ""),
+        "local_playlist_name": (job.get("local_playlist_name") or tr("defaults.unnamed")).strip() or tr("defaults.unnamed"),
+        "status": status,
+        "error": str(job.get("import_error", "") or "").strip(),
+        "total_tracks": total_tracks,
+        "processed_tracks": processed_tracks,
+        "added_count": added_count,
+        "percent": max(0, min(100, percent)),
+        "updated_at": job.get("updated_at"),
+        "started_at": job.get("started_at"),
+        "finished_at": job.get("finished_at"),
+        "local_playlist_url": url_for("playlists.playlist_detail", playlist_id=str(job.get("local_playlist_id", ""))) if job.get("local_playlist_id") else "",
+        "can_pause": status in {"queued", "running"},
+        "can_resume": status == "paused",
+        "can_cancel": status in {"queued", "running", "paused"},
+    }
+
+
+def _playlist_import_status_from_job(job_status: str) -> str:
+    status = str(job_status or "").strip().lower()
+    mapping = {
+        "queued": "pending",
+        "running": "running",
+        "paused": "paused",
+        "canceled": "canceled",
+        "completed": "completed",
+        "failed": "failed",
+    }
+    return mapping.get(status, "pending")
+
+
+def _sync_playlist_from_import_job(job):
+    local_playlist_id = job.get("local_playlist_id")
+    if not local_playlist_id:
+        return
+    status = _playlist_import_status_from_job(job.get("status", "queued"))
+    resolved_song_ids = list(job.get("resolved_song_ids", []) or [])
+    now = datetime.utcnow()
+    set_doc = {
+        "song_ids": resolved_song_ids,
+        "updated_at": now,
+        "import_status": status,
+        "import_total_tracks": int(job.get("progress_total_tracks", 0) or 0),
+        "import_processed_count": int(job.get("progress_processed_tracks", 0) or 0),
+        "import_added_count": int(job.get("progress_added_count", len(resolved_song_ids)) or 0),
+        "import_error": str(job.get("import_error", "") or ""),
+        "external_source_provider": str(job.get("provider", "") or ""),
+        "external_source_playlist_id": str(job.get("external_playlist_id", "") or ""),
+    }
+    started_at = job.get("started_at")
+    finished_at = job.get("finished_at")
+    if started_at:
+        set_doc["import_started_at"] = started_at
+    if finished_at:
+        set_doc["import_finished_at"] = finished_at
+    elif status in {"pending", "running", "paused"}:
+        set_doc["import_finished_at"] = None
+    extensions.playlists_col.update_one({"_id": local_playlist_id}, {"$set": set_doc})
+
+
+def _queue_external_import_job(user_oid, provider, external_playlist_doc, local_playlist_id):
+    now = datetime.utcnow()
+    job_id = extensions.external_import_jobs_col.insert_one(
+        {
+            "user_id": user_oid,
+            "provider": provider,
+            "external_playlist_id": str(external_playlist_doc.get("external_playlist_id", "") or ""),
+            "external_playlist_name": (external_playlist_doc.get("name") or tr("defaults.unnamed")).strip() or tr("defaults.unnamed"),
+            "local_playlist_id": local_playlist_id,
+            "local_playlist_name": f"[{_external_provider_name(provider)}] {(external_playlist_doc.get('name') or '').strip() or tr('defaults.unnamed')}"[:120],
+            "status": "queued",
+            "requested_action": "",
+            "progress_total_tracks": len(external_playlist_doc.get("tracks", []) or []),
+            "progress_processed_tracks": 0,
+            "progress_added_count": 0,
+            "resolved_song_ids": [],
+            "next_track_index": 0,
+            "import_error": "",
+            "created_at": now,
+            "updated_at": now,
+            "started_at": None,
+            "finished_at": None,
+            "heartbeat_at": None,
+        }
+    ).inserted_id
+    job = extensions.external_import_jobs_col.find_one({"_id": job_id})
+    if job:
+        _sync_playlist_from_import_job(job)
+    return job_id
+
+
+def _build_public_local_song_lookup():
+    local_public_by_full = {}
+    local_public_by_title = {}
+    for row in extensions.songs_col.find(
+        {"visibility": "public", "source_type": "upload"},
+        {"_id": 1, "title": 1, "artist": 1},
+    ):
+        title_norm = _normalize_track_identity(row.get("title", ""))
+        artist_norm = _normalize_track_identity(row.get("artist", ""))
+        if not title_norm:
+            continue
+        if artist_norm:
+            local_public_by_full.setdefault((title_norm, artist_norm), row.get("_id"))
+        local_public_by_title.setdefault(title_norm, row.get("_id"))
+    return local_public_by_full, local_public_by_title
+
+
+def _resolve_external_track_to_song_id(user_oid, provider, track, local_public_by_full, local_public_by_title, now):
+    track_title = (track.get("title") or "").strip()
+    track_artist = (track.get("artist") or "").strip()
+    title_norm = _normalize_track_identity(track_title)
+    artist_norm = _normalize_track_identity(track_artist)
+
+    local_match_id = None
+    if title_norm and artist_norm:
+        local_match_id = local_public_by_full.get((title_norm, artist_norm))
+    if not local_match_id and title_norm:
+        local_match_id = local_public_by_title.get(title_norm)
+    if local_match_id:
+        return local_match_id
+
+    preview_url = (track.get("preview_url") or "").strip()
+    fallback_url = (track.get("url") or "").strip()
+    song_source = preview_url or fallback_url
+    if not song_source:
+        return None
+    existing = extensions.songs_col.find_one(
+        {
+            "source_type": "external",
+            "source_url": song_source,
+            "created_by": user_oid,
+        },
+        {"_id": 1},
+    )
+    if existing:
+        return existing["_id"]
+    return extensions.songs_col.insert_one(
+        {
+            "title": (track_title or tr("defaults.untitled")).strip()[:200],
+            "artist": (track_artist or tr("defaults.unknown_artist")).strip()[:200],
+            "genre": "",
+            "source_type": "external",
+            "source_url": song_source,
+            "file_name": None,
+            "audio_fingerprint": "",
+            "visibility": "private",
+            "shared_with": [],
+            "lyrics_text": "",
+            "lyrics_cues": [],
+            "lyrics_source": "",
+            "lyrics_auto_sync": False,
+            "external_provider": provider,
+            "external_track_id": (track.get("external_track_id") or "").strip(),
+            "is_available": True,
+            "availability_reason": "",
+            "created_at": now,
+            "created_by": user_oid,
+        }
+    ).inserted_id
+
+
+def _set_import_job_status(job_id, status, **extra):
+    now = datetime.utcnow()
+    set_doc = {"status": status, "updated_at": now, **extra}
+    if status in {"completed", "failed", "canceled"} and "finished_at" not in set_doc:
+        set_doc["finished_at"] = now
+    job = extensions.external_import_jobs_col.find_one_and_update(
+        {"_id": job_id},
+        {"$set": set_doc},
+        return_document=ReturnDocument.AFTER,
+    )
+    if job:
+        _sync_playlist_from_import_job(job)
+    return job
+
+
+def _mark_stale_import_jobs_queued():
+    now = datetime.utcnow()
+    stale_before = now - timedelta(seconds=IMPORT_STALE_RUNNING_SECONDS)
+    stale_jobs = list(
+        extensions.external_import_jobs_col.find(
+            {
+                "status": "running",
+                "$or": [{"heartbeat_at": {"$lt": stale_before}}, {"heartbeat_at": None}],
+            },
+            {"_id": 1, "requested_action": 1},
         )
-        if not playlist_doc:
-            extensions.playlists_col.update_one(
-                {"_id": local_playlist_id},
-                {"$set": {"import_status": "failed", "import_error": "external_playlist_not_found", "import_finished_at": datetime.utcnow()}},
+    )
+    if not stale_jobs:
+        return
+    for row in stale_jobs:
+        job_id = row.get("_id")
+        if not job_id:
+            continue
+        action = str(row.get("requested_action", "") or "").strip().lower()
+        if action == "pause":
+            updated = extensions.external_import_jobs_col.find_one_and_update(
+                {"_id": job_id},
+                {"$set": {"status": "paused", "updated_at": now, "heartbeat_at": None, "requested_action": ""}},
+                return_document=ReturnDocument.AFTER,
             )
-            return 0
-
-        extensions.playlists_col.update_one(
-            {"_id": local_playlist_id},
-            {"$set": {"import_status": "running", "import_started_at": datetime.utcnow(), "import_error": ""}},
-        )
-
-        # Build a fast lookup for public local uploads to reuse instead of creating external duplicates.
-        local_public_by_full = {}
-        local_public_by_title = {}
-        for row in extensions.songs_col.find(
-            {"visibility": "public", "source_type": "upload"},
-            {"_id": 1, "title": 1, "artist": 1},
-        ):
-            title_norm = _normalize_track_identity(row.get("title", ""))
-            artist_norm = _normalize_track_identity(row.get("artist", ""))
-            if not title_norm:
-                continue
-            if artist_norm:
-                local_public_by_full.setdefault((title_norm, artist_norm), row.get("_id"))
-            local_public_by_title.setdefault(title_norm, row.get("_id"))
-
-        added_song_ids = []
-        for track in playlist_doc.get("tracks", []) or []:
-            track_title = (track.get("title") or "").strip()
-            track_artist = (track.get("artist") or "").strip()
-            title_norm = _normalize_track_identity(track_title)
-            artist_norm = _normalize_track_identity(track_artist)
-
-            local_match_id = None
-            if title_norm and artist_norm:
-                local_match_id = local_public_by_full.get((title_norm, artist_norm))
-            if not local_match_id and title_norm:
-                local_match_id = local_public_by_title.get(title_norm)
-            if local_match_id:
-                added_song_ids.append(local_match_id)
-                continue
-
-            preview_url = (track.get("preview_url") or "").strip()
-            fallback_url = (track.get("url") or "").strip()
-            song_source = preview_url or fallback_url
-            if not song_source:
-                continue
-            existing = extensions.songs_col.find_one(
+        elif action == "cancel":
+            updated = extensions.external_import_jobs_col.find_one_and_update(
+                {"_id": job_id},
                 {
-                    "source_type": "external",
-                    "source_url": song_source,
-                    "created_by": user_oid,
+                    "$set": {
+                        "status": "canceled",
+                        "updated_at": now,
+                        "heartbeat_at": None,
+                        "requested_action": "",
+                        "finished_at": now,
+                        "import_error": "",
+                    }
                 },
-                {"_id": 1},
+                return_document=ReturnDocument.AFTER,
             )
-            if existing:
-                added_song_ids.append(existing["_id"])
-                continue
-            song_id = extensions.songs_col.insert_one(
-                {
-                    "title": (track_title or tr("defaults.untitled")).strip()[:200],
-                    "artist": (track_artist or tr("defaults.unknown_artist")).strip()[:200],
-                    "genre": "",
-                    "source_type": "external",
-                    "source_url": song_source,
-                    "file_name": None,
-                    "audio_fingerprint": "",
-                    "visibility": "private",
-                    "shared_with": [],
-                    "lyrics_text": "",
-                    "lyrics_cues": [],
-                    "lyrics_source": "",
-                    "lyrics_auto_sync": False,
-                    "external_provider": provider,
-                    "external_track_id": (track.get("external_track_id") or "").strip(),
-                    "is_available": True,
-                    "availability_reason": "",
-                    "created_at": now,
-                    "created_by": user_oid,
-                }
-            ).inserted_id
-            added_song_ids.append(song_id)
+        else:
+            updated = extensions.external_import_jobs_col.find_one_and_update(
+                {"_id": job_id},
+                {"$set": {"status": "queued", "updated_at": now, "heartbeat_at": None, "requested_action": ""}},
+                return_document=ReturnDocument.AFTER,
+            )
+        if updated:
+            _sync_playlist_from_import_job(updated)
 
-        extensions.playlists_col.update_one(
-            {"_id": local_playlist_id},
+
+def _run_external_import_job(job_id):
+    job = extensions.external_import_jobs_col.find_one({"_id": job_id})
+    if not job:
+        return
+
+    playlist_doc = extensions.external_playlists_col.find_one(
+        {
+            "user_id": job.get("user_id"),
+            "provider": str(job.get("provider", "") or ""),
+            "external_playlist_id": str(job.get("external_playlist_id", "") or ""),
+        }
+    )
+    if not playlist_doc:
+        _set_import_job_status(job_id, "failed", import_error="external_playlist_not_found")
+        return
+
+    tracks = list(playlist_doc.get("tracks", []) or [])
+    local_public_by_full, local_public_by_title = _build_public_local_song_lookup()
+    resolved_song_ids = list(job.get("resolved_song_ids", []) or [])
+    next_track_index = max(0, int(job.get("next_track_index", 0) or 0))
+    now = datetime.utcnow()
+
+    job = extensions.external_import_jobs_col.find_one_and_update(
+        {"_id": job_id},
+        {
+            "$set": {
+                "status": "running",
+                "updated_at": now,
+                "heartbeat_at": now,
+                "started_at": job.get("started_at") or now,
+                "progress_total_tracks": len(tracks),
+                "local_playlist_name": job.get("local_playlist_name") or f"[{_external_provider_name(job.get('provider', ''))}] {(playlist_doc.get('name') or '').strip() or tr('defaults.unnamed')}"[:120],
+                "external_playlist_name": (playlist_doc.get("name") or tr("defaults.unnamed")).strip() or tr("defaults.unnamed"),
+            }
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+    if not job:
+        return
+    _sync_playlist_from_import_job(job)
+
+    for index in range(next_track_index, len(tracks)):
+        live_job = extensions.external_import_jobs_col.find_one({"_id": job_id}, {"requested_action": 1, "resolved_song_ids": 1, "status": 1})
+        if not live_job:
+            return
+        action = str(live_job.get("requested_action", "") or "").strip().lower()
+        if action == "pause":
+            _set_import_job_status(job_id, "paused", requested_action="")
+            return
+        if action == "cancel":
+            _set_import_job_status(job_id, "canceled", requested_action="", import_error="")
+            return
+        if str(live_job.get("status", "") or "") != "running":
+            return
+
+        resolved_song_ids = list(live_job.get("resolved_song_ids", []) or resolved_song_ids)
+        track = tracks[index]
+        song_id = _resolve_external_track_to_song_id(
+            job.get("user_id"),
+            str(job.get("provider", "") or ""),
+            track,
+            local_public_by_full,
+            local_public_by_title,
+            now,
+        )
+        if song_id:
+            resolved_song_ids.append(song_id)
+
+        update_now = datetime.utcnow()
+        updated_job = extensions.external_import_jobs_col.find_one_and_update(
+            {"_id": job_id},
             {
                 "$set": {
-                    "song_ids": added_song_ids,
-                    "updated_at": datetime.utcnow(),
-                    "import_status": "completed",
-                    "import_finished_at": datetime.utcnow(),
-                    "import_added_count": len(added_song_ids),
-                    "external_source_provider": provider,
-                    "external_source_playlist_id": str(external_playlist_id),
+                    "resolved_song_ids": resolved_song_ids,
+                    "next_track_index": index + 1,
+                    "progress_processed_tracks": index + 1,
+                    "progress_added_count": len(resolved_song_ids),
+                    "progress_total_tracks": len(tracks),
+                    "updated_at": update_now,
+                    "heartbeat_at": update_now,
+                    "import_error": "",
                 }
             },
+            return_document=ReturnDocument.AFTER,
         )
-        return len(added_song_ids)
-    except Exception:
-        extensions.playlists_col.update_one(
-            {"_id": local_playlist_id},
-            {"$set": {"import_status": "failed", "import_error": "background_import_failed", "import_finished_at": datetime.utcnow()}},
+        if updated_job:
+            _sync_playlist_from_import_job(updated_job)
+
+    _set_import_job_status(
+        job_id,
+        "completed",
+        progress_processed_tracks=len(tracks),
+        progress_added_count=len(resolved_song_ids),
+        progress_total_tracks=len(tracks),
+        requested_action="",
+        import_error="",
+    )
+
+
+def _run_external_import_job_safe(app, job_id):
+    with app.app_context():
+        try:
+            _run_external_import_job(job_id)
+        except Exception:
+            current_app.logger.warning("Background external import job failed", exc_info=True)
+            try:
+                _set_import_job_status(job_id, "failed", import_error="background_import_failed", requested_action="")
+            except Exception:
+                current_app.logger.warning("Unable to mark background import job as failed", exc_info=True)
+
+
+def _cleanup_finished_import_futures():
+    with IMPORT_RUNNING_LOCK:
+        finished_ids = [job_id for job_id, future in IMPORT_RUNNING_FUTURES.items() if future.done()]
+        for job_id in finished_ids:
+            future = IMPORT_RUNNING_FUTURES.pop(job_id, None)
+            if future is None:
+                continue
+            try:
+                future.result()
+            except Exception:
+                current_app.logger.warning("External import future failed after completion", exc_info=True)
+
+
+def _dispatch_external_import_jobs(app):
+    _cleanup_finished_import_futures()
+    with IMPORT_RUNNING_LOCK:
+        capacity = max(0, 2 - len(IMPORT_RUNNING_FUTURES))
+    if capacity <= 0:
+        return
+
+    for _ in range(capacity):
+        now = datetime.utcnow()
+        job = extensions.external_import_jobs_col.find_one_and_update(
+            {"status": "queued"},
+            {"$set": {"status": "running", "updated_at": now, "heartbeat_at": now, "requested_action": ""}},
+            sort=[("created_at", 1)],
+            return_document=ReturnDocument.AFTER,
         )
-        return 0
+        if not job:
+            break
+        _sync_playlist_from_import_job(job)
+        future = IMPORT_EXECUTOR.submit(_run_external_import_job_safe, app, job["_id"])
+        with IMPORT_RUNNING_LOCK:
+            IMPORT_RUNNING_FUTURES[str(job["_id"])] = future
+
+
+def _external_import_scheduler_loop(app):
+    with app.app_context():
+        while True:
+            try:
+                _mark_stale_import_jobs_queued()
+                _dispatch_external_import_jobs(app)
+            except Exception:
+                app.logger.warning("External import scheduler iteration failed", exc_info=True)
+            time.sleep(IMPORT_SCHEDULER_POLL_SECONDS)
+
+
+def start_external_import_scheduler(app):
+    if app.extensions.get("pulsebeat_external_import_scheduler_started"):
+        return
+    app.extensions["pulsebeat_external_import_scheduler_started"] = True
+    worker = threading.Thread(
+        target=_external_import_scheduler_loop,
+        args=(app,),
+        name="pulsebeat-external-import-scheduler",
+        daemon=True,
+    )
+    worker.start()
 
 
 @bp.route("/account/integrations/import/<provider>/<external_playlist_id>", methods=["POST"])
@@ -2230,31 +3168,127 @@ def external_provider_import_playlist(provider, external_playlist_id):
             "import_finished_at": None,
             "import_error": "",
             "import_total_tracks": len(playlist_doc.get("tracks", []) or []),
+            "import_processed_count": 0,
             "import_added_count": 0,
             "created_at": now,
             "updated_at": now,
         }
     ).inserted_id
 
-    future = IMPORT_EXECUTOR.submit(
-        _import_external_playlist_into_local,
-        user_oid,
-        provider,
-        str(external_playlist_id),
-        local_playlist_id,
-    )
     try:
-        added_count = int(future.result(timeout=2.8) or 0)
-        flash(tr("flash.accounts.integration_playlist_imported", count=added_count), "success")
-    except FutureTimeoutError:
-        flash(tr("flash.accounts.integration_playlist_import_started"), "info")
-    except Exception:
+        _queue_external_import_job(user_oid, provider, playlist_doc, local_playlist_id)
+    except PyMongoError:
+        current_app.logger.warning("Unable to queue external playlist import", exc_info=True)
         extensions.playlists_col.update_one(
             {"_id": local_playlist_id},
             {"$set": {"import_status": "failed", "import_error": "background_import_failed", "import_finished_at": datetime.utcnow()}},
         )
         flash(tr("flash.accounts.integration_sync_failed", provider=_external_provider_name(provider)), "danger")
+        return redirect(url_for("playlists.playlist_detail", playlist_id=str(local_playlist_id)))
+
+    flash(tr("flash.accounts.integration_playlist_import_started"), "info")
     return redirect(url_for("playlists.playlist_detail", playlist_id=str(local_playlist_id)))
+
+
+def _load_owned_import_job(job_id, user_oid):
+    job_oid = parse_object_id(job_id)
+    if not job_oid:
+        return None
+    return extensions.external_import_jobs_col.find_one({"_id": job_oid, "user_id": user_oid})
+
+
+@bp.route("/account/integrations/import-job/<job_id>/pause", methods=["POST"])
+@login_required
+def pause_external_import_job(job_id):
+    user_oid = get_session_user_oid()
+    job = _load_owned_import_job(job_id, user_oid)
+    if not job:
+        flash(tr("flash.songs.invalid_request"), "danger")
+        return redirect(url_for("accounts.manage_account"))
+
+    status = str(job.get("status", "") or "").strip().lower()
+    if status == "queued":
+        updated = extensions.external_import_jobs_col.find_one_and_update(
+            {"_id": job.get("_id"), "status": "queued"},
+            {"$set": {"status": "paused", "requested_action": "", "updated_at": datetime.utcnow()}},
+            return_document=ReturnDocument.AFTER,
+        )
+        if updated:
+            _sync_playlist_from_import_job(updated)
+            flash(tr("flash.accounts.import_job_paused"), "success")
+        else:
+            extensions.external_import_jobs_col.update_one(
+                {"_id": job.get("_id")},
+                {"$set": {"requested_action": "pause", "updated_at": datetime.utcnow()}},
+            )
+            flash(tr("flash.accounts.import_job_pause_requested"), "info")
+        return redirect(url_for("accounts.manage_account", _anchor="account-integrations"))
+    if status == "running":
+        extensions.external_import_jobs_col.update_one(
+            {"_id": job.get("_id")},
+            {"$set": {"requested_action": "pause", "updated_at": datetime.utcnow()}},
+        )
+        flash(tr("flash.accounts.import_job_pause_requested"), "info")
+        return redirect(url_for("accounts.manage_account", _anchor="account-integrations"))
+    return redirect(url_for("accounts.manage_account", _anchor="account-integrations"))
+
+
+@bp.route("/account/integrations/import-job/<job_id>/resume", methods=["POST"])
+@login_required
+def resume_external_import_job(job_id):
+    user_oid = get_session_user_oid()
+    job = _load_owned_import_job(job_id, user_oid)
+    if not job:
+        flash(tr("flash.songs.invalid_request"), "danger")
+        return redirect(url_for("accounts.manage_account"))
+    if str(job.get("status", "") or "").strip().lower() != "paused":
+        return redirect(url_for("accounts.manage_account", _anchor="account-integrations"))
+
+    updated = extensions.external_import_jobs_col.find_one_and_update(
+        {"_id": job.get("_id"), "status": "paused"},
+        {"$set": {"status": "queued", "requested_action": "", "finished_at": None, "import_error": "", "updated_at": datetime.utcnow()}},
+        return_document=ReturnDocument.AFTER,
+    )
+    if updated:
+        _sync_playlist_from_import_job(updated)
+        flash(tr("flash.accounts.import_job_resumed"), "success")
+    return redirect(url_for("accounts.manage_account", _anchor="account-integrations"))
+
+
+@bp.route("/account/integrations/import-job/<job_id>/cancel", methods=["POST"])
+@login_required
+def cancel_external_import_job(job_id):
+    user_oid = get_session_user_oid()
+    job = _load_owned_import_job(job_id, user_oid)
+    if not job:
+        flash(tr("flash.songs.invalid_request"), "danger")
+        return redirect(url_for("accounts.manage_account"))
+
+    status = str(job.get("status", "") or "").strip().lower()
+    if status in {"queued", "paused"}:
+        updated = extensions.external_import_jobs_col.find_one_and_update(
+            {"_id": job.get("_id"), "status": {"$in": ["queued", "paused"]}},
+            {"$set": {"status": "canceled", "requested_action": "", "import_error": "", "updated_at": datetime.utcnow(), "finished_at": datetime.utcnow()}},
+            return_document=ReturnDocument.AFTER,
+        )
+        if updated:
+            _sync_playlist_from_import_job(updated)
+            flash(tr("flash.accounts.import_job_canceled"), "success")
+        else:
+            extensions.external_import_jobs_col.update_one(
+                {"_id": job.get("_id")},
+                {"$set": {"requested_action": "cancel", "updated_at": datetime.utcnow()}},
+            )
+            flash(tr("flash.accounts.import_job_cancel_requested"), "info")
+        return redirect(url_for("accounts.manage_account", _anchor="account-integrations"))
+    if status == "running":
+        extensions.external_import_jobs_col.update_one(
+            {"_id": job.get("_id")},
+            {"$set": {"requested_action": "cancel", "updated_at": datetime.utcnow()}},
+        )
+        flash(tr("flash.accounts.import_job_cancel_requested"), "info")
+        return redirect(url_for("accounts.manage_account", _anchor="account-integrations"))
+    return redirect(url_for("accounts.manage_account", _anchor="account-integrations"))
 
 
 @bp.route("/account/2fa/request-toggle", methods=["POST"])
@@ -2270,19 +3304,20 @@ def request_two_factor_toggle():
         flash(tr("flash.accounts.two_factor_not_available_google"), "warning")
         return redirect(url_for("accounts.manage_account"))
 
+    method = (request.form.get("method", "email") or "email").strip().lower()
     action = (request.form.get("action", "") or "").strip().lower()
-    if action not in {"enable", "disable"}:
+    if action not in {"enable", "disable"} or method != "email":
         flash(tr("flash.songs.invalid_request"), "danger")
         return redirect(url_for("accounts.manage_account"))
     target_enabled = action == "enable"
-    if bool(user.get("two_factor_enabled", False)) == target_enabled:
+    if _two_factor_method_enabled(user, method) == target_enabled:
         flash(
             tr("flash.accounts.two_factor_already_enabled" if target_enabled else "flash.accounts.two_factor_already_disabled"),
             "info",
         )
         return redirect(url_for("accounts.manage_account"))
 
-    sent = _send_two_factor_toggle_email(user, action)
+    sent = _send_two_factor_toggle_email(user, action, method=method)
     if not sent:
         flash(tr("flash.accounts.two_factor_toggle_email_failed"), "danger")
         return redirect(url_for("accounts.manage_account"))
@@ -2292,6 +3327,7 @@ def request_two_factor_toggle():
         {
             "$set": {
                 "two_factor_toggle_requested_action": action,
+                "two_factor_toggle_requested_method": method,
                 "two_factor_toggle_requested_at": datetime.utcnow(),
             }
         },
@@ -2305,7 +3341,7 @@ def request_two_factor_toggle():
 
 @bp.route("/account/2fa/confirm/<token>", methods=["GET", "POST"])
 def confirm_two_factor_toggle(token):
-    user, action, error = _load_two_factor_toggle_user_from_token(token)
+    user, action, method, error = _load_two_factor_toggle_user_from_token(token)
     if not user:
         if error:
             flash(error, "danger")
@@ -2321,16 +3357,28 @@ def confirm_two_factor_toggle(token):
             flash(tr("flash.accounts.invalid_credentials"), "danger")
             return redirect(url_for("accounts.confirm_two_factor_toggle", token=token))
 
-        extensions.users_col.update_one(
+        now = datetime.utcnow()
+        overrides = {"two_factor_prompt_pending": False}
+        if method == "email":
+            overrides["two_factor_email_enabled"] = target_enabled
+            if not target_enabled and str(user.get("two_factor_preferred_method", "") or "").strip().lower() == "email":
+                if _two_factor_method_enabled(user, "totp"):
+                    overrides["two_factor_preferred_method"] = "totp"
+                else:
+                    overrides["two_factor_preferred_method"] = ""
+        sync_fields = _two_factor_sync_fields(user, overrides)
+        safe_mongo_update_one(
+            extensions.users_col,
             {"_id": user.get("_id")},
             {
                 "$set": {
-                    "two_factor_enabled": target_enabled,
-                    "two_factor_prompt_pending": False,
-                    "two_factor_updated_at": datetime.utcnow(),
+                    **overrides,
+                    **sync_fields,
+                    "two_factor_updated_at": now,
                 },
                 "$unset": {
                     "two_factor_toggle_requested_action": "",
+                    "two_factor_toggle_requested_method": "",
                     "two_factor_toggle_requested_at": "",
                 },
             },
@@ -2344,8 +3392,168 @@ def confirm_two_factor_toggle(token):
         "accounts/two_factor_toggle_confirm.jinja",
         token=token,
         action=action,
+        method=method,
         masked_email=_mask_email(user.get("email", "")),
     )
+
+
+@bp.route("/account/2fa/totp/start", methods=["POST"])
+@login_required
+def start_totp_setup():
+    user_oid = get_session_user_oid()
+    user = extensions.users_col.find_one({"_id": user_oid})
+    if not user:
+        session.clear()
+        flash(tr("flash.auth.required"), "warning")
+        return redirect(url_for("accounts.login"))
+    if user.get("auth_provider") == "google":
+        flash(tr("flash.accounts.two_factor_not_available_google"), "warning")
+        return redirect(url_for("accounts.manage_account"))
+    if _two_factor_method_enabled(user, "totp"):
+        flash(tr("flash.accounts.two_factor_authenticator_already_enabled"), "info")
+        return redirect(url_for("accounts.manage_account"))
+
+    current_password = request.form.get("current_password", "")
+    if not current_password or not check_password_hash(user.get("password_hash", ""), current_password):
+        flash(tr("flash.accounts.invalid_credentials"), "danger")
+        return redirect(url_for("accounts.manage_account"))
+
+    secret = pyotp.random_base32()
+    safe_mongo_update_one(
+        extensions.users_col,
+        {"_id": user_oid},
+        {
+            "$set": {
+                "two_factor_totp_pending_secret": secret,
+                "two_factor_totp_pending_created_at": datetime.utcnow(),
+                "two_factor_prompt_pending": False,
+            }
+        },
+    )
+    flash(tr("flash.accounts.two_factor_authenticator_setup_started"), "success")
+    return redirect(url_for("accounts.manage_account"))
+
+
+@bp.route("/account/2fa/totp/cancel", methods=["POST"])
+@login_required
+def cancel_totp_setup():
+    user_oid = get_session_user_oid()
+    _clear_pending_totp_setup(user_oid)
+    flash(tr("flash.accounts.two_factor_authenticator_setup_cancelled"), "info")
+    return redirect(url_for("accounts.manage_account"))
+
+
+@bp.route("/account/2fa/totp/enable", methods=["POST"])
+@login_required
+def enable_totp():
+    user_oid = get_session_user_oid()
+    user = extensions.users_col.find_one({"_id": user_oid})
+    if not user:
+        session.clear()
+        flash(tr("flash.auth.required"), "warning")
+        return redirect(url_for("accounts.login"))
+    if user.get("auth_provider") == "google":
+        flash(tr("flash.accounts.two_factor_not_available_google"), "warning")
+        return redirect(url_for("accounts.manage_account"))
+
+    pending_secret = _totp_pending_secret(user)
+    if not pending_secret:
+        _clear_pending_totp_setup(user_oid)
+        flash(tr("flash.accounts.two_factor_authenticator_setup_expired"), "warning")
+        return redirect(url_for("accounts.manage_account"))
+
+    code = request.form.get("code", "")
+    if not _verify_totp_code(pending_secret, code):
+        flash(tr("flash.accounts.two_factor_authenticator_code_invalid"), "danger")
+        return redirect(url_for("accounts.manage_account"))
+
+    preferred_method = (request.form.get("preferred_method", "") or "").strip().lower()
+    overrides = {
+        "two_factor_totp_enabled": True,
+        "two_factor_totp_secret": pending_secret,
+        "two_factor_totp_pending_secret": "",
+        "two_factor_totp_pending_created_at": None,
+        "two_factor_prompt_pending": False,
+    }
+    if preferred_method in {"email", "totp"}:
+        overrides["two_factor_preferred_method"] = preferred_method
+    elif not _preferred_two_factor_method(user):
+        overrides["two_factor_preferred_method"] = "totp"
+
+    sync_fields = _two_factor_sync_fields(user, overrides)
+    safe_mongo_update_one(
+        extensions.users_col,
+        {"_id": user_oid},
+        {"$set": {**overrides, **sync_fields, "two_factor_updated_at": datetime.utcnow()}},
+    )
+    flash(tr("flash.accounts.two_factor_authenticator_enabled"), "success")
+    return redirect(url_for("accounts.manage_account"))
+
+
+@bp.route("/account/2fa/totp/disable", methods=["POST"])
+@login_required
+def disable_totp():
+    user_oid = get_session_user_oid()
+    user = extensions.users_col.find_one({"_id": user_oid})
+    if not user:
+        session.clear()
+        flash(tr("flash.auth.required"), "warning")
+        return redirect(url_for("accounts.login"))
+    if user.get("auth_provider") == "google":
+        flash(tr("flash.accounts.two_factor_not_available_google"), "warning")
+        return redirect(url_for("accounts.manage_account"))
+    if not _two_factor_method_enabled(user, "totp"):
+        flash(tr("flash.accounts.two_factor_authenticator_already_disabled"), "info")
+        return redirect(url_for("accounts.manage_account"))
+
+    current_password = request.form.get("current_password", "")
+    if not current_password or not check_password_hash(user.get("password_hash", ""), current_password):
+        flash(tr("flash.accounts.invalid_credentials"), "danger")
+        return redirect(url_for("accounts.manage_account"))
+
+    overrides = {
+        "two_factor_totp_enabled": False,
+        "two_factor_totp_secret": "",
+        "two_factor_totp_pending_secret": "",
+        "two_factor_totp_pending_created_at": None,
+    }
+    if str(user.get("two_factor_preferred_method", "") or "").strip().lower() == "totp":
+        overrides["two_factor_preferred_method"] = "email" if _two_factor_method_enabled(user, "email") else ""
+    sync_fields = _two_factor_sync_fields(user, overrides)
+    safe_mongo_update_one(
+        extensions.users_col,
+        {"_id": user_oid},
+        {"$set": {**overrides, **sync_fields, "two_factor_updated_at": datetime.utcnow()}},
+    )
+    flash(tr("flash.accounts.two_factor_authenticator_disabled"), "success")
+    return redirect(url_for("accounts.manage_account"))
+
+
+@bp.route("/account/2fa/preference", methods=["POST"])
+@login_required
+def update_two_factor_preference():
+    user_oid = get_session_user_oid()
+    user = extensions.users_col.find_one({"_id": user_oid})
+    if not user:
+        session.clear()
+        flash(tr("flash.auth.required"), "warning")
+        return redirect(url_for("accounts.login"))
+    if user.get("auth_provider") == "google":
+        flash(tr("flash.accounts.two_factor_not_available_google"), "warning")
+        return redirect(url_for("accounts.manage_account"))
+
+    method = (request.form.get("preferred_method", "") or "").strip().lower()
+    if method not in _enabled_two_factor_methods(user):
+        flash(tr("flash.songs.invalid_request"), "danger")
+        return redirect(url_for("accounts.manage_account"))
+
+    safe_mongo_update_one(
+        extensions.users_col,
+        {"_id": user_oid},
+        {"$set": {"two_factor_preferred_method": method, "two_factor_updated_at": datetime.utcnow()}},
+    )
+    flash(tr("flash.accounts.two_factor_preference_updated"), "success")
+    return redirect(url_for("accounts.manage_account"))
 
 
 @bp.route("/account/2fa/dismiss-suggestion", methods=["POST"])
@@ -2430,6 +3638,14 @@ def manage_account():
                 }
             )
 
+    external_import_jobs = []
+    for row in extensions.external_import_jobs_col.find({"user_id": user_oid}).sort("updated_at", -1).limit(40):
+        item = _external_import_job_public_data(row)
+        item["pause_url"] = url_for("accounts.pause_external_import_job", job_id=item["id"])
+        item["resume_url"] = url_for("accounts.resume_external_import_job", job_id=item["id"])
+        item["cancel_url"] = url_for("accounts.cancel_external_import_job", job_id=item["id"])
+        external_import_jobs.append(item)
+
     try:
         two_factor_toggle_url = url_for("accounts.request_two_factor_toggle")
     except BuildError:
@@ -2438,6 +3654,10 @@ def manage_account():
         two_factor_dismiss_url = url_for("accounts.dismiss_two_factor_suggestion")
     except BuildError:
         two_factor_dismiss_url = ""
+    totp_pending_secret = _totp_pending_secret(user)
+    totp_pending_uri = _totp_provisioning_uri(user, totp_pending_secret) if totp_pending_secret else ""
+    enabled_two_factor_methods = _enabled_two_factor_methods(user)
+    preferred_two_factor_method = _preferred_two_factor_method(user, enabled_two_factor_methods)
 
     return render_template(
         "accounts/manage.jinja",
@@ -2445,6 +3665,10 @@ def manage_account():
             "id": str(user["_id"]),
             "username": user.get("username", "user"),
             "email": user.get("email", ""),
+            "pending_email_change": user.get("pending_email_change", ""),
+            "backup_email": user.get("backup_email", ""),
+            "backup_email_verified": bool(user.get("backup_email_verified", False)),
+            "pending_backup_email": user.get("pending_backup_email", ""),
             "is_admin": bool(user.get("is_admin", False)),
             "is_root_admin": bool(user.get("is_root_admin", False)),
             "require_password_change": bool(user.get("require_password_change", False)),
@@ -2452,6 +3676,13 @@ def manage_account():
             "auth_provider": user.get("auth_provider", "local"),
             "is_google_account": user.get("auth_provider") == "google",
             "two_factor_enabled": bool(user.get("two_factor_enabled", False)),
+            "two_factor_email_enabled": _two_factor_method_enabled(user, "email"),
+            "two_factor_totp_enabled": _two_factor_method_enabled(user, "totp"),
+            "two_factor_enabled_methods": enabled_two_factor_methods,
+            "two_factor_preferred_method": preferred_two_factor_method,
+            "two_factor_totp_pending_secret": totp_pending_secret,
+            "two_factor_totp_pending_uri": totp_pending_uri,
+            "two_factor_totp_qr_data_uri": _totp_qr_svg_data_uri(totp_pending_uri),
             "two_factor_prompt_pending": bool(user.get("two_factor_prompt_pending", False)),
             "profile_url": url_for("accounts.public_profile", username=user.get("username", "user")),
         },
@@ -2462,14 +3693,18 @@ def manage_account():
         youtube_integration_enabled=youtube_enabled,
         integration_providers=provider_rows,
         external_playlists=external_playlists,
+        external_import_jobs=external_import_jobs,
         two_factor_toggle_url=two_factor_toggle_url,
         two_factor_dismiss_url=two_factor_dismiss_url,
+        two_factor_totp_start_url=url_for("accounts.start_totp_setup"),
+        two_factor_totp_cancel_url=url_for("accounts.cancel_totp_setup"),
+        two_factor_totp_enable_url=url_for("accounts.enable_totp"),
+        two_factor_totp_disable_url=url_for("accounts.disable_totp"),
+        two_factor_preference_url=url_for("accounts.update_two_factor_preference"),
         username_update_url=url_for("accounts.update_username"),
-        show_two_factor_prompt=bool(
-            user.get("auth_provider") != "google"
-            and not bool(user.get("two_factor_enabled", False))
-            and bool(user.get("two_factor_prompt_pending", False))
-        ),
+        primary_email_update_url=url_for("accounts.update_primary_email"),
+        backup_email_update_url=url_for("accounts.update_backup_email"),
+        show_two_factor_prompt=_recovery_prompt_pending(user),
     )
 
 
@@ -2527,6 +3762,280 @@ def update_username():
         return redirect(url_for("accounts.manage_account"))
     flash(tr("flash.accounts.username_updated"), "success")
     return redirect(url_for("accounts.manage_account"))
+
+
+@bp.route("/account/update-primary-email", methods=["POST"])
+@login_required
+def update_primary_email():
+    user_oid = get_session_user_oid()
+    user = extensions.users_col.find_one(
+        {"_id": user_oid},
+        {
+            "username": 1,
+            "email": 1,
+            "email_normalized": 1,
+            "password_hash": 1,
+            "auth_provider": 1,
+            "backup_email_normalized": 1,
+        },
+    )
+    if not user:
+        session.clear()
+        flash(tr("flash.auth.required"), "warning")
+        return redirect(url_for("accounts.login"))
+    if user.get("auth_provider") == "google":
+        flash(tr("flash.accounts.primary_email_not_available_google"), "warning")
+        return redirect(url_for("accounts.manage_account"))
+
+    current_password = request.form.get("current_password", "")
+    if not check_password_hash(str(user.get("password_hash", "")), current_password):
+        flash(tr("flash.accounts.old_password_invalid"), "danger")
+        return redirect(url_for("accounts.manage_account"))
+
+    new_email = normalize_email(request.form.get("email", ""))
+    if not new_email:
+        flash(tr("flash.accounts.fields_required"), "danger")
+        return redirect(url_for("accounts.manage_account"))
+    if new_email == normalize_email(user.get("email", "")):
+        flash(tr("flash.accounts.primary_email_unchanged"), "info")
+        return redirect(url_for("accounts.manage_account"))
+    if new_email == normalize_email(user.get("backup_email_normalized", "")):
+        flash(tr("flash.accounts.emails_must_differ"), "danger")
+        return redirect(url_for("accounts.manage_account"))
+    if _email_in_use_by_other_account(new_email, current_user_oid=user_oid):
+        flash(tr("flash.accounts.email_exists"), "danger")
+        return redirect(url_for("accounts.manage_account"))
+
+    try:
+        safe_mongo_update_one(
+            extensions.users_col,
+            {"_id": user_oid},
+            {
+                "$set": {
+                    "pending_email_change": new_email,
+                    "pending_email_change_normalized": new_email,
+                    "pending_email_change_requested_at": datetime.utcnow(),
+                }
+            },
+        )
+    except DuplicateKeyError:
+        flash(tr("flash.accounts.email_exists"), "danger")
+        return redirect(url_for("accounts.manage_account"))
+    except PyMongoError:
+        current_app.logger.warning("Unable to queue primary email change", exc_info=True)
+        flash(tr("errors.503.msg"), "warning")
+        return redirect(url_for("accounts.manage_account"))
+    refreshed = extensions.users_col.find_one({"_id": user_oid}) or user
+    link = _build_contact_email_link(refreshed, "primary", new_email)
+    if not _send_contact_email_confirmation(new_email, refreshed.get("username", "user"), "primary", link):
+        safe_mongo_update_one(
+            extensions.users_col,
+            {"_id": user_oid},
+            {
+                "$set": {
+                    "pending_email_change": "",
+                    "pending_email_change_normalized": "",
+                    "pending_email_change_requested_at": None,
+                }
+            },
+        )
+        flash(tr("flash.accounts.primary_email_change_email_failed"), "warning")
+        return redirect(url_for("accounts.manage_account"))
+
+    flash(tr("flash.accounts.primary_email_change_email_sent"), "success")
+    return redirect(url_for("accounts.manage_account"))
+
+
+@bp.route("/account/confirm-primary-email/<token>")
+def confirm_primary_email_change(token):
+    user, purpose, target_email, error = _load_contact_email_change(token)
+    if not user or purpose != "primary":
+        flash(error or tr("flash.accounts.email_change_invalid"), "danger")
+        return redirect(url_for("accounts.login"))
+    if _email_in_use_by_other_account(target_email, current_user_oid=user.get("_id")):
+        flash(tr("flash.accounts.email_exists"), "danger")
+        return redirect(url_for("accounts.manage_account" if get_session_user_oid() == user.get("_id") else "accounts.login"))
+
+    try:
+        safe_mongo_update_one(
+            extensions.users_col,
+            {"_id": user["_id"]},
+            {
+                "$set": {
+                    "email": target_email,
+                    "email_normalized": target_email,
+                    "email_verified": True,
+                    "email_verified_at": datetime.utcnow(),
+                    "email_verification_sent_at": None,
+                    "pending_email_change": "",
+                    "pending_email_change_normalized": "",
+                    "pending_email_change_requested_at": None,
+                }
+            },
+        )
+    except DuplicateKeyError:
+        flash(tr("flash.accounts.email_exists"), "danger")
+        return redirect(url_for("accounts.manage_account" if get_session_user_oid() == user.get("_id") else "accounts.login"))
+    except PyMongoError:
+        current_app.logger.warning("Unable to confirm primary email change", exc_info=True)
+        flash(tr("errors.503.msg"), "warning")
+        return redirect(url_for("accounts.manage_account" if get_session_user_oid() == user.get("_id") else "accounts.login"))
+    if session.get("pending_verification_email") == user.get("email", ""):
+        session.pop("pending_verification_email", None)
+    flash(tr("flash.accounts.primary_email_changed"), "success")
+    if get_session_user_oid() == user.get("_id"):
+        return redirect(url_for("accounts.manage_account"))
+    return redirect(url_for("accounts.login"))
+
+
+@bp.route("/account/update-backup-email", methods=["POST"])
+@login_required
+def update_backup_email():
+    user_oid = get_session_user_oid()
+    user = extensions.users_col.find_one(
+        {"_id": user_oid},
+        {
+            "username": 1,
+            "email": 1,
+            "email_normalized": 1,
+            "backup_email": 1,
+            "backup_email_normalized": 1,
+            "backup_email_verified": 1,
+            "password_hash": 1,
+            "auth_provider": 1,
+        },
+    )
+    if not user:
+        session.clear()
+        flash(tr("flash.auth.required"), "warning")
+        return redirect(url_for("accounts.login"))
+    if user.get("auth_provider") == "google":
+        flash(tr("flash.accounts.backup_email_not_available_google"), "warning")
+        return redirect(url_for("accounts.manage_account"))
+
+    current_password = request.form.get("current_password", "")
+    if not check_password_hash(str(user.get("password_hash", "")), current_password):
+        flash(tr("flash.accounts.old_password_invalid"), "danger")
+        return redirect(url_for("accounts.manage_account"))
+
+    new_email = normalize_email(request.form.get("backup_email", ""))
+    current_backup = normalize_email(user.get("backup_email", ""))
+    if not new_email:
+        try:
+            safe_mongo_update_one(
+                extensions.users_col,
+                {"_id": user_oid},
+                {
+                    "$set": {
+                        "backup_email": "",
+                        "backup_email_normalized": "",
+                        "backup_email_verified": False,
+                        "backup_email_verified_at": None,
+                        "backup_email_verification_sent_at": None,
+                        "pending_backup_email": "",
+                        "pending_backup_email_normalized": "",
+                        "pending_backup_email_requested_at": None,
+                    }
+                },
+            )
+        except PyMongoError:
+            current_app.logger.warning("Unable to clear backup email", exc_info=True)
+            flash(tr("errors.503.msg"), "warning")
+            return redirect(url_for("accounts.manage_account"))
+        flash(tr("flash.accounts.backup_email_removed"), "success")
+        return redirect(url_for("accounts.manage_account"))
+
+    if is_disposable_email(new_email):
+        flash(tr("flash.accounts.backup_email_disposable_forbidden"), "danger")
+        return redirect(url_for("accounts.manage_account"))
+    if new_email == normalize_email(user.get("email", "")):
+        flash(tr("flash.accounts.emails_must_differ"), "danger")
+        return redirect(url_for("accounts.manage_account"))
+    if new_email == current_backup and bool(user.get("backup_email_verified", False)):
+        flash(tr("flash.accounts.backup_email_unchanged"), "info")
+        return redirect(url_for("accounts.manage_account"))
+    if _email_in_use_by_other_account(new_email, current_user_oid=user_oid):
+        flash(tr("flash.accounts.email_exists"), "danger")
+        return redirect(url_for("accounts.manage_account"))
+
+    try:
+        safe_mongo_update_one(
+            extensions.users_col,
+            {"_id": user_oid},
+            {
+                "$set": {
+                    "pending_backup_email": new_email,
+                    "pending_backup_email_normalized": new_email,
+                    "pending_backup_email_requested_at": datetime.utcnow(),
+                }
+            },
+        )
+    except DuplicateKeyError:
+        flash(tr("flash.accounts.email_exists"), "danger")
+        return redirect(url_for("accounts.manage_account"))
+    except PyMongoError:
+        current_app.logger.warning("Unable to queue backup email change", exc_info=True)
+        flash(tr("errors.503.msg"), "warning")
+        return redirect(url_for("accounts.manage_account"))
+    refreshed = extensions.users_col.find_one({"_id": user_oid}) or user
+    link = _build_contact_email_link(refreshed, "backup", new_email)
+    if not _send_contact_email_confirmation(new_email, refreshed.get("username", "user"), "backup", link):
+        safe_mongo_update_one(
+            extensions.users_col,
+            {"_id": user_oid},
+            {
+                "$set": {
+                    "pending_backup_email": "",
+                    "pending_backup_email_normalized": "",
+                    "pending_backup_email_requested_at": None,
+                }
+            },
+        )
+        flash(tr("flash.accounts.backup_email_send_failed"), "warning")
+        return redirect(url_for("accounts.manage_account"))
+
+    flash(tr("flash.accounts.backup_email_verification_sent"), "success")
+    return redirect(url_for("accounts.manage_account"))
+
+
+@bp.route("/account/confirm-backup-email/<token>")
+def confirm_backup_email(token):
+    user, purpose, target_email, error = _load_contact_email_change(token)
+    if not user or purpose != "backup":
+        flash(error or tr("flash.accounts.backup_email_invalid"), "danger")
+        return redirect(url_for("accounts.login"))
+    if _email_in_use_by_other_account(target_email, current_user_oid=user.get("_id")):
+        flash(tr("flash.accounts.email_exists"), "danger")
+        return redirect(url_for("accounts.manage_account" if get_session_user_oid() == user.get("_id") else "accounts.login"))
+
+    try:
+        safe_mongo_update_one(
+            extensions.users_col,
+            {"_id": user["_id"]},
+            {
+                "$set": {
+                    "backup_email": target_email,
+                    "backup_email_normalized": target_email,
+                    "backup_email_verified": True,
+                    "backup_email_verified_at": datetime.utcnow(),
+                    "backup_email_verification_sent_at": datetime.utcnow(),
+                    "pending_backup_email": "",
+                    "pending_backup_email_normalized": "",
+                    "pending_backup_email_requested_at": None,
+                }
+            },
+        )
+    except DuplicateKeyError:
+        flash(tr("flash.accounts.email_exists"), "danger")
+        return redirect(url_for("accounts.manage_account" if get_session_user_oid() == user.get("_id") else "accounts.login"))
+    except PyMongoError:
+        current_app.logger.warning("Unable to confirm backup email", exc_info=True)
+        flash(tr("errors.503.msg"), "warning")
+        return redirect(url_for("accounts.manage_account" if get_session_user_oid() == user.get("_id") else "accounts.login"))
+    flash(tr("flash.accounts.backup_email_verified"), "success")
+    if get_session_user_oid() == user.get("_id"):
+        return redirect(url_for("accounts.manage_account"))
+    return redirect(url_for("accounts.login"))
 
 
 @bp.route("/account/export/json")
@@ -2795,7 +4304,7 @@ def check_availability():
     field = request.args.get("field", "").strip().lower()
     value = request.args.get("value", "")
     if field == "email":
-        available = bool(normalize_email(value)) and find_user_by_email(value) is None
+        available = bool(normalize_email(value)) and not _email_in_use_by_other_account(value)
         return jsonify({"available": available, "message": "" if available else tr("flash.accounts.email_exists")})
     if field == "username":
         if not username_policy_ok(value):

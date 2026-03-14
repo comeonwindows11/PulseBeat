@@ -10,8 +10,17 @@
       <p class="muted small">{{ t('playlist.import_pending') }}</p>
     {% elif playlist.import_status == 'running' %}
       <p class="muted small">{{ t('playlist.import_running') }}</p>
+    {% elif playlist.import_status == 'paused' %}
+      <p class="muted small">{{ t('playlist.import_paused') }}</p>
+    {% elif playlist.import_status == 'canceled' %}
+      <p class="muted small">{{ t('playlist.import_canceled') }}</p>
+    {% elif playlist.import_status == 'completed' %}
+      <p class="muted small">{{ t('playlist.import_completed', count=playlist.import_added_count) }}</p>
     {% elif playlist.import_status == 'failed' %}
       <p class="muted small">{{ t('playlist.import_failed', reason=playlist.import_error or 'unknown') }}</p>
+    {% endif %}
+    {% if playlist.import_total_tracks %}
+      <p class="muted small">{{ t('playlist.import_progress', done=playlist.import_processed_count, total=playlist.import_total_tracks) }}</p>
     {% endif %}
     {% if current_user and playlist.visibility in ['public', 'unlisted'] %}
     <div class="row-actions top-gap">
@@ -73,10 +82,35 @@
     </form>
 
     {% if songs %}
-      <ul class="song-list top-gap">
+      {% set playlist_reorder_enabled = (playlist.is_owner or playlist.is_collaborator) and not songs_q %}
+      {% if playlist.is_owner or playlist.is_collaborator %}
+      <p class="muted small top-gap">
+        {% if playlist_reorder_enabled %}
+          {{ t('playlist.reorder_hint') }}
+        {% else %}
+          {{ t('playlist.reorder_search_disabled') }}
+        {% endif %}
+      </p>
+      {% endif %}
+      <ul
+        class="song-list top-gap{% if playlist_reorder_enabled %} playlist-sort-list{% endif %}"
+        {% if playlist_reorder_enabled %}
+        data-playlist-sort-url="{{ url_for('playlists.reorder_playlist_songs', playlist_id=playlist.id) }}"
+        data-playlist-id="{{ playlist.id }}"
+        data-playlist-page="{{ songs_page }}"
+        data-playlist-search="{{ songs_q }}"
+        {% endif %}
+      >
         {% for song in songs %}
-          <li data-song-id="{{ song.id }}" class="{% if not song.is_available %}song-unavailable{% endif %}">
+          <li
+            data-song-id="{{ song.id }}"
+            class="{% if not song.is_available %}song-unavailable{% endif %}{% if playlist_reorder_enabled %} playlist-sort-item{% endif %}"
+            {% if playlist_reorder_enabled %}draggable="true"{% endif %}
+          >
             <div>
+              {% if playlist_reorder_enabled %}
+              <div class="playlist-sort-handle" aria-hidden="true" title="{{ t('playlist.reorder_handle') }}">⋮⋮</div>
+              {% endif %}
               <a href="{{ url_for('songs.song_detail', song_id=song.id) }}"><strong>{{ song.title }}</strong></a>
               <p>{{ song.artist }}{% if song.genre %} - {{ song.genre }}{% endif %}</p>
               {% if not song.is_available %}
@@ -163,4 +197,3 @@
   ];
 </script>
 {% endblock %}
-

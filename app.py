@@ -1,6 +1,6 @@
 import os
 import secrets
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
 
 from flask import Flask, abort, flash, jsonify, redirect, render_template, request, session, url_for
@@ -21,7 +21,7 @@ from auth_helpers import (
     validate_bound_session_request,
     youtube_playlist_visibility_clause,
 )
-from blueprints.accounts import bp as accounts_bp
+from blueprints.accounts import bp as accounts_bp, start_external_import_scheduler
 from blueprints.admin import bp as admin_bp
 from blueprints.main import bp as main_bp
 from blueprints.playlists import bp as playlists_bp
@@ -36,7 +36,7 @@ def register_error_handlers(app):
 
         return handler
 
-    handled_codes = [400, 401, 403, 404, 405, 408, 413, 429, 500, 501, 502, 503, 504]
+    handled_codes = [400, 401, 403, 404, 405, 408, 413, 418, 429, 500, 501, 502, 503, 504]
     for code in handled_codes:
         app.register_error_handler(code, make_handler(code))
 
@@ -186,6 +186,9 @@ def create_app():
     app.config["TWO_FACTOR_CODE_MAX_AGE"] = int(os.getenv("TWO_FACTOR_CODE_MAX_AGE", "600"))
     app.config["TWO_FACTOR_TOGGLE_TOKEN_MAX_AGE"] = int(os.getenv("TWO_FACTOR_TOGGLE_TOKEN_MAX_AGE", "3600"))
     app.config["TWO_FACTOR_TOGGLE_SALT"] = os.getenv("TWO_FACTOR_TOGGLE_SALT", "pulsebeat-two-factor-toggle")
+    app.config["TWO_FACTOR_TOTP_PENDING_MAX_AGE"] = int(os.getenv("TWO_FACTOR_TOTP_PENDING_MAX_AGE", "900"))
+    app.config["PLATFORM_RESET_TOKEN_MAX_AGE"] = int(os.getenv("PLATFORM_RESET_TOKEN_MAX_AGE", "1800"))
+    app.config["PLATFORM_RESET_SALT"] = os.getenv("PLATFORM_RESET_SALT", "pulsebeat-platform-reset")
     app.config["DEVICE_COOKIE_NAME"] = os.getenv("DEVICE_COOKIE_NAME", "pulsebeat_device_id")
     app.config["DEVICE_COOKIE_MAX_AGE"] = int(os.getenv("DEVICE_COOKIE_MAX_AGE", str(365 * 24 * 3600)))
     app.config["DEVICE_APPROVAL_TOKEN_MAX_AGE"] = int(os.getenv("DEVICE_APPROVAL_TOKEN_MAX_AGE", "1800"))
@@ -204,12 +207,24 @@ def create_app():
         "SESSION_COOKIE_SECURE",
         "1" if app.config.get("APP_BASE_URL", "").strip().lower().startswith("https://") else "0",
     ) == "1"
+    app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=max(1, int(os.getenv("REMEMBER_ME_SESSION_DAYS", "30"))))
     app.config["JS_SERVE_OBFUSCATED"] = os.getenv("JS_SERVE_OBFUSCATED", "1") == "1"
 
     extensions.init_mongo(app)
     now = datetime.now(UTC)
     extensions.users_col.update_many({"email_verified": {"$exists": False}}, {"$set": {"email_verified": True, "email_verified_at": now}})
     extensions.users_col.update_many({"email_verification_sent_at": {"$exists": False}}, {"$set": {"email_verification_sent_at": None}})
+    extensions.users_col.update_many({"backup_email": {"$exists": False}}, {"$set": {"backup_email": ""}})
+    extensions.users_col.update_many({"backup_email_normalized": {"$exists": False}}, {"$set": {"backup_email_normalized": ""}})
+    extensions.users_col.update_many({"backup_email_verified": {"$exists": False}}, {"$set": {"backup_email_verified": False}})
+    extensions.users_col.update_many({"backup_email_verified_at": {"$exists": False}}, {"$set": {"backup_email_verified_at": None}})
+    extensions.users_col.update_many({"backup_email_verification_sent_at": {"$exists": False}}, {"$set": {"backup_email_verification_sent_at": None}})
+    extensions.users_col.update_many({"pending_backup_email": {"$exists": False}}, {"$set": {"pending_backup_email": ""}})
+    extensions.users_col.update_many({"pending_backup_email_normalized": {"$exists": False}}, {"$set": {"pending_backup_email_normalized": ""}})
+    extensions.users_col.update_many({"pending_backup_email_requested_at": {"$exists": False}}, {"$set": {"pending_backup_email_requested_at": None}})
+    extensions.users_col.update_many({"pending_email_change": {"$exists": False}}, {"$set": {"pending_email_change": ""}})
+    extensions.users_col.update_many({"pending_email_change_normalized": {"$exists": False}}, {"$set": {"pending_email_change_normalized": ""}})
+    extensions.users_col.update_many({"pending_email_change_requested_at": {"$exists": False}}, {"$set": {"pending_email_change_requested_at": None}})
     extensions.users_col.update_many({"auth_provider": {"$exists": False}}, {"$set": {"auth_provider": "local"}})
     extensions.users_col.update_many(
         {"auth_provider": "google"},
@@ -217,7 +232,24 @@ def create_app():
             "$set": {
                 "require_password_change": False,
                 "two_factor_enabled": False,
+                "two_factor_email_enabled": False,
+                "two_factor_totp_enabled": False,
+                "two_factor_totp_secret": "",
+                "two_factor_totp_pending_secret": "",
+                "two_factor_totp_pending_created_at": None,
+                "two_factor_preferred_method": "",
                 "two_factor_prompt_pending": False,
+                "backup_email": "",
+                "backup_email_normalized": "",
+                "backup_email_verified": False,
+                "backup_email_verified_at": None,
+                "backup_email_verification_sent_at": None,
+                "pending_backup_email": "",
+                "pending_backup_email_normalized": "",
+                "pending_backup_email_requested_at": None,
+                "pending_email_change": "",
+                "pending_email_change_normalized": "",
+                "pending_email_change_requested_at": None,
             },
             "$unset": {"password_compromised_at": ""},
         },
@@ -231,6 +263,30 @@ def create_app():
     extensions.users_col.update_many({"player_normalize_volume_enabled": {"$exists": False}}, {"$set": {"player_normalize_volume_enabled": True}})
     extensions.users_col.update_many({"two_factor_enabled": {"$exists": False}}, {"$set": {"two_factor_enabled": False}})
     extensions.users_col.update_many({"two_factor_prompt_pending": {"$exists": False}}, {"$set": {"two_factor_prompt_pending": False}})
+    extensions.users_col.update_many(
+        {"two_factor_email_enabled": {"$exists": False}},
+        [{"$set": {"two_factor_email_enabled": {"$ifNull": ["$two_factor_enabled", False]}}}],
+    )
+    extensions.users_col.update_many({"two_factor_totp_enabled": {"$exists": False}}, {"$set": {"two_factor_totp_enabled": False}})
+    extensions.users_col.update_many({"two_factor_totp_secret": {"$exists": False}}, {"$set": {"two_factor_totp_secret": ""}})
+    extensions.users_col.update_many({"two_factor_totp_pending_secret": {"$exists": False}}, {"$set": {"two_factor_totp_pending_secret": ""}})
+    extensions.users_col.update_many({"two_factor_totp_pending_created_at": {"$exists": False}}, {"$set": {"two_factor_totp_pending_created_at": None}})
+    extensions.users_col.update_many(
+        {"two_factor_preferred_method": {"$exists": False}},
+        [
+            {
+                "$set": {
+                    "two_factor_preferred_method": {
+                        "$cond": [
+                            {"$eq": [{"$ifNull": ["$two_factor_enabled", False]}, True]},
+                            "email",
+                            "",
+                        ]
+                    }
+                }
+            }
+        ],
+    )
     extensions.users_col.update_many({"trusted_devices": {"$exists": False}}, {"$set": {"trusted_devices": []}})
     extensions.users_col.update_many({"active_sessions": {"$exists": False}}, {"$set": {"active_sessions": []}})
     extensions.users_col.update_many({"pending_device_approvals": {"$exists": False}}, {"$set": {"pending_device_approvals": []}})
@@ -256,6 +312,9 @@ def create_app():
         name="uniq_ext_playlist_user_provider_id",
     )
     extensions.external_playlists_col.create_index([("user_id", 1), ("synced_at", -1)], name="idx_ext_playlist_user_synced")
+    extensions.external_import_jobs_col.create_index([("status", 1), ("created_at", 1)], name="idx_ext_import_jobs_status_created")
+    extensions.external_import_jobs_col.create_index([("user_id", 1), ("updated_at", -1)], name="idx_ext_import_jobs_user_updated")
+    extensions.external_import_jobs_col.create_index([("local_playlist_id", 1), ("updated_at", -1)], name="idx_ext_import_jobs_playlist_updated")
     extensions.data_exports_col.create_index([("user_id", 1), ("created_at", -1)], name="idx_data_exports_user_created")
     _ensure_unique_index_with_dedupe(
         extensions.creator_subscriptions_col,
@@ -301,10 +360,15 @@ def create_app():
     app.register_blueprint(songs_bp)
     app.register_blueprint(playlists_bp)
     register_error_handlers(app)
+    start_external_import_scheduler(app)
 
     @app.route("/favicon.ico")
     def favicon():
         return ("", 204)
+
+    @app.route("/dino")
+    def dino_easter_egg():
+        return render_template("errors/easter_egg_teapot.jinja", error_code=418), 418
 
     @app.before_request
     def enforce_initial_setup_and_password_change():
@@ -313,7 +377,7 @@ def create_app():
         if endpoint != "static" and not endpoint.startswith("static"):
             ensure_request_device_id()
         if not setup_done:
-            allowed = {"accounts.setup_admin", "static"}
+            allowed = {"accounts.setup_admin", "dino_easter_egg", "static"}
             if endpoint in allowed or endpoint.startswith("static"):
                 return None
             return redirect(url_for("accounts.setup_admin"))
@@ -338,7 +402,7 @@ def create_app():
             session.clear()
             if endpoint == "static" or endpoint.startswith("static"):
                 return None
-            if endpoint not in {"accounts.login", "accounts.google_login", "accounts.google_callback", "accounts.setup_admin", "static"} and not endpoint.startswith("static"):
+            if endpoint not in {"accounts.login", "accounts.google_login", "accounts.google_callback", "accounts.setup_admin", "dino_easter_egg", "static"} and not endpoint.startswith("static"):
                 flash(t("flash.accounts.session_invalidated"), "warning")
             return redirect(url_for("accounts.login"))
         session_security_response = validate_bound_session_request(user)
@@ -350,6 +414,7 @@ def create_app():
         allowed_when_forced = {
             "accounts.manage_account",
             "accounts.change_password",
+            "dino_easter_egg",
             "main.set_language",
             "static",
         }

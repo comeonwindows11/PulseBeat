@@ -97,3 +97,59 @@
     closeBtn.addEventListener("click", () => dismissAlert(card));
   });
 })();
+
+(function () {
+  const flow = document.getElementById("platform-reset-flow");
+  if (!flow) return;
+
+  const executeUrl = String(flow.getAttribute("data-execute-url") || "").trim();
+  const confirmBtn = document.getElementById("platform-reset-confirm-btn");
+  const errorText = document.getElementById("platform-reset-error-text");
+  const csrfToken = String(window.CSRF_TOKEN || "").trim();
+  if (!confirmBtn || !executeUrl) return;
+
+  const steps = {
+    confirm: flow.querySelector('[data-step="confirm"]'),
+    progress: flow.querySelector('[data-step="progress"]'),
+    complete: flow.querySelector('[data-step="complete"]'),
+    error: flow.querySelector('[data-step="error"]'),
+  };
+
+  function showStep(stepName) {
+    Object.entries(steps).forEach(([name, node]) => {
+      if (!node) return;
+      node.classList.toggle("hidden", name !== stepName);
+    });
+  }
+
+  confirmBtn.addEventListener("click", async () => {
+    confirmBtn.disabled = true;
+    showStep("progress");
+
+    try {
+      const headers = {
+        "Content-Type": "application/json",
+        "X-Requested-With": "XMLHttpRequest",
+      };
+      if (csrfToken) headers["X-CSRF-Token"] = csrfToken;
+
+      const response = await fetch(executeUrl, {
+        method: "POST",
+        credentials: "same-origin",
+        headers,
+        body: JSON.stringify({ confirmed: true }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.ok) {
+        throw new Error(String(payload.message || "reset_failed"));
+      }
+      showStep("complete");
+    } catch (error) {
+      if (errorText) {
+        errorText.textContent = error && error.message ? error.message : "Reset failed.";
+      }
+      showStep("error");
+      confirmBtn.disabled = false;
+    }
+  });
+})();

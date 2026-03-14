@@ -11,7 +11,17 @@
           <input type="text" name="login_id" required>
         </label>
         <label>{{ t('auth.password') }}
-          <input type="password" name="password" required>
+          <div class="password-input-wrap">
+            <input type="password" id="login-password-input" name="password" required>
+            <button type="button" class="password-visibility-toggle" data-password-toggle-target="login-password-input" aria-label="{{ t('auth.toggle_password_visibility') }}">&#128065;</button>
+          </div>
+        </label>
+        <label class="remember-me-row">
+          <span class="remember-me-main">
+            <input type="checkbox" name="remember_me" value="1">
+            <span>{{ t('auth.remember_me') }}</span>
+          </span>
+          <span class="inline-help" tabindex="0" aria-label="{{ t('auth.remember_me_help') }}" data-tooltip="{{ t('auth.remember_me_help') }}" title="{{ t('auth.remember_me_help') }}">?</span>
         </label>
         <button type="submit">{{ t('auth.submit_login') }}</button>
       </form>
@@ -32,4 +42,3 @@
   </div>
 </section>
 {% endblock %}
-

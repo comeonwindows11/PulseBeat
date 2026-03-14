@@ -275,6 +275,36 @@ button,
   padding: 10px;
 }
 
+.playlist-sort-list .playlist-sort-item {
+  cursor: grab;
+  transition: border-color 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease;
+}
+
+.playlist-sort-list .playlist-sort-item.dragging {
+  opacity: 0.55;
+  transform: scale(0.99);
+}
+
+.playlist-sort-list .playlist-sort-item.drop-target {
+  border-color: #5e8dff;
+  box-shadow: 0 0 0 1px rgba(94, 141, 255, 0.4);
+}
+
+.playlist-sort-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  margin-right: 8px;
+  border-radius: 8px;
+  background: rgba(94, 141, 255, 0.14);
+  color: #a9c1ff;
+  font-size: 15px;
+  letter-spacing: -1px;
+  vertical-align: middle;
+}
+
 .row-actions {
   display: flex;
   gap: 8px;
@@ -292,6 +322,17 @@ button,
 .checkbox-row input {
   width: auto;
   margin: 0;
+}
+
+.badge-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.inset-card {
+  border: 1px solid rgba(74, 109, 173, 0.55);
+  background: rgba(12, 20, 35, 0.38);
 }
 
 .cardless-form {
@@ -320,6 +361,89 @@ button,
 
 .auth-form-stack {
   margin: 0;
+}
+
+.password-input-wrap {
+  position: relative;
+  width: 100%;
+}
+
+.password-input-wrap input {
+  display: block;
+  width: 100%;
+  padding-right: 46px;
+}
+
+.password-visibility-toggle {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  min-width: 34px;
+  min-height: 34px;
+  padding: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: #ffffff;
+  border: 1px solid transparent;
+}
+
+.password-visibility-toggle:hover,
+.password-visibility-toggle:focus-visible,
+.password-visibility-toggle.active {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.14);
+}
+
+.remember-me-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.remember-me-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.inline-help {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.05);
+  color: #ffffff;
+  font-weight: 700;
+  cursor: help;
+}
+
+.inline-help:hover::after,
+.inline-help:focus-visible::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  width: min(280px, 70vw);
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.45;
+  box-shadow: 0 16px 30px rgba(0, 0, 0, 0.28);
+  z-index: 15;
+}
+
+input[type="password"]::-ms-reveal,
+input[type="password"]::-ms-clear {
+  filter: invert(1);
 }
 
 .auth-google-btn {
@@ -366,6 +490,16 @@ button,
 
 .muted {
   color: var(--muted);
+}
+
+.admin-inline-warning {
+  margin: 0 0 14px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 152, 0, 0.35);
+  background: rgba(140, 93, 18, 0.22);
+  color: #ffd698;
+  font-weight: 600;
 }
 
 .small {
@@ -1171,6 +1305,78 @@ button,
   background: #0b1830;
 }
 
+.dino-easter-card {
+  width: min(100%, 980px);
+}
+
+.dino-easter-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: fit-content;
+  margin: 0 0 8px;
+  padding: 8px 12px;
+  border: 1px solid rgba(255, 122, 24, 0.42);
+  border-radius: 999px;
+  background: rgba(255, 122, 24, 0.14);
+  color: #ffd7b5;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.dino-easter-canvas {
+  margin-top: 10px;
+  border-radius: 16px;
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.28);
+}
+
+.dino-easter-meta {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.dino-easter-meta p {
+  margin: 0;
+}
+
+.dino-easter-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.dino-robot-btn {
+  min-width: 170px;
+}
+
+.dino-robot-btn.active {
+  background: #4c77ff;
+  color: #ffffff;
+}
+
+#dino-robot-status.robot-on {
+  color: #b8ffd1;
+  font-weight: 700;
+}
+
+#dino-robot-status.robot-off {
+  color: var(--muted);
+}
+
+@media (max-width: 700px) {
+  .dino-easter-controls {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .dino-robot-btn {
+    width: 100%;
+  }
+}
+
 .admin-settings-card {
   min-width: 0;
 }
@@ -1894,6 +2100,36 @@ body.player-fullscreen-open .player-action-toast {
   margin-top: 0;
 }
 
+.totp-qr-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid rgba(82, 118, 190, 0.38);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.04);
+  text-align: center;
+}
+
+.totp-qr-card h5 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.totp-qr-image {
+  width: min(100%, 220px);
+  height: auto;
+  padding: 10px;
+  border-radius: 16px;
+  background: #ffffff;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.18);
+}
+
+.totp-qr-card .muted.small {
+  margin: 0;
+}
+
 .account-integrations-list li {
   align-items: stretch;
 }
@@ -1913,6 +2149,38 @@ body.player-fullscreen-open .player-action-toast {
 
 .danger-panel {
   border-color: #6b2a2a;
+}
+
+.admin-reset-card {
+  width: min(100%, 560px);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  text-align: left;
+}
+
+.platform-reset-step {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.platform-reset-spinner {
+  width: 56px;
+  height: 56px;
+  border-radius: 999px;
+  border: 5px solid rgba(255, 255, 255, 0.12);
+  border-top-color: var(--accent);
+  animation: platform-reset-spin 0.9s linear infinite;
+}
+
+@keyframes platform-reset-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .force-modal {

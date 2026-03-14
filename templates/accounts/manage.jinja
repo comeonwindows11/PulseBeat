@@ -64,6 +64,60 @@
             <button type="submit">{{ t('account.change_username_cta') }}</button>
           </form>
         </article>
+
+        {% if not me.is_google_account %}
+        <article class="sub-card">
+          <h3>{{ t('account.primary_email_title') }}</h3>
+          <p class="muted small">{{ t('account.primary_email_hint') }}</p>
+          <p class="muted small"><strong>{{ t('account.primary_email') }}:</strong> {{ me.email }}</p>
+          {% if me.pending_email_change %}
+          <p class="muted small">{{ t('account.primary_email_pending', email=me.pending_email_change) }}</p>
+          {% endif %}
+          <form method="post" action="{{ primary_email_update_url }}" class="stack" data-validate-form="1">
+            <label>{{ t('auth.email') }}
+              <input type="email" name="email" value="{{ me.email }}" required>
+            </label>
+            <label>{{ t('account.current_password') }}
+              <input type="password" name="current_password" required>
+            </label>
+            <button type="submit">{{ t('account.primary_email_change_cta') }}</button>
+          </form>
+        </article>
+
+        <article class="sub-card">
+          <h3>{{ t('account.backup_email_title') }}</h3>
+          <p class="muted small">{{ t('account.backup_email_hint') }}</p>
+          <p class="muted small">
+            {% if me.backup_email %}
+              <strong>{{ t('account.backup_email') }}:</strong> {{ me.backup_email }}
+              {% if me.backup_email_verified %}
+              <span class="badge">{{ t('auth.email_verified') }}</span>
+              {% else %}
+              <span class="badge">{{ t('auth.email_not_verified') }}</span>
+              {% endif %}
+            {% else %}
+              {{ t('account.backup_email_none') }}
+            {% endif %}
+          </p>
+          {% if me.pending_backup_email %}
+          <p class="muted small">{{ t('account.backup_email_pending', email=me.pending_backup_email) }}</p>
+          {% endif %}
+          <form method="post" action="{{ backup_email_update_url }}" class="stack" data-validate-form="1">
+            <label>{{ t('account.backup_email') }}
+              <input type="email" name="backup_email" value="{{ me.backup_email }}" data-block-disposable="1">
+            </label>
+            <label>{{ t('account.current_password') }}
+              <input type="password" name="current_password" required>
+            </label>
+            <div class="row-actions">
+              <button type="submit">{{ t('account.backup_email_save_cta') }}</button>
+              {% if me.backup_email %}
+              <button type="submit" name="backup_email" value="" class="btn secondary">{{ t('account.backup_email_remove_cta') }}</button>
+              {% endif %}
+            </div>
+          </form>
+        </article>
+        {% endif %}
       </div>
       {% endif %}
     </section>
@@ -86,18 +140,115 @@
               {{ t('account.two_factor_status_disabled_detail') }}
             {% endif %}
           </p>
-          <div class="row-actions top-gap">
-            {% if me.two_factor_enabled %}
-            <form method="post" action="{{ two_factor_toggle_url or '#' }}">
-              <input type="hidden" name="action" value="disable">
-              <button type="submit" class="btn secondary" {% if not two_factor_toggle_url %}disabled{% endif %}>{{ t('account.two_factor_disable_cta') }}</button>
-            </form>
-            {% else %}
-            <form method="post" action="{{ two_factor_toggle_url or '#' }}">
-              <input type="hidden" name="action" value="enable">
-              <button type="submit" {% if not two_factor_toggle_url %}disabled{% endif %}>{{ t('account.two_factor_enable_cta') }}</button>
-            </form>
+          <div class="stack top-gap">
+            <div class="sub-card inset-card">
+              <h4>{{ t('account.two_factor_method_email_title') }}</h4>
+              <p class="muted small">
+                {% if me.two_factor_email_enabled %}
+                  {{ t('account.two_factor_email_enabled_detail') }}
+                {% else %}
+                  {{ t('account.two_factor_email_disabled_detail') }}
+                {% endif %}
+              </p>
+              <div class="row-actions top-gap">
+                <form method="post" action="{{ two_factor_toggle_url or '#' }}">
+                  <input type="hidden" name="method" value="email">
+                  <input type="hidden" name="action" value="{% if me.two_factor_email_enabled %}disable{% else %}enable{% endif %}">
+                  <button type="submit" class="{% if me.two_factor_email_enabled %}btn secondary{% endif %}" {% if not two_factor_toggle_url %}disabled{% endif %}>
+                    {% if me.two_factor_email_enabled %}{{ t('account.two_factor_disable_cta') }}{% else %}{{ t('account.two_factor_enable_cta') }}{% endif %}
+                  </button>
+                </form>
+                {% if me.two_factor_preferred_method == "email" %}
+                <span class="badge">{{ t('account.two_factor_preferred_badge') }}</span>
+                {% endif %}
+              </div>
+            </div>
+
+            <div class="sub-card inset-card">
+              <h4>{{ t('account.two_factor_method_totp_title') }}</h4>
+              <p class="muted small">
+                {% if me.two_factor_totp_enabled %}
+                  {{ t('account.two_factor_authenticator_enabled_detail') }}
+                {% else %}
+                  {{ t('account.two_factor_authenticator_disabled_detail') }}
+                {% endif %}
+              </p>
+
+              {% if me.two_factor_totp_pending_secret %}
+              <form method="post" action="{{ two_factor_totp_enable_url }}" class="stack top-gap" data-validate-form="1">
+                {% if me.two_factor_totp_qr_data_uri %}
+                <div class="totp-qr-card">
+                  <h5>{{ t('account.two_factor_authenticator_qr') }}</h5>
+                  <img src="{{ me.two_factor_totp_qr_data_uri }}" alt="{{ t('account.two_factor_authenticator_qr') }}" class="totp-qr-image">
+                  <p class="muted small">{{ t('account.two_factor_authenticator_qr_hint') }}</p>
+                </div>
+                {% endif %}
+                <label>{{ t('account.two_factor_authenticator_setup_key') }}
+                  <input type="text" value="{{ me.two_factor_totp_pending_secret }}" readonly>
+                </label>
+                <label>{{ t('account.two_factor_authenticator_setup_uri') }}
+                  <input type="text" value="{{ me.two_factor_totp_pending_uri }}" readonly>
+                </label>
+                <label>{{ t('auth.two_factor_authenticator_code_label') }}
+                  <input type="text" name="code" inputmode="numeric" pattern="[0-9]{6}" minlength="6" maxlength="6" required>
+                </label>
+                {% if me.two_factor_email_enabled %}
+                <label>{{ t('account.two_factor_preferred_label') }}
+                  <select name="preferred_method">
+                    <option value="totp" {% if me.two_factor_preferred_method == "totp" or not me.two_factor_preferred_method %}selected{% endif %}>{{ t('account.two_factor_method_totp') }}</option>
+                    <option value="email" {% if me.two_factor_preferred_method == "email" %}selected{% endif %}>{{ t('account.two_factor_method_email') }}</option>
+                  </select>
+                </label>
+                {% else %}
+                <input type="hidden" name="preferred_method" value="totp">
+                {% endif %}
+                <button type="submit">{{ t('account.two_factor_authenticator_confirm_setup') }}</button>
+              </form>
+              <form method="post" action="{{ two_factor_totp_cancel_url }}" class="cardless-form top-gap">
+                <button type="submit" class="btn secondary">{{ t('modal.cancel') }}</button>
+              </form>
+              {% elif me.two_factor_totp_enabled %}
+              <div class="row-actions top-gap">
+                {% if me.two_factor_preferred_method == "totp" %}
+                <span class="badge">{{ t('account.two_factor_preferred_badge') }}</span>
+                {% endif %}
+                <form method="post" action="{{ two_factor_totp_disable_url }}" class="stack compact-stack" data-validate-form="1">
+                  <label>{{ t('account.current_password') }}
+                    <input type="password" name="current_password" required>
+                  </label>
+                  <button type="submit" class="btn secondary">{{ t('account.two_factor_authenticator_disable') }}</button>
+                </form>
+              </div>
+              {% else %}
+              <form method="post" action="{{ two_factor_totp_start_url }}" class="stack top-gap" data-validate-form="1">
+                <label>{{ t('account.current_password') }}
+                  <input type="password" name="current_password" required>
+                </label>
+                <button type="submit">{{ t('account.two_factor_authenticator_start') }}</button>
+              </form>
+              {% endif %}
+            </div>
+
+            {% if me.two_factor_enabled_methods|length > 1 %}
+            <div class="sub-card inset-card">
+              <h4>{{ t('account.two_factor_preferred_title') }}</h4>
+              <p class="muted small">{{ t('account.two_factor_preferred_hint') }}</p>
+              <form method="post" action="{{ two_factor_preference_url }}" class="stack">
+                <label>{{ t('account.two_factor_preferred_label') }}
+                  <select name="preferred_method">
+                    {% if me.two_factor_email_enabled %}
+                    <option value="email" {% if me.two_factor_preferred_method == "email" %}selected{% endif %}>{{ t('account.two_factor_method_email') }}</option>
+                    {% endif %}
+                    {% if me.two_factor_totp_enabled %}
+                    <option value="totp" {% if me.two_factor_preferred_method == "totp" %}selected{% endif %}>{{ t('account.two_factor_method_totp') }}</option>
+                    {% endif %}
+                  </select>
+                </label>
+                <button type="submit" class="btn secondary">{{ t('account.two_factor_preferred_save') }}</button>
+              </form>
+            </div>
             {% endif %}
+
             {% if not two_factor_toggle_url %}
             <p class="muted small">Endpoint 2FA indisponible. Redémarre le serveur pour charger la dernière version.</p>
             {% endif %}
@@ -192,6 +343,48 @@
       </ul>
       {% else %}
       <p class="muted">{{ t('account.integration_no_playlist') }}</p>
+      {% endif %}
+
+      <h3 class="top-gap">{{ t('account.import_workers_title') }}</h3>
+      <p class="muted">{{ t('account.import_workers_hint') }}</p>
+      {% if external_import_jobs %}
+      <ul class="playlist-list account-import-jobs">
+        {% for job in external_import_jobs %}
+        <li>
+          <div>
+            <strong>{{ job.local_playlist_name }}</strong>
+            <p class="muted small">{{ job.provider_name }} - {{ job.external_playlist_name }}</p>
+            <p class="muted small">{{ t('account.import_job_status_' ~ job.status) }}</p>
+            <p class="muted small">{{ t('account.import_job_progress', done=job.processed_tracks, total=job.total_tracks, percent=job.percent, added=job.added_count) }}</p>
+            {% if job.error %}
+            <p class="muted small">{{ t('playlist.import_failed', reason=job.error) }}</p>
+            {% endif %}
+          </div>
+          <div class="integration-actions">
+            {% if job.local_playlist_url %}
+            <a class="btn secondary" href="{{ job.local_playlist_url }}">{{ t('account.import_job_open_playlist') }}</a>
+            {% endif %}
+            {% if job.can_pause %}
+            <form method="post" action="{{ job.pause_url }}">
+              <button type="submit" class="btn secondary">{{ t('account.import_job_pause') }}</button>
+            </form>
+            {% endif %}
+            {% if job.can_resume %}
+            <form method="post" action="{{ job.resume_url }}">
+              <button type="submit" class="btn secondary">{{ t('account.import_job_resume') }}</button>
+            </form>
+            {% endif %}
+            {% if job.can_cancel %}
+            <form method="post" action="{{ job.cancel_url }}">
+              <button type="submit" class="btn-danger">{{ t('account.import_job_cancel') }}</button>
+            </form>
+            {% endif %}
+          </div>
+        </li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <p class="muted">{{ t('account.import_workers_none') }}</p>
       {% endif %}
     </section>
 
@@ -315,14 +508,16 @@
 {% if show_two_factor_prompt %}
 <div id="two-factor-suggest-modal" class="modal force-modal" aria-hidden="false" role="dialog" aria-modal="true">
   <div class="modal-card">
-    <h3>{{ t('account.two_factor_suggest_title') }}</h3>
-    <p>{{ t('account.two_factor_suggest_body') }}</p>
-    <p class="muted small">{{ t('account.two_factor_suggest_note') }}</p>
+    <h3>{{ t('account.recovery_setup_title') }}</h3>
+    <p>{{ t('account.recovery_setup_body') }}</p>
+    <p class="muted small">{{ t('account.recovery_setup_note') }}</p>
     <div class="row-actions top-gap">
       <form method="post" action="{{ two_factor_toggle_url or '#' }}">
+        <input type="hidden" name="method" value="email">
         <input type="hidden" name="action" value="enable">
-        <button type="submit" {% if not two_factor_toggle_url %}disabled{% endif %}>{{ t('account.two_factor_enable_cta') }}</button>
+        <button type="submit" {% if not two_factor_toggle_url %}disabled{% endif %}>{{ t('account.recovery_setup_enable_email_2fa') }}</button>
       </form>
+      <a href="#account-profile" class="btn secondary">{{ t('account.recovery_setup_add_backup_email') }}</a>
       <form method="post" action="{{ two_factor_dismiss_url or '#' }}">
         <button type="submit" class="btn secondary" {% if not two_factor_dismiss_url %}disabled{% endif %}>{{ t('account.two_factor_suggest_later') }}</button>
       </form>

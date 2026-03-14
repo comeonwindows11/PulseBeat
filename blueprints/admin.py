@@ -1,9 +1,15 @@
+import hashlib
+import html
+import os
+import shutil
 from datetime import datetime, timedelta
 from math import ceil
 
-from flask import Blueprint, current_app, flash, jsonify, redirect, render_template, request, url_for
+from flask import Blueprint, current_app, flash, jsonify, redirect, render_template, request, session, url_for
+from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
+from pymongo.errors import DuplicateKeyError, PyMongoError
 from werkzeug.routing import BuildError
-from werkzeug.security import generate_password_hash
+from werkzeug.security import check_password_hash, generate_password_hash
 
 import extensions
 from auth_helpers import (
@@ -19,13 +25,15 @@ from auth_helpers import (
     parse_object_id,
     password_policy_ok,
     password_pwned_status,
-    save_app_settings,
-    youtube_song_visibility_clause,
+    safe_mongo_update_one,
+    send_email_message,
     username_policy_ok,
+    youtube_song_visibility_clause,
 )
 from i18n import tr
 
 bp = Blueprint("admin", __name__, url_prefix="/admin")
+PLATFORM_RESET_REQUEST_KEY = "platform_reset_request"
 
 
 def create_audit_log(admin_user_id, action, target_type, target_id=None, details=None):
@@ -50,6 +58,174 @@ def _build_alert_key(prefix: str, status_doc: dict | None, primary_time_field: s
     else:
         timestamp_text = str(timestamp or "")
     return f"{prefix}:{timestamp_text}"
+
+
+def _platform_reset_serializer():
+    salt = current_app.config.get("PLATFORM_RESET_SALT", "pulsebeat-platform-reset")
+    return URLSafeTimedSerializer(current_app.secret_key, salt=salt)
+
+
+def _platform_reset_fingerprint(user, nonce: str):
+    raw = "|".join(
+        [
+            str((user or {}).get("_id", "")),
+            normalize_email((user or {}).get("email", "")),
+            str((user or {}).get("password_hash", "")),
+            str((user or {}).get("session_token_version", 0) or 0),
+            str(nonce or ""),
+        ]
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _build_platform_reset_link(user, nonce: str):
+    token = _platform_reset_serializer().dumps(
+        {
+            "uid": str((user or {}).get("_id", "")),
+            "nonce": str(nonce or ""),
+            "fp": _platform_reset_fingerprint(user, nonce),
+        }
+    )
+    base_url = current_app.config.get("APP_BASE_URL", "").strip()
+    if base_url:
+        return f"{base_url.rstrip('/')}{url_for('admin.confirm_platform_reset', token=token)}"
+    return url_for("admin.confirm_platform_reset", token=token, _external=True)
+
+
+def _send_platform_reset_email(user, link: str):
+    username = (user or {}).get("username", "admin")
+    expires_minutes = max(1, int(current_app.config.get("PLATFORM_RESET_TOKEN_MAX_AGE", 1800) / 60))
+    plain_text = (
+        f"{tr('admin.reset_email_greeting', username=username)}\n\n"
+        f"{tr('admin.reset_email_body')}\n{link}\n\n"
+        f"{tr('admin.reset_email_expiry', minutes=expires_minutes)}\n\n"
+        f"{tr('admin.reset_email_ignore')}"
+    )
+    html_body = f"""
+<!doctype html>
+<html>
+  <body style="margin:0;padding:0;background:#f4f6fb;font-family:Arial,Helvetica,sans-serif;color:#101828;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f4f6fb;padding:24px 0;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="640" cellspacing="0" cellpadding="0" style="max-width:640px;width:100%;background:#ffffff;border-radius:14px;overflow:hidden;border:1px solid #e3eaf3;">
+            <tr>
+              <td style="background:linear-gradient(135deg,#ff8a1f,#ff4f4f);padding:20px 28px;color:#fff;font-size:22px;font-weight:700;">PulseBeat</td>
+            </tr>
+            <tr>
+              <td style="padding:28px;">
+                <h1 style="margin:0 0 14px 0;font-size:22px;line-height:1.3;color:#101828;">{html.escape(tr('admin.reset_email_subject'))}</h1>
+                <p style="margin:0 0 12px 0;font-size:15px;line-height:1.6;">{html.escape(tr('admin.reset_email_greeting', username=username))}</p>
+                <p style="margin:0 0 18px 0;font-size:15px;line-height:1.6;">{html.escape(tr('admin.reset_email_body'))}</p>
+                <p style="margin:0 0 22px 0;">
+                  <a href="{html.escape(link)}" style="display:inline-block;background:#dc2626;color:#ffffff;text-decoration:none;padding:12px 18px;border-radius:10px;font-size:14px;font-weight:700;">{html.escape(tr('admin.reset_email_cta'))}</a>
+                </p>
+                <p style="margin:0 0 8px 0;font-size:13px;line-height:1.5;color:#5b6472;">{html.escape(tr('admin.reset_email_expiry', minutes=expires_minutes))}</p>
+                <p style="margin:0;font-size:13px;line-height:1.5;color:#5b6472;">{html.escape(tr('admin.reset_email_ignore'))}</p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>
+"""
+    return send_email_message((user or {}).get("email", ""), tr("admin.reset_email_subject"), plain_text, html_body)
+
+
+def _queue_platform_reset_request(user):
+    now = datetime.utcnow()
+    expires_at = now + timedelta(seconds=int(current_app.config.get("PLATFORM_RESET_TOKEN_MAX_AGE", 1800) or 1800))
+    nonce = os.urandom(24).hex()
+    token_hash = hashlib.sha256(nonce.encode("utf-8")).hexdigest()
+    safe_mongo_update_one(
+        extensions.users_col,
+        {"_id": user.get("_id")},
+        {"$set": {PLATFORM_RESET_REQUEST_KEY: {"token_hash": token_hash, "created_at": now, "expires_at": expires_at}}},
+    )
+    return _build_platform_reset_link(user, nonce)
+
+
+def _load_platform_reset_request(token: str):
+    max_age = int(current_app.config.get("PLATFORM_RESET_TOKEN_MAX_AGE", 1800))
+    try:
+        payload = _platform_reset_serializer().loads(token, max_age=max_age)
+    except (SignatureExpired, BadSignature):
+        return None, "", tr("flash.admin.reset_invalid")
+
+    user_oid = parse_object_id(payload.get("uid", ""))
+    nonce = str(payload.get("nonce", "") or "").strip()
+    if not user_oid or not nonce:
+        return None, "", tr("flash.admin.reset_invalid")
+
+    user = extensions.users_col.find_one({"_id": user_oid})
+    if not user or not user.get("is_root_admin", False):
+        return None, "", tr("flash.admin.reset_invalid")
+
+    if payload.get("fp") != _platform_reset_fingerprint(user, nonce):
+        return None, "", tr("flash.admin.reset_invalid")
+
+    request_doc = (user or {}).get(PLATFORM_RESET_REQUEST_KEY) or {}
+    expires_at = request_doc.get("expires_at")
+    if not request_doc or not isinstance(expires_at, datetime) or expires_at <= datetime.utcnow():
+        return None, "", tr("flash.admin.reset_invalid")
+
+    token_hash = hashlib.sha256(nonce.encode("utf-8")).hexdigest()
+    if str(request_doc.get("token_hash", "") or "") != token_hash:
+        return None, "", tr("flash.admin.reset_invalid")
+
+    return user, token_hash, ""
+
+
+def _clear_platform_reset_request(user_oid):
+    safe_mongo_update_one(extensions.users_col, {"_id": user_oid}, {"$unset": {PLATFORM_RESET_REQUEST_KEY: ""}})
+
+
+def _remove_uploaded_audio_files():
+    upload_dir = current_app.config.get("UPLOAD_DIR", "")
+    if not upload_dir or not os.path.isdir(upload_dir):
+        return
+    for entry in os.scandir(upload_dir):
+        if entry.is_file() or entry.is_symlink():
+            os.unlink(entry.path)
+        elif entry.is_dir():
+            shutil.rmtree(entry.path)
+    os.makedirs(upload_dir, exist_ok=True)
+
+
+def _perform_platform_reset():
+    _remove_uploaded_audio_files()
+    extensions.mongo_client.drop_database(current_app.config["MONGO_DB_NAME"])
+
+
+def _get_root_admin_or_redirect():
+    admin_oid = get_session_user_oid()
+    admin_user = extensions.users_col.find_one({"_id": admin_oid})
+    if not admin_user or not admin_user.get("is_root_admin", False):
+        flash(tr("flash.admin.only_root_settings"), "danger")
+        return None
+    return admin_user
+
+
+def _email_in_use_anywhere(email: str) -> bool:
+    normalized = normalize_email(email)
+    if not normalized:
+        return False
+    return (
+        extensions.users_col.find_one(
+            {
+                "$or": [
+                    {"email_normalized": normalized},
+                    {"backup_email_normalized": normalized},
+                    {"pending_backup_email_normalized": normalized},
+                    {"pending_email_change_normalized": normalized},
+                ]
+            },
+            {"_id": 1},
+        )
+        is not None
+    )
 
 
 @bp.route("")
@@ -121,6 +297,22 @@ def dashboard():
         and moderation_alert_key
         and moderation_alert_key not in dismissed_admin_alerts
     )
+    weak_recovery_accounts_count = extensions.users_col.count_documents(
+        {
+            "auth_provider": {"$ne": "google"},
+            "$and": [
+                {"$or": [{"two_factor_enabled": False}, {"two_factor_enabled": {"$exists": False}}]},
+                {
+                    "$or": [
+                        {"backup_email_verified": False},
+                        {"backup_email_verified": {"$exists": False}},
+                        {"backup_email_normalized": ""},
+                        {"backup_email_normalized": {"$exists": False}},
+                    ]
+                },
+            ],
+        }
+    )
     youtube_integration_enabled = is_youtube_integration_enabled(True)
     try:
         youtube_toggle_url = url_for("admin.set_youtube_toggle")
@@ -152,6 +344,7 @@ def dashboard():
         moderation_alert_key=moderation_alert_key,
         show_password_alert=show_password_alert,
         show_moderation_alert=show_moderation_alert,
+        weak_recovery_accounts_count=weak_recovery_accounts_count,
         youtube_integration_enabled=youtube_integration_enabled,
         youtube_toggle_url=youtube_toggle_url,
     )
@@ -160,11 +353,10 @@ def dashboard():
 @bp.route("/youtube-toggle", methods=["POST"])
 @admin_required
 def set_youtube_toggle():
-    admin_oid = get_session_user_oid()
-    admin_user = extensions.users_col.find_one({"_id": admin_oid}, {"is_root_admin": 1})
-    if not admin_user or not admin_user.get("is_root_admin", False):
-        flash(tr("flash.admin.only_root_settings"), "danger")
+    admin_user = _get_root_admin_or_redirect()
+    if not admin_user:
         return redirect(url_for("admin.dashboard"))
+    admin_oid = admin_user["_id"]
 
     enabled = request.form.get("enable_youtube_integration", "0") == "1"
     save_app_settings({"enable_youtube_integration": enabled})
@@ -177,6 +369,95 @@ def set_youtube_toggle():
     )
     flash(tr("flash.admin.youtube_settings_saved_enabled" if enabled else "flash.admin.youtube_settings_saved_disabled"), "success")
     return redirect(url_for("admin.dashboard"))
+
+
+@bp.route("/reset/request", methods=["POST"])
+@admin_required
+def request_platform_reset():
+    admin_user = _get_root_admin_or_redirect()
+    if not admin_user:
+        return redirect(url_for("admin.dashboard"))
+
+    if str(admin_user.get("auth_provider", "local") or "local").strip().lower() == "google":
+        flash(tr("flash.admin.reset_local_only"), "danger")
+        return redirect(url_for("admin.dashboard"))
+
+    password = request.form.get("current_password", "")
+    if not password or not check_password_hash(str(admin_user.get("password_hash", "")), password):
+        flash(tr("flash.admin.reset_password_invalid"), "danger")
+        return redirect(url_for("admin.dashboard"))
+
+    try:
+        reset_link = _queue_platform_reset_request(admin_user)
+        if not _send_platform_reset_email(admin_user, reset_link):
+            _clear_platform_reset_request(admin_user["_id"])
+            flash(tr("flash.admin.reset_email_failed"), "danger")
+            return redirect(url_for("admin.dashboard"))
+    except Exception as exc:
+        current_app.logger.exception("Unable to queue platform reset", exc_info=exc)
+        _clear_platform_reset_request(admin_user["_id"])
+        flash(tr("flash.admin.reset_email_failed"), "danger")
+        return redirect(url_for("admin.dashboard"))
+
+    create_audit_log(admin_user["_id"], "request_platform_reset", "platform", "global")
+    flash(tr("flash.admin.reset_email_sent"), "warning")
+    return redirect(url_for("admin.dashboard"))
+
+
+@bp.route("/reset/confirm/<token>", methods=["GET"])
+def confirm_platform_reset(token):
+    user, _token_hash, error = _load_platform_reset_request(token)
+    if error:
+        flash(error, "danger")
+        return redirect(url_for("accounts.login"))
+
+    return render_template(
+        "admin/reset_confirm.jinja",
+        reset_token=token,
+        reset_owner={"username": user.get("username", "admin"), "email": user.get("email", "")},
+    )
+
+
+@bp.route("/reset/cancel/<token>", methods=["POST"])
+def cancel_platform_reset(token):
+    user, _token_hash, error = _load_platform_reset_request(token)
+    if error:
+        flash(error, "danger")
+        return redirect(url_for("accounts.login"))
+
+    _clear_platform_reset_request(user["_id"])
+    create_audit_log(user["_id"], "cancel_platform_reset", "platform", "global")
+    flash(tr("flash.admin.reset_cancelled"), "info")
+    return redirect(url_for("admin.dashboard"))
+
+
+@bp.route("/reset/execute/<token>", methods=["POST"])
+def execute_platform_reset(token):
+    user, token_hash, error = _load_platform_reset_request(token)
+    if error:
+        return jsonify({"ok": False, "message": error}), 400
+
+    consume_result = safe_mongo_update_one(
+        extensions.users_col,
+        {"_id": user["_id"], f"{PLATFORM_RESET_REQUEST_KEY}.token_hash": token_hash},
+        {"$unset": {PLATFORM_RESET_REQUEST_KEY: ""}},
+    )
+    if not consume_result or int(getattr(consume_result, "matched_count", 0) or 0) <= 0:
+        return jsonify({"ok": False, "message": tr("flash.admin.reset_invalid")}), 409
+
+    try:
+        current_app.logger.warning("PulseBeat platform reset triggered by root admin %s", user.get("email", "unknown"))
+        _perform_platform_reset()
+        session.clear()
+        return jsonify({"ok": True, "message": tr("admin.reset_complete_body")})
+    except PyMongoError as exc:
+        current_app.logger.exception("Database reset failed", exc_info=exc)
+    except OSError as exc:
+        current_app.logger.exception("File cleanup failed during platform reset", exc_info=exc)
+    except Exception as exc:
+        current_app.logger.exception("Unexpected platform reset failure", exc_info=exc)
+
+    return jsonify({"ok": False, "message": tr("admin.reset_execute_failed")}), 500
 
 
 @bp.route("/create-admin", methods=["POST"])
@@ -207,29 +488,57 @@ def create_admin():
     if status == "pwned":
         flash(tr("flash.accounts.password_compromised"), "danger")
         return redirect(url_for("admin.dashboard"))
-    if extensions.users_col.find_one({"email_normalized": normalize_email(email)}):
+    if _email_in_use_anywhere(email):
         flash(tr("flash.accounts.email_exists"), "danger")
         return redirect(url_for("admin.dashboard"))
 
-    user_id = extensions.users_col.insert_one(
-        {
-            "username": username,
-            "username_normalized": normalize_username(username),
-            "email": email,
-            "email_normalized": normalize_email(email),
-            "password_hash": generate_password_hash(password),
-            "is_admin": True,
-            "is_root_admin": False,
-            "require_password_change": False,
-            "auth_provider": "local",
-            "email_verified": True,
-            "email_verified_at": datetime.utcnow(),
-            "email_verification_sent_at": None,
-            "two_factor_enabled": False,
-            "two_factor_prompt_pending": True,
-            "created_at": datetime.utcnow(),
-        }
-    ).inserted_id
+    try:
+        user_id = extensions.users_col.insert_one(
+            {
+                "username": username,
+                "username_normalized": normalize_username(username),
+                "email": email,
+                "email_normalized": normalize_email(email),
+                "password_hash": generate_password_hash(password),
+                "is_admin": True,
+                "is_root_admin": False,
+                "require_password_change": False,
+                "auth_provider": "local",
+                "email_verified": True,
+                "email_verified_at": datetime.utcnow(),
+                "email_verification_sent_at": None,
+                "two_factor_enabled": False,
+                "two_factor_email_enabled": False,
+                "two_factor_totp_enabled": False,
+                "two_factor_totp_secret": "",
+                "two_factor_totp_pending_secret": "",
+                "two_factor_totp_pending_created_at": None,
+                "two_factor_preferred_method": "",
+                "two_factor_prompt_pending": True,
+                "backup_email": "",
+                "backup_email_normalized": "",
+                "backup_email_verified": False,
+                "backup_email_verified_at": None,
+                "backup_email_verification_sent_at": None,
+                "pending_backup_email": "",
+                "pending_backup_email_normalized": "",
+                "pending_backup_email_requested_at": None,
+                "pending_email_change": "",
+                "pending_email_change_normalized": "",
+                "pending_email_change_requested_at": None,
+                "created_at": datetime.utcnow(),
+            }
+        ).inserted_id
+    except DuplicateKeyError:
+        if extensions.users_col.find_one({"username_normalized": normalize_username(username)}):
+            flash(tr("flash.accounts.username_exists"), "danger")
+        else:
+            flash(tr("flash.accounts.email_exists"), "danger")
+        return redirect(url_for("admin.dashboard"))
+    except PyMongoError:
+        current_app.logger.warning("Unable to create admin account", exc_info=True)
+        flash(tr("errors.503.msg"), "warning")
+        return redirect(url_for("admin.dashboard"))
     create_audit_log(get_session_user_oid(), "create_admin", "user", user_id, {"email": email})
     flash(tr("flash.admin.created"), "success")
     return redirect(url_for("admin.dashboard"))

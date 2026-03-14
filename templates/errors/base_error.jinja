@@ -30,17 +30,26 @@
   const dino = { x: 56, y: groundY - 40, w: 30, h: 40, vy: 0, jump: false };
   const obstacles = [];
 
-  let speed = 5;
+  let speed = 4.7;
   let score = 0;
   let over = false;
   let started = false;
   let startedOnce = false;
   let frame = 0;
+  let spawnCooldown = 22;
 
   function spawn() {
-    if (Math.random() < 0.02) {
+    if (spawnCooldown > 0) {
+      spawnCooldown -= 1;
+      return;
+    }
+
+    const difficulty = Math.min(1, score / 2200);
+    const spawnChance = 0.18 + difficulty * 0.18;
+    if (Math.random() < spawnChance) {
       const scale = 0.9 + Math.random() * 0.4;
       obstacles.push({ x: w + 20, y: groundY - 30 * scale, w: 22 * scale, h: 30 * scale });
+      spawnCooldown = Math.floor(Math.max(26, 56 - difficulty * 20) + Math.random() * 18);
     }
   }
 
@@ -49,10 +58,11 @@
     dino.y = groundY - dino.h;
     dino.vy = 0;
     dino.jump = false;
-    speed = 5;
+    speed = 4.7;
     score = 0;
     over = false;
     frame = 0;
+    spawnCooldown = 22;
   }
 
   function restartFromGameOver() {
@@ -103,7 +113,15 @@
     }
 
     score += 1;
-    if (score % 450 === 0) speed += 0.2;
+    speed = getRunSpeed(score);
+  }
+
+  function getRunSpeed(currentScore) {
+    const pre5000Blend = Math.min(1, currentScore / 5000);
+    const earlySpeed = 4.7 + pre5000Blend * 1.9;
+    if (currentScore < 6000) return earlySpeed;
+    const extraSteps = Math.floor((currentScore - 5000) / 1000);
+    return earlySpeed + extraSteps * 0.28;
   }
 
   function drawDino(x, y, runningStep, isJumping) {

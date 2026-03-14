@@ -1,0 +1,682 @@
+{% extends "layout/base.jinja" %}
+{% block title %}418 - I'm a teapot - {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="auth-wrap">
+  <div class="card dino-easter-card">
+    <p class="dino-easter-badge">{{ t('errors.easter_egg_badge') }}</p>
+    <h1>{{ t('errors.easter_egg_title') }}</h1>
+    <h2>{{ t('errors.418.title') }}</h2>
+    <p>{{ t('errors.easter_egg_msg') }}</p>
+    <p class="muted">{{ t('errors.418.msg') }}</p>
+
+    <canvas
+      id="dino-easter-game"
+      width="960"
+      height="260"
+      class="dino-canvas dino-easter-canvas"
+      aria-label="{{ t('errors.easter_egg_help') }}"
+    ></canvas>
+
+    <div class="dino-easter-meta">
+      <p class="muted small">{{ t('errors.easter_egg_help') }}</p>
+      <div class="dino-easter-controls">
+        <button type="button" id="dino-robot-toggle" class="btn secondary dino-robot-btn">{{ t('errors.easter_egg_robot_enable') }}</button>
+        <p id="dino-robot-status" class="muted small">{{ t('errors.easter_egg_robot_status_off') }}</p>
+      </div>
+      <p class="muted small">{{ t('errors.easter_egg_robot_hint') }}</p>
+      <p class="muted small">{{ t('errors.easter_egg_secret') }}</p>
+    </div>
+
+    <div class="row-actions">
+      <a class="btn" href="{{ url_for('main.index') }}">{{ t('errors.back_home') }}</a>
+      {% if not current_user %}
+      <a class="btn secondary" href="{{ url_for('accounts.login') }}">{{ t('nav.login') }}</a>
+      {% endif %}
+    </div>
+  </div>
+</section>
+
+<script>
+(function () {
+  const canvas = document.getElementById("dino-easter-game");
+  if (!canvas) return;
+
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width;
+  const h = canvas.height;
+  const groundY = h - 34;
+  const storageKey = "pulsebeat_dino_easter_best";
+  const labels = {
+    start: {{ t('errors.easter_egg_label_start')|tojson }},
+    over: {{ t('errors.easter_egg_label_over')|tojson }},
+    score: {{ t('errors.easter_egg_label_score')|tojson }},
+    best: {{ t('errors.easter_egg_label_best')|tojson }},
+    speed: {{ t('errors.easter_egg_label_speed')|tojson }},
+    jump: {{ t('errors.easter_egg_label_jump')|tojson }},
+    duck: {{ t('errors.easter_egg_label_duck')|tojson }},
+    bonus: {{ t('errors.easter_egg_label_bonus')|tojson }},
+    robot: {{ t('errors.easter_egg_label_robot')|tojson }},
+    robotOn: {{ t('errors.easter_egg_robot_status_on')|tojson }},
+    robotOff: {{ t('errors.easter_egg_robot_status_off')|tojson }},
+    robotEnable: {{ t('errors.easter_egg_robot_enable')|tojson }},
+    robotDisable: {{ t('errors.easter_egg_robot_disable')|tojson }}
+  };
+  const robotToggleButton = document.getElementById("dino-robot-toggle");
+  const robotStatus = document.getElementById("dino-robot-status");
+
+  const dino = {
+    x: 88,
+    y: groundY - 54,
+    w: 42,
+    h: 54,
+    baseH: 54,
+    duckH: 32,
+    vy: 0,
+    jumping: false,
+    ducking: false,
+    blink: 0
+  };
+
+  let started = false;
+  let over = false;
+  let frame = 0;
+  let score = 0;
+  let best = Number.parseInt(window.localStorage.getItem(storageKey) || "0", 10) || 0;
+  let speed = 5.4;
+  let spawnCooldown = 0;
+  let robotEnabled = false;
+  let robotRestartCooldown = 0;
+
+  const obstacles = [];
+  const collectibles = [];
+  const particles = [];
+  const clouds = Array.from({ length: 5 }, (_, index) => ({
+    x: 120 + index * 180,
+    y: 30 + (index % 2) * 18,
+    w: 40 + (index % 3) * 16
+  }));
+  const hills = Array.from({ length: 4 }, (_, index) => ({
+    x: index * 260,
+    w: 180 + index * 20,
+    h: 36 + (index % 3) * 10
+  }));
+  const stars = Array.from({ length: 32 }, () => ({
+    x: Math.random() * w,
+    y: Math.random() * (groundY - 80),
+    r: 1 + Math.random() * 1.8
+  }));
+
+  function resetRun() {
+    started = false;
+    over = false;
+    frame = 0;
+    score = 0;
+    speed = 5.4;
+    spawnCooldown = 16;
+    obstacles.length = 0;
+    collectibles.length = 0;
+    particles.length = 0;
+    dino.h = dino.baseH;
+    dino.w = 42;
+    dino.y = groundY - dino.h;
+    dino.vy = 0;
+    dino.jumping = false;
+    dino.ducking = false;
+    robotRestartCooldown = 0;
+  }
+
+  function startRun() {
+    if (!started) {
+      started = true;
+      over = false;
+      return;
+    }
+    if (over) {
+      resetRun();
+      started = true;
+      return;
+    }
+    if (!dino.jumping) {
+      dino.jumping = true;
+      dino.vy = -13.2;
+      createDust(dino.x + 10, groundY - 4, 5, "#ffd2a7");
+    }
+  }
+
+  function setDuck(active) {
+    if (!started || over || dino.jumping) return;
+    dino.ducking = active;
+    dino.h = active ? dino.duckH : dino.baseH;
+    dino.w = active ? 54 : 42;
+    dino.y = groundY - dino.h;
+  }
+
+  function updateRobotUI() {
+    if (robotToggleButton) {
+      robotToggleButton.textContent = robotEnabled ? labels.robotDisable : labels.robotEnable;
+      robotToggleButton.classList.toggle("active", robotEnabled);
+    }
+    if (robotStatus) {
+      robotStatus.textContent = robotEnabled ? labels.robotOn : labels.robotOff;
+      robotStatus.classList.toggle("robot-on", robotEnabled);
+      robotStatus.classList.toggle("robot-off", !robotEnabled);
+    }
+  }
+
+  function setRobotEnabled(nextValue) {
+    robotEnabled = Boolean(nextValue);
+    if (!robotEnabled) setDuck(false);
+    updateRobotUI();
+  }
+
+  function nextObstacle() {
+    let nearest = null;
+    let bestDistance = Infinity;
+    for (const obstacle of obstacles) {
+      const distance = obstacle.x - (dino.x + dino.w);
+      if (distance < -18) continue;
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        nearest = obstacle;
+      }
+    }
+    return nearest;
+  }
+
+  function robotStep() {
+    if (!robotEnabled) return;
+
+    if (!started) {
+      startRun();
+      return;
+    }
+
+    if (over) {
+      robotRestartCooldown += 1;
+      if (robotRestartCooldown > 45) {
+        startRun();
+      }
+      return;
+    }
+
+    const obstacle = nextObstacle();
+    if (!obstacle) {
+      if (!dino.jumping) setDuck(false);
+      return;
+    }
+
+    const distance = obstacle.x - (dino.x + dino.w);
+    const isBarrier = obstacle.type === "barrier";
+    const standingHitboxTop = groundY - dino.baseH + 4;
+    const flyingNeedsDuck = obstacle.type === "ptero" && (obstacle.y + obstacle.h) >= (standingHitboxTop - 4);
+    const jumpThreshold = 90 + speed * 4.8 + obstacle.w * 0.35;
+    const standingFront = dino.x + 42;
+    const frontDistance = obstacle.x - standingFront;
+    const tailDistance = (obstacle.x + obstacle.w) - (dino.x + 10);
+    const duckLeadFrames = isBarrier ? 6.8 : 5.6;
+    const duckStartDistance = speed * duckLeadFrames;
+    const duckReleaseDistance = isBarrier ? -6 : -4;
+
+    if ((flyingNeedsDuck || isBarrier) && !dino.jumping && frontDistance < duckStartDistance && tailDistance > duckReleaseDistance) {
+      setDuck(true);
+      return;
+    }
+
+    if (!dino.jumping) setDuck(false);
+
+    if (obstacle.type === "cactus" && distance < jumpThreshold && distance > -10) {
+      if (!dino.jumping) {
+        startRun();
+      }
+    }
+  }
+
+  function createDust(x, y, count, color) {
+    for (let i = 0; i < count; i += 1) {
+      particles.push({
+        x,
+        y,
+        vx: -1.5 - Math.random() * 2.5,
+        vy: -0.5 - Math.random() * 2,
+        life: 20 + Math.random() * 10,
+        color
+      });
+    }
+  }
+
+  function spawnEntity() {
+    if (spawnCooldown > 0) {
+      spawnCooldown -= 1;
+      return;
+    }
+
+    const difficulty = Math.min(1, score / 3200);
+    const canSpawnBarrier = score >= 1000;
+    const roll = Math.random();
+    if (roll < (canSpawnBarrier ? 0.62 : 0.74)) {
+      const scale = 0.85 + Math.random() * 0.65;
+      let cluster = 1;
+      if (score >= 450 && Math.random() < (0.05 + difficulty * 0.18)) cluster = 2;
+      if (score >= 1800 && Math.random() < (0.02 + difficulty * 0.1)) cluster = 3;
+      for (let i = 0; i < cluster; i += 1) {
+        const offset = i * (24 * scale + 10);
+        obstacles.push({
+          type: "cactus",
+          x: w + 30 + offset,
+          y: groundY - 38 * scale,
+          w: 24 * scale,
+          h: 38 * scale
+        });
+      }
+      if (Math.random() < 0.22) {
+        collectibles.push({
+          type: "tea",
+          x: w + 60,
+          y: groundY - 95 - Math.random() * 25,
+          w: 18,
+          h: 18
+        });
+      }
+      spawnCooldown = Math.max(30, 62 - difficulty * 18) + Math.random() * 24;
+      return;
+    }
+
+    if (canSpawnBarrier && roll < 0.84) {
+      obstacles.push({
+        type: "barrier",
+        x: w + 30,
+        y: groundY - 44,
+        w: 62,
+        h: 14
+      });
+      spawnCooldown = Math.max(34, 58 - difficulty * 12) + Math.random() * 22;
+      return;
+    }
+
+    obstacles.push({
+      type: "ptero",
+      x: w + 30,
+      y: groundY - (Math.random() < 0.5 ? 92 : 128),
+      w: 42,
+      h: 24,
+      flap: 0
+    });
+    spawnCooldown = Math.max(36, 64 - difficulty * 14) + Math.random() * 24;
+  }
+
+  function obstacleHitbox(o) {
+    if (o.type === "barrier") {
+      return { x: o.x + 6, y: o.y + 2, w: o.w - 12, h: o.h - 4 };
+    }
+    if (o.type === "ptero") {
+      return { x: o.x + 4, y: o.y + 4, w: o.w - 8, h: o.h - 8 };
+    }
+    return { x: o.x + 3, y: o.y + 2, w: o.w - 6, h: o.h - 4 };
+  }
+
+  function dinoHitbox() {
+    return {
+      x: dino.x + 6,
+      y: dino.y + 4,
+      w: dino.w - 10,
+      h: dino.h - 8
+    };
+  }
+
+  function intersects(a, b) {
+    return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+  }
+
+  function update() {
+    frame += 1;
+
+    clouds.forEach((cloud, index) => {
+      cloud.x -= 0.6 + index * 0.05;
+      if (cloud.x + cloud.w < -20) cloud.x = w + 30 + Math.random() * 70;
+    });
+    hills.forEach((hill) => {
+      hill.x -= speed * 0.12;
+      if (hill.x + hill.w < -30) hill.x = w + Math.random() * 120;
+    });
+
+    particles.forEach((particle) => {
+      particle.x += particle.vx;
+      particle.y += particle.vy;
+      particle.vy += 0.08;
+      particle.life -= 1;
+    });
+    for (let i = particles.length - 1; i >= 0; i -= 1) {
+      if (particles[i].life <= 0) particles.splice(i, 1);
+    }
+
+    if (!started || over) return;
+
+    dino.blink = (dino.blink + 1) % 180;
+    dino.vy += 0.62;
+    dino.y += dino.vy;
+    if (dino.y >= groundY - dino.h) {
+      if (dino.jumping) createDust(dino.x + 12, groundY - 4, 4, "#9ac6ff");
+      dino.y = groundY - dino.h;
+      dino.vy = 0;
+      dino.jumping = false;
+    }
+
+    spawnEntity();
+
+    for (let i = obstacles.length - 1; i >= 0; i -= 1) {
+      const o = obstacles[i];
+      o.x -= speed;
+      if (o.type === "ptero") o.flap += 1;
+      if (o.x + o.w < -30) obstacles.splice(i, 1);
+    }
+
+    for (let i = collectibles.length - 1; i >= 0; i -= 1) {
+      const c = collectibles[i];
+      c.x -= speed;
+      if (c.x + c.w < -20) collectibles.splice(i, 1);
+    }
+
+    const dinoBox = dinoHitbox();
+    for (const obstacle of obstacles) {
+      if (intersects(dinoBox, obstacleHitbox(obstacle))) {
+        over = true;
+        createDust(dino.x + dino.w * 0.5, dino.y + dino.h * 0.55, 18, "#ff7a18");
+        if (score > best) {
+          best = score;
+          window.localStorage.setItem(storageKey, String(best));
+        }
+        return;
+      }
+    }
+
+    for (let i = collectibles.length - 1; i >= 0; i -= 1) {
+      const tea = collectibles[i];
+      if (intersects(dinoBox, tea)) {
+        collectibles.splice(i, 1);
+        score += 120;
+        createDust(tea.x, tea.y, 12, "#ffd68a");
+      }
+    }
+
+    score += 1;
+    if (score > best) {
+      best = score;
+      window.localStorage.setItem(storageKey, String(best));
+    }
+    speed = getRunSpeed(score);
+  }
+
+  function getRunSpeed(currentScore) {
+    const pre5000Blend = Math.min(1, currentScore / 5000);
+    const earlySpeed = 5.4 + pre5000Blend * 2.7;
+    if (currentScore < 6000) return earlySpeed;
+    const extraSteps = Math.floor((currentScore - 5000) / 1000);
+    return earlySpeed + extraSteps * 0.38;
+  }
+
+  function drawBackground() {
+    const nightBlend = Math.min(0.72, Math.max(0, (score - 700) / 1400));
+    const sky = ctx.createLinearGradient(0, 0, 0, h);
+    sky.addColorStop(0, nightBlend > 0.1 ? "#09152a" : "#102244");
+    sky.addColorStop(1, nightBlend > 0.1 ? "#142545" : "#1c3768");
+    ctx.fillStyle = sky;
+    ctx.fillRect(0, 0, w, h);
+
+    ctx.globalAlpha = 0.18 + nightBlend * 0.5;
+    ctx.fillStyle = "#ffffff";
+    stars.forEach((star) => {
+      ctx.beginPath();
+      ctx.arc(star.x, star.y, star.r, 0, Math.PI * 2);
+      ctx.fill();
+    });
+    ctx.globalAlpha = 1;
+
+    ctx.fillStyle = nightBlend > 0.1 ? "#e8e2a8" : "#ffd28f";
+    ctx.beginPath();
+    ctx.arc(w - 120, 58, 26, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = "rgba(255,255,255,0.18)";
+    clouds.forEach((cloud) => {
+      ctx.beginPath();
+      ctx.arc(cloud.x, cloud.y, 16, 0, Math.PI * 2);
+      ctx.arc(cloud.x + 16, cloud.y - 8, 20, 0, Math.PI * 2);
+      ctx.arc(cloud.x + 34, cloud.y, 16, 0, Math.PI * 2);
+      ctx.fill();
+    });
+
+    hills.forEach((hill, index) => {
+      ctx.fillStyle = index % 2 ? "rgba(62,96,146,0.42)" : "rgba(42,72,118,0.45)";
+      ctx.beginPath();
+      ctx.moveTo(hill.x, groundY);
+      ctx.quadraticCurveTo(hill.x + hill.w * 0.5, groundY - hill.h, hill.x + hill.w, groundY);
+      ctx.closePath();
+      ctx.fill();
+    });
+
+    ctx.strokeStyle = "#7ba4ea";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(0, groundY);
+    ctx.lineTo(w, groundY);
+    ctx.stroke();
+
+    ctx.strokeStyle = "rgba(154, 198, 255, 0.35)";
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    for (let x = -((frame * speed) % 34); x <= w + 34; x += 34) {
+      ctx.moveTo(x, groundY + 8);
+      ctx.lineTo(x + 20, groundY + 8);
+    }
+    ctx.stroke();
+  }
+
+  function drawDino() {
+    const runningStep = Math.floor(frame / 6) % 2;
+    ctx.save();
+    ctx.translate(dino.x, dino.y);
+
+    ctx.fillStyle = "#f6ddb8";
+    if (dino.ducking && !dino.jumping) {
+      ctx.fillRect(6, 14, 34, 16);
+      ctx.fillRect(26, 8, 12, 10);
+      ctx.fillRect(38, 10, 10, 8);
+      ctx.fillRect(3, 18, 6, 7);
+    } else {
+      ctx.fillRect(10, 18, 20, 22);
+      ctx.fillRect(23, 8, 10, 12);
+      ctx.fillRect(31, 5, 10, 10);
+      ctx.fillRect(4, 23, 7, 7);
+      ctx.fillRect(12, 39, 6, 11 - (dino.jumping ? 0 : runningStep * 2));
+      ctx.fillRect(23, 39, 6, 11 - (dino.jumping ? 0 : (1 - runningStep) * 2));
+      ctx.fillRect(11, 50, 8, 3);
+      ctx.fillRect(22, 50, 8, 3);
+    }
+
+    ctx.fillRect(15, 24, 5, 4);
+    ctx.fillRect(12, 26, 3, 3);
+    ctx.fillRect(0, 26, 4, 4);
+    ctx.fillRect(-2, 28, 2, 2);
+    ctx.fillRect(8, 34, 3, 3);
+
+    ctx.fillStyle = dino.blink < 12 ? "#ffffff" : "#11203d";
+    if (dino.ducking && !dino.jumping) {
+      ctx.fillRect(44, 12, 2, 2);
+    } else {
+      ctx.fillRect(38, 10, 2, 2);
+    }
+
+    ctx.restore();
+  }
+
+  function drawCactus(o) {
+    ctx.save();
+    ctx.translate(o.x, o.y);
+    ctx.fillStyle = "#56b96a";
+    const trunkW = Math.max(10, o.w * 0.34);
+    const trunkX = (o.w - trunkW) / 2;
+    ctx.fillRect(trunkX, 0, trunkW, o.h);
+    ctx.fillRect(trunkX - 7, o.h * 0.32, 7, o.h * 0.34);
+    ctx.fillRect(trunkX - 7, o.h * 0.32, 5, 8);
+    ctx.fillRect(trunkX + trunkW, o.h * 0.42, 7, o.h * 0.28);
+    ctx.fillRect(trunkX + trunkW + 2, o.h * 0.42, 5, 8);
+    ctx.strokeStyle = "rgba(9, 37, 18, 0.34)";
+    ctx.strokeRect(trunkX + 0.5, 0.5, trunkW - 1, o.h - 1);
+    ctx.restore();
+  }
+
+  function drawPtero(o) {
+    const wingUp = Math.floor(o.flap / 6) % 2 === 0;
+    ctx.save();
+    ctx.translate(o.x, o.y);
+    ctx.fillStyle = "#9fd0ff";
+    ctx.beginPath();
+    ctx.moveTo(4, 12);
+    ctx.lineTo(18, wingUp ? 0 : 8);
+    ctx.lineTo(24, 10);
+    ctx.lineTo(31, 5);
+    ctx.lineTo(38, 12);
+    ctx.lineTo(32, wingUp ? 22 : 17);
+    ctx.lineTo(22, 15);
+    ctx.lineTo(16, 22);
+    ctx.lineTo(11, 16);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = "#0f1f3d";
+    ctx.fillRect(31, 9, 2, 2);
+    ctx.restore();
+  }
+
+  function drawBarrier(o) {
+    ctx.save();
+    ctx.translate(o.x, o.y);
+    ctx.fillStyle = "#ff9c53";
+    ctx.fillRect(0, 0, o.w, o.h);
+    ctx.fillStyle = "#ffd8b3";
+    ctx.fillRect(8, 3, o.w - 16, 3);
+    ctx.fillStyle = "#0f1f3d";
+    ctx.fillRect(10, 7, o.w - 20, 2);
+    ctx.fillRect(6, o.h - 2, 4, 16);
+    ctx.fillRect(o.w - 10, o.h - 2, 4, 16);
+    ctx.restore();
+  }
+
+  function drawTea(item) {
+    ctx.save();
+    ctx.translate(item.x, item.y);
+    ctx.fillStyle = "#ffd9ab";
+    ctx.fillRect(2, 5, 11, 9);
+    ctx.fillRect(13, 7, 3, 5);
+    ctx.fillRect(4, 2, 8, 3);
+    ctx.fillStyle = "#ff9b4d";
+    ctx.fillRect(4, 7, 8, 6);
+    ctx.fillStyle = "rgba(255,255,255,0.72)";
+    ctx.fillRect(5, 0, 1, 4);
+    ctx.fillRect(9, -1, 1, 5);
+    ctx.restore();
+  }
+
+  function drawParticles() {
+    particles.forEach((particle) => {
+      ctx.globalAlpha = Math.max(0, particle.life / 30);
+      ctx.fillStyle = particle.color;
+      ctx.fillRect(particle.x, particle.y, 3, 3);
+    });
+    ctx.globalAlpha = 1;
+  }
+
+  function drawOverlay() {
+    if (started && !over) return;
+    ctx.fillStyle = "rgba(4, 10, 20, 0.42)";
+    ctx.fillRect(0, 0, w, h);
+    ctx.fillStyle = "#f5f8ff";
+    ctx.textAlign = "center";
+    ctx.font = "700 24px Segoe UI, sans-serif";
+    ctx.fillText(over ? labels.over : labels.start, w / 2, 82);
+    ctx.font = "15px Segoe UI, sans-serif";
+    ctx.fillText(labels.jump + " | " + labels.duck, w / 2, 112);
+    if (over) {
+      ctx.fillText(labels.score + ": " + score + " | " + labels.best + ": " + best, w / 2, 140);
+    }
+    if (robotEnabled) {
+      ctx.fillText(labels.robotOn, w / 2, over ? 168 : 140);
+    }
+    ctx.textAlign = "left";
+  }
+
+  function drawHud() {
+    ctx.fillStyle = "#f3f6ff";
+    ctx.font = "14px Segoe UI, sans-serif";
+    ctx.fillText(labels.score + ": " + score, 14, 22);
+    ctx.fillText(labels.best + ": " + best, 126, 22);
+    ctx.fillText(labels.speed + ": " + speed.toFixed(1), 234, 22);
+    ctx.fillText(labels.robot + ": " + (robotEnabled ? "ON" : "OFF"), 352, 22);
+    ctx.fillText(labels.bonus + ": +120", w - 106, 22);
+  }
+
+  function draw() {
+    drawBackground();
+    obstacles.forEach((o) => {
+      if (o.type === "ptero") drawPtero(o);
+      else if (o.type === "barrier") drawBarrier(o);
+      else drawCactus(o);
+    });
+    collectibles.forEach(drawTea);
+    drawDino();
+    drawParticles();
+    drawHud();
+    drawOverlay();
+  }
+
+  function loop() {
+    robotStep();
+    update();
+    draw();
+    window.requestAnimationFrame(loop);
+  }
+
+  window.addEventListener("keydown", (event) => {
+    if (event.code === "KeyR") {
+      event.preventDefault();
+      setRobotEnabled(!robotEnabled);
+      return;
+    }
+    if (event.code === "Space" || event.code === "ArrowUp") {
+      event.preventDefault();
+      if (robotEnabled) setRobotEnabled(false);
+      startRun();
+    }
+    if (event.code === "ArrowDown") {
+      event.preventDefault();
+      if (robotEnabled) setRobotEnabled(false);
+      setDuck(true);
+    }
+  });
+
+  window.addEventListener("keyup", (event) => {
+    if (event.code === "ArrowDown") setDuck(false);
+  });
+
+  canvas.addEventListener("click", () => {
+    if (robotEnabled) setRobotEnabled(false);
+    startRun();
+  });
+  canvas.addEventListener("touchstart", (event) => {
+    event.preventDefault();
+    if (robotEnabled) setRobotEnabled(false);
+    startRun();
+  }, { passive: false });
+  if (robotToggleButton) {
+    robotToggleButton.addEventListener("click", () => {
+      setRobotEnabled(!robotEnabled);
+    });
+  }
+
+  resetRun();
+  updateRobotUI();
+  draw();
+  loop();
+})();
+</script>
+{% endblock %}

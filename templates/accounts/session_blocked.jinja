@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="{{ current_lang }}">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ blocked_title }} - {{ app_name }}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+</head>
+<body>
+  <main class="page-container">
+    <div class="modal force-modal" aria-hidden="false" role="dialog" aria-modal="true">
+      <div class="modal-card modal-card-wide">
+        <h1>{{ blocked_title }}</h1>
+        <div class="session-blocked-warning-banner" role="alert" aria-live="assertive">
+          <div class="session-blocked-warning-head">
+            <span class="session-blocked-warning-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+                <path d="M12 2 1.8 20.5c-.3.5.1 1.2.7 1.2h19c.6 0 1-.7.7-1.2L12 2Zm0 5.2c.5 0 .9.4.9.9v6.2c0 .5-.4.9-.9.9s-.9-.4-.9-.9V8.1c0-.5.4-.9.9-.9Zm0 10.4a1.2 1.2 0 1 1 0 2.4 1.2 1.2 0 0 1 0-2.4Z"></path>
+              </svg>
+            </span>
+            <div class="session-blocked-warning-copy">
+              <strong>{{ t('account.session_blocked_warning_label') }}</strong>
+              <span>{{ t('account.session_blocked_warning') }}</span>
+            </div>
+          </div>
+        </div>
+        <p>{{ blocked_body }}</p>
+        <p class="muted small">{{ blocked_note }}</p>
+        <div class="row-actions top-gap">
+          <a class="btn secondary" href="{{ url_for('accounts.login') }}">{{ blocked_login_label }}</a>
+        </div>
+      </div>
+    </div>
+  </main>
+  <script>
+    (() => {
+      async function playWarningSound() {
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContextClass) return false;
+        try {
+          const audioContext = new AudioContextClass();
+          if (audioContext.state === "suspended") {
+            await audioContext.resume();
+          }
+          const timeline = [
+            { offset: 0.00, duration: 0.11, frequency: 920, gain: 0.04 },
+            { offset: 0.18, duration: 0.11, frequency: 700, gain: 0.05 },
+            { offset: 0.38, duration: 0.18, frequency: 540, gain: 0.06 }
+          ];
+          const startAt = audioContext.currentTime + 0.02;
+          timeline.forEach((step) => {
+            const oscillator = audioContext.createOscillator();
+            const gainNode = audioContext.createGain();
+            oscillator.type = "sawtooth";
+            oscillator.frequency.setValueAtTime(step.frequency, startAt + step.offset);
+            gainNode.gain.setValueAtTime(0.0001, startAt + step.offset);
+            gainNode.gain.linearRampToValueAtTime(step.gain, startAt + step.offset + 0.01);
+            gainNode.gain.exponentialRampToValueAtTime(0.0001, startAt + step.offset + step.duration);
+            oscillator.connect(gainNode);
+            gainNode.connect(audioContext.destination);
+            oscillator.start(startAt + step.offset);
+            oscillator.stop(startAt + step.offset + step.duration + 0.02);
+          });
+          window.setTimeout(() => {
+            audioContext.close().catch(() => {});
+          }, 1200);
+          return true;
+        } catch (_error) {
+          return false;
+        }
+      }
+
+      window.addEventListener("load", () => {
+        window.setTimeout(() => {
+          playWarningSound().catch(() => {});
+        }, 120);
+      });
+    })();
+  </script>
+</body>
+</html>

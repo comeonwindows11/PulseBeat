@@ -20,6 +20,7 @@ from auth_helpers import (
     cleanup_song,
     compose_and_filters,
     contains_profanity,
+    create_creator_publication_notifications,
     get_session_user_oid,
     is_youtube_integration_enabled,
     is_youtube_song,
@@ -1000,7 +1001,8 @@ def add_song():
             lyrics_source = "upload_lrc" if is_lrc else "upload_txt"
             lyrics_auto_sync = bool(is_lrc and uploaded_cues)
 
-    extensions.songs_col.insert_one(
+    created_at = datetime.utcnow()
+    insert_result = extensions.songs_col.insert_one(
         {
             "title": title,
             "artist": artist,
@@ -1015,10 +1017,12 @@ def add_song():
             "lyrics_cues": lyrics_cues,
             "lyrics_source": lyrics_source,
             "lyrics_auto_sync": bool(lyrics_auto_sync),
-            "created_at": datetime.utcnow(),
+            "created_at": created_at,
             "created_by": user_oid,
         }
     )
+    if visibility == "public":
+        create_creator_publication_notifications(user_oid, "song", insert_result.inserted_id, title)
     flash(tr("flash.songs.added"), "success")
     return redirect(url_for("songs.my_songs"))
 

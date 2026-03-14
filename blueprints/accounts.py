@@ -17,17 +17,27 @@ import re
 import requests
 from flask import Blueprint, Response, abort, current_app, flash, jsonify, redirect, render_template, request, session, url_for
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
+from pymongo.errors import DuplicateKeyError, PyMongoError
 from werkzeug.routing import BuildError
 from werkzeug.security import check_password_hash, generate_password_hash
 
 import extensions
 from auth_helpers import (
+    begin_authenticated_session,
     can_access_song,
+    compose_and_filters,
+    clear_current_session_binding,
     cleanup_song,
     cleanup_user,
+    count_creator_subscribers,
+    device_summary_text,
+    get_creator_subscription,
+    get_user_notifications,
+    get_request_device_context,
     is_disposable_email,
     get_session_user_oid,
     is_email_verified,
+    is_trusted_device,
     is_youtube_integration_enabled,
     is_user_banned,
     login_required,
@@ -36,10 +46,16 @@ from auth_helpers import (
     parse_object_id,
     password_policy_ok,
     password_pwned_status,
+    list_creator_subscribers,
+    mark_notifications_read,
+    remember_trusted_device,
+    safe_mongo_update_one,
     send_email_message,
     serialize_song,
     song_stream_url,
+    visible_song_filter,
     username_policy_ok,
+    youtube_playlist_visibility_clause,
 )
 from i18n import tr
 
@@ -245,7 +261,8 @@ def _register_login_failure(user):
         level = int(user.get("login_lock_level", 0) or 0) + 1
         minutes = _login_lock_minutes(level)
         lock_until = now + timedelta(minutes=minutes)
-        extensions.users_col.update_one(
+        safe_mongo_update_one(
+            extensions.users_col,
             {"_id": user["_id"]},
             {
                 "$set": {
@@ -258,7 +275,8 @@ def _register_login_failure(user):
         return {"locked": True, "minutes": minutes, "remaining_attempts": 0}
 
     remaining = max(0, 6 - failures)
-    extensions.users_col.update_one(
+    safe_mongo_update_one(
+        extensions.users_col,
         {"_id": user["_id"]},
         {"$set": {"login_failure_count": failures}},
     )
@@ -266,7 +284,8 @@ def _register_login_failure(user):
 
 
 def _reset_login_lock(user_oid):
-    extensions.users_col.update_one(
+    safe_mongo_update_one(
+        extensions.users_col,
         {"_id": user_oid},
         {
             "$set": {
@@ -283,7 +302,7 @@ def _session_version(user) -> int:
 
 
 def _bump_session_version(user_oid):
-    extensions.users_col.update_one({"_id": user_oid}, {"$inc": {"session_token_version": 1}})
+    safe_mongo_update_one(extensions.users_col, {"_id": user_oid}, {"$inc": {"session_token_version": 1}})
 
 
 def _should_show_two_factor_prompt(user) -> bool:
@@ -303,9 +322,13 @@ def _post_login_redirect(user):
 
 
 def _complete_login(user):
-    session.clear()
-    session["user_id"] = str(user.get("_id", ""))
-    session["session_token_version"] = _session_version(user)
+    try:
+        begin_authenticated_session(user)
+    except PyMongoError:
+        current_app.logger.warning("Unable to finalize authenticated session", exc_info=True)
+        session.clear()
+        flash(tr("flash.accounts.session_security_retry"), "warning")
+        return redirect(url_for("accounts.login"))
     flash(tr("flash.accounts.logged_in"), "success")
     return redirect(_post_login_redirect(user))
 
@@ -366,6 +389,214 @@ def validate_password_for_set(password: str, confirm_password: str, allow_unavai
     if status == "unavailable" and not allow_unavailable:
         return False, tr("flash.accounts.password_check_unavailable")
     return True, ""
+
+
+def _device_approval_serializer():
+    salt = current_app.config.get("DEVICE_APPROVAL_SALT", "pulsebeat-device-approval")
+    return URLSafeTimedSerializer(current_app.secret_key, salt=salt)
+
+
+def _device_approval_fingerprint(user, device_hash: str, ua_hash: str, nonce: str):
+    raw = "|".join(
+        [
+            str(user.get("_id", "")),
+            normalize_email(user.get("email", "")),
+            str(user.get("session_token_version", 0) or 0),
+            str(device_hash or ""),
+            str(ua_hash or ""),
+            str(nonce or ""),
+        ]
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _build_device_approval_link(user, context: dict, nonce: str):
+    token = _device_approval_serializer().dumps(
+        {
+            "uid": str(user.get("_id", "")),
+            "dh": str(context.get("device_hash", "") or ""),
+            "uh": str(context.get("ua_hash", "") or ""),
+            "nonce": str(nonce or ""),
+            "fp": _device_approval_fingerprint(
+                user,
+                str(context.get("device_hash", "") or ""),
+                str(context.get("ua_hash", "") or ""),
+                str(nonce or ""),
+            ),
+        }
+    )
+    base_url = current_app.config.get("APP_BASE_URL", "").strip()
+    if base_url:
+        return f"{base_url.rstrip('/')}{url_for('accounts.approve_device', token=token)}"
+    return url_for("accounts.approve_device", token=token, _external=True)
+
+
+def _send_device_approval_email(user, context: dict, link: str):
+    recipient_email = normalize_email(user.get("email", ""))
+    if not recipient_email:
+        return False
+
+    expires_minutes = max(1, int(current_app.config.get("DEVICE_APPROVAL_TOKEN_MAX_AGE", 1800) / 60))
+    username = user.get("username", "user")
+    summary = device_summary_text(context)
+    username_safe = html.escape(username)
+    link_safe = html.escape(link)
+    summary_safe = html.escape(summary)
+
+    plain_text = (
+        f"{tr('auth.device_approval_plain_greeting', username=username)}\n\n"
+        f"{tr('auth.device_approval_plain_instruction', device=summary)}\n"
+        f"{link}\n\n"
+        f"{tr('auth.device_approval_plain_expiry', expires_minutes=expires_minutes)}\n\n"
+        f"{tr('auth.device_approval_ignore')}"
+    )
+    html_body = f"""
+<html>
+  <body style="margin:0;padding:0;background:#f4f6fb;font-family:Segoe UI,Arial,sans-serif;color:#101828;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f4f6fb;padding:24px 0;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:640px;background:#ffffff;border-radius:18px;overflow:hidden;border:1px solid #d9e1f2;">
+            <tr>
+              <td style="padding:24px;background:#0f172a;color:#f8fafc;">
+                <h1 style="margin:0;font-size:24px;">PulseBeat</h1>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:24px;">
+                <h2 style="margin:0 0 14px 0;font-size:22px;color:#101828;">{html.escape(tr('auth.device_approval_heading'))}</h2>
+                <p style="margin:0 0 12px 0;line-height:1.6;">{html.escape(tr('auth.device_approval_html_greeting', username=username_safe))}</p>
+                <p style="margin:0 0 12px 0;line-height:1.6;">{html.escape(tr('auth.device_approval_html_intro', device=summary_safe))}</p>
+                <p style="margin:0 0 22px 0;">
+                  <a href="{link_safe}" style="display:inline-block;background:#2563eb;color:#ffffff;text-decoration:none;padding:12px 18px;border-radius:10px;font-size:14px;font-weight:700;">{html.escape(tr('auth.device_approval_button'))}</a>
+                </p>
+                <p style="margin:0 0 8px 0;font-size:13px;line-height:1.5;color:#5b6472;">{html.escape(tr('auth.device_approval_plain_expiry', expires_minutes=expires_minutes))}</p>
+                <p style="margin:0;font-size:13px;line-height:1.5;color:#5b6472;">{html.escape(tr('auth.device_approval_ignore'))}</p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>
+"""
+    return send_email_message(recipient_email, tr("auth.device_approval_subject"), plain_text, html_body)
+
+
+def _queue_device_approval(user, context: dict):
+    now = datetime.utcnow()
+    expires_at = now + timedelta(seconds=int(current_app.config.get("DEVICE_APPROVAL_TOKEN_MAX_AGE", 1800) or 1800))
+    device_hash = str(context.get("device_hash", "") or "")
+    if not device_hash:
+        return False
+
+    nonce = secrets.token_urlsafe(24)
+    entry = {
+        "token_hash": hashlib.sha256(nonce.encode("utf-8")).hexdigest(),
+        "device_hash": device_hash,
+        "ua_hash": str(context.get("ua_hash", "") or ""),
+        "label": str(context.get("label", "") or ""),
+        "ip_prefix": str(context.get("ip_prefix", "") or ""),
+        "created_at": now,
+        "expires_at": expires_at,
+    }
+    safe_mongo_update_one(
+        extensions.users_col,
+        {"_id": user.get("_id")},
+        {"$pull": {"pending_device_approvals": {"expires_at": {"$lte": now}}}},
+    )
+    existing = safe_mongo_update_one(
+        extensions.users_col,
+        {"_id": user.get("_id"), "pending_device_approvals.device_hash": device_hash},
+        {
+            "$set": {
+                "pending_device_approvals.$.token_hash": entry["token_hash"],
+                "pending_device_approvals.$.ua_hash": entry["ua_hash"],
+                "pending_device_approvals.$.label": entry["label"],
+                "pending_device_approvals.$.ip_prefix": entry["ip_prefix"],
+                "pending_device_approvals.$.created_at": entry["created_at"],
+                "pending_device_approvals.$.expires_at": entry["expires_at"],
+            }
+        },
+    )
+    if not existing.matched_count:
+        inserted = safe_mongo_update_one(
+            extensions.users_col,
+            {"_id": user.get("_id"), "pending_device_approvals.device_hash": {"$ne": device_hash}},
+            {"$push": {"pending_device_approvals": {"$each": [entry], "$slice": -10}}},
+        )
+        if not inserted.matched_count:
+            safe_mongo_update_one(
+                extensions.users_col,
+                {"_id": user.get("_id"), "pending_device_approvals.device_hash": device_hash},
+                {
+                    "$set": {
+                        "pending_device_approvals.$.token_hash": entry["token_hash"],
+                        "pending_device_approvals.$.ua_hash": entry["ua_hash"],
+                        "pending_device_approvals.$.label": entry["label"],
+                        "pending_device_approvals.$.ip_prefix": entry["ip_prefix"],
+                        "pending_device_approvals.$.created_at": entry["created_at"],
+                        "pending_device_approvals.$.expires_at": entry["expires_at"],
+                    }
+                },
+            )
+    return _send_device_approval_email(user, context, _build_device_approval_link(user, context, nonce))
+
+
+def _load_device_approval_user_from_token(token: str):
+    max_age = int(current_app.config.get("DEVICE_APPROVAL_TOKEN_MAX_AGE", 1800))
+    try:
+        payload = _device_approval_serializer().loads(token, max_age=max_age)
+    except (SignatureExpired, BadSignature):
+        return None, None, tr("flash.accounts.device_approval_invalid")
+
+    user_oid = parse_object_id(payload.get("uid", ""))
+    if not user_oid:
+        return None, None, tr("flash.accounts.device_approval_invalid")
+
+    user = extensions.users_col.find_one({"_id": user_oid})
+    if not user:
+        return None, None, tr("flash.accounts.device_approval_invalid")
+
+    device_hash = str(payload.get("dh", "") or "")
+    ua_hash = str(payload.get("uh", "") or "")
+    nonce = str(payload.get("nonce", "") or "")
+    if not device_hash or not nonce:
+        return None, None, tr("flash.accounts.device_approval_invalid")
+
+    if payload.get("fp") != _device_approval_fingerprint(user, device_hash, ua_hash, nonce):
+        return None, None, tr("flash.accounts.device_approval_invalid")
+
+    token_hash = hashlib.sha256(nonce.encode("utf-8")).hexdigest()
+    now = datetime.utcnow()
+    for entry in list(user.get("pending_device_approvals", []) or []):
+        if str(entry.get("token_hash", "") or "") != token_hash:
+            continue
+        expires_at = entry.get("expires_at")
+        if isinstance(expires_at, datetime) and expires_at <= now:
+            break
+        if str(entry.get("device_hash", "") or "") != device_hash:
+            break
+        return user, entry, ""
+    return None, None, tr("flash.accounts.device_approval_invalid")
+
+
+def _enforce_device_gate(user):
+    context = get_request_device_context()
+    trusted_devices = list(user.get("trusted_devices", []) or [])
+    try:
+        if not trusted_devices:
+            remember_trusted_device(user.get("_id"), context)
+            return True, "", ""
+        if is_trusted_device(user, context):
+            return True, "", ""
+        if _queue_device_approval(user, context):
+            return False, tr("flash.accounts.device_approval_email_sent"), "info"
+        return False, tr("flash.accounts.device_approval_email_failed"), "danger"
+    except PyMongoError:
+        current_app.logger.warning("Unable to evaluate trusted device gate", exc_info=True)
+        return False, tr("flash.accounts.session_security_retry"), "warning"
 
 
 def _two_factor_toggle_serializer():
@@ -1334,6 +1565,10 @@ def login():
             flash(tr("flash.accounts.password_check_unavailable"), "warning")
 
         _reset_login_lock(user["_id"])
+        device_allowed, device_message, device_category = _enforce_device_gate(user)
+        if not device_allowed:
+            flash(device_message, device_category or "warning")
+            return redirect(url_for("accounts.login"))
         if user.get("auth_provider") != "google" and bool(user.get("two_factor_enabled", False)):
             session.clear()
             if not _issue_two_factor_code(user):
@@ -1498,10 +1733,7 @@ def google_callback():
                 "created_at": datetime.utcnow(),
             }
         ).inserted_id
-        created_user = extensions.users_col.find_one({"_id": user_id}, {"session_token_version": 1}) or {}
-        session.clear()
-        session["user_id"] = str(user_id)
-        session["session_token_version"] = int(created_user.get("session_token_version", 0) or 0)
+        refreshed = extensions.users_col.find_one({"_id": user_id}) or {"_id": user_id}
     else:
         extensions.users_col.update_one(
             {"_id": existing["_id"]},
@@ -1517,12 +1749,14 @@ def google_callback():
                 "$unset": {"password_compromised_at": ""},
             },
         )
-        session.clear()
-        session["user_id"] = str(existing["_id"])
-        session["session_token_version"] = _session_version(existing)
+        refreshed = extensions.users_col.find_one({"_id": existing["_id"]}) or existing
 
-    flash(tr("flash.accounts.logged_in"), "success")
-    return redirect(url_for("main.index"))
+    device_allowed, device_message, device_category = _enforce_device_gate(refreshed)
+    if not device_allowed:
+        flash(device_message, device_category or "warning")
+        return redirect(url_for("accounts.login"))
+
+    return _complete_login(refreshed)
 
 
 @bp.route("/unlock-account/<token>")
@@ -1540,6 +1774,10 @@ def unlock_account(token):
 
     _reset_login_lock(user["_id"])
     refreshed = extensions.users_col.find_one({"_id": user["_id"]}) or user
+    device_allowed, device_message, device_category = _enforce_device_gate(refreshed)
+    if not device_allowed:
+        flash(device_message, device_category or "warning")
+        return redirect(url_for("accounts.login"))
     if refreshed.get("auth_provider") != "google" and bool(refreshed.get("two_factor_enabled", False)):
         session.clear()
         if not _issue_two_factor_code(refreshed):
@@ -1549,11 +1787,62 @@ def unlock_account(token):
         flash(tr("flash.accounts.two_factor_code_sent"), "info")
         return redirect(url_for("accounts.two_factor_challenge"))
 
-    session.clear()
-    session["user_id"] = str(user["_id"])
-    session["session_token_version"] = _session_version(refreshed)
+    try:
+        begin_authenticated_session(refreshed)
+    except PyMongoError:
+        current_app.logger.warning("Unable to restore session after account unlock", exc_info=True)
+        session.clear()
+        flash(tr("flash.accounts.session_security_retry"), "warning")
+        return redirect(url_for("accounts.login"))
     flash(tr("flash.accounts.unlock_success"), "success")
     return redirect(_post_login_redirect(refreshed))
+
+
+@bp.route("/approve-device/<token>")
+def approve_device(token):
+    user, pending_entry, error = _load_device_approval_user_from_token(token)
+    if not user or not pending_entry:
+        flash(error or tr("flash.accounts.device_approval_invalid"), "danger")
+        return redirect(url_for("accounts.login"))
+
+    approved_context = {
+        "device_hash": str(pending_entry.get("device_hash", "") or ""),
+        "ua_hash": str(pending_entry.get("ua_hash", "") or ""),
+        "label": str(pending_entry.get("label", "") or ""),
+        "ip_prefix": str(pending_entry.get("ip_prefix", "") or ""),
+    }
+    try:
+        remember_trusted_device(user.get("_id"), approved_context)
+        safe_mongo_update_one(
+            extensions.users_col,
+            {"_id": user.get("_id")},
+            {"$pull": {"pending_device_approvals": {"token_hash": str(pending_entry.get("token_hash", "") or "")}}},
+        )
+    except PyMongoError:
+        current_app.logger.warning("Unable to approve trusted device", exc_info=True)
+        flash(tr("flash.accounts.session_security_retry"), "warning")
+        return redirect(url_for("accounts.login"))
+
+    current_context = get_request_device_context()
+    same_device = (
+        str(current_context.get("device_hash", "") or "") == approved_context["device_hash"]
+        and str(current_context.get("ua_hash", "") or "") == approved_context["ua_hash"]
+    )
+    refreshed = extensions.users_col.find_one({"_id": user.get("_id")}) or user
+    if same_device:
+        if refreshed.get("auth_provider") != "google" and bool(refreshed.get("two_factor_enabled", False)):
+            session.clear()
+            if not _issue_two_factor_code(refreshed):
+                flash(tr("flash.accounts.two_factor_send_failed"), "danger")
+                return redirect(url_for("accounts.login"))
+            flash(tr("flash.accounts.device_approved_login"), "success")
+            flash(tr("flash.accounts.two_factor_code_sent"), "info")
+            return redirect(url_for("accounts.two_factor_challenge"))
+        flash(tr("flash.accounts.device_approved_login"), "success")
+        return _complete_login(refreshed)
+
+    flash(tr("flash.accounts.device_approved_relogin"), "success")
+    return redirect(url_for("accounts.login"))
 
 
 @bp.route("/resend-verification", methods=["POST"])
@@ -1648,6 +1937,8 @@ def reset_password(token):
                     "password_hash": generate_password_hash(new_password),
                     "require_password_change": False,
                     "password_reset_at": datetime.utcnow(),
+                    "active_sessions": [],
+                    "pending_device_approvals": [],
                 }
             },
         )
@@ -1667,6 +1958,7 @@ def logout():
         if user and user.get("require_password_change", False):
             flash(tr("flash.accounts.password_change_required"), "warning")
             return redirect(url_for("accounts.manage_account"))
+        clear_current_session_binding(user_oid)
 
     session.clear()
     session.modified = True
@@ -2172,12 +2464,69 @@ def manage_account():
         external_playlists=external_playlists,
         two_factor_toggle_url=two_factor_toggle_url,
         two_factor_dismiss_url=two_factor_dismiss_url,
+        username_update_url=url_for("accounts.update_username"),
         show_two_factor_prompt=bool(
             user.get("auth_provider") != "google"
             and not bool(user.get("two_factor_enabled", False))
             and bool(user.get("two_factor_prompt_pending", False))
         ),
     )
+
+
+@bp.route("/account/notifications/read-all", methods=["POST"])
+@login_required
+def mark_all_notifications_read():
+    user_oid = get_session_user_oid()
+    try:
+        mark_notifications_read(user_oid)
+        return jsonify({"ok": True, "items": get_user_notifications(user_oid, limit=20), "unread_count": 0})
+    except PyMongoError:
+        current_app.logger.warning("Unable to mark notifications as read", exc_info=True)
+        return jsonify({"ok": False, "message": tr("errors.503.msg")}), 503
+
+
+@bp.route("/account/update-username", methods=["POST"])
+@login_required
+def update_username():
+    user_oid = get_session_user_oid()
+    user = extensions.users_col.find_one({"_id": user_oid}, {"username": 1, "username_normalized": 1})
+    if not user:
+        session.clear()
+        flash(tr("flash.auth.required"), "warning")
+        return redirect(url_for("accounts.login"))
+
+    new_username = (request.form.get("username", "") or "").strip()
+    normalized = normalize_username(new_username)
+    current_normalized = normalize_username(user.get("username", ""))
+
+    if not username_policy_ok(new_username):
+        flash(tr("flash.accounts.username_invalid"), "danger")
+        return redirect(url_for("accounts.manage_account"))
+
+    if normalized == current_normalized:
+        flash(tr("flash.accounts.username_unchanged"), "info")
+        return redirect(url_for("accounts.manage_account"))
+
+    existing = extensions.users_col.find_one({"username_normalized": normalized}, {"_id": 1})
+    if existing and existing.get("_id") != user_oid:
+        flash(tr("flash.accounts.username_exists"), "danger")
+        return redirect(url_for("accounts.manage_account"))
+
+    try:
+        safe_mongo_update_one(
+            extensions.users_col,
+            {"_id": user_oid},
+            {"$set": {"username": new_username, "username_normalized": normalized}},
+        )
+    except DuplicateKeyError:
+        flash(tr("flash.accounts.username_exists"), "danger")
+        return redirect(url_for("accounts.manage_account"))
+    except PyMongoError:
+        current_app.logger.warning("Unable to update username", exc_info=True)
+        flash(tr("flash.accounts.username_update_failed"), "warning")
+        return redirect(url_for("accounts.manage_account"))
+    flash(tr("flash.accounts.username_updated"), "success")
+    return redirect(url_for("accounts.manage_account"))
 
 
 @bp.route("/account/export/json")
@@ -2372,13 +2721,33 @@ def change_password():
         flash(msg, "danger")
         return redirect(url_for("accounts.manage_account"))
 
-    extensions.users_col.update_one(
-        {"_id": user_oid},
-        {"$set": {"password_hash": generate_password_hash(new_password), "require_password_change": False, "auth_provider": "local"}},
-    )
-    _bump_session_version(user_oid)
-    refreshed = extensions.users_col.find_one({"_id": user_oid}, {"session_token_version": 1}) or {}
-    session["session_token_version"] = int(refreshed.get("session_token_version", 0) or 0)
+    try:
+        safe_mongo_update_one(
+            extensions.users_col,
+            {"_id": user_oid},
+            {
+                "$set": {
+                    "password_hash": generate_password_hash(new_password),
+                    "require_password_change": False,
+                    "auth_provider": "local",
+                    "active_sessions": [],
+                    "pending_device_approvals": [],
+                }
+            },
+        )
+        _bump_session_version(user_oid)
+    except PyMongoError:
+        current_app.logger.warning("Unable to change password securely", exc_info=True)
+        flash(tr("flash.accounts.session_security_retry"), "warning")
+        return redirect(url_for("accounts.manage_account"))
+    refreshed = extensions.users_col.find_one({"_id": user_oid}) or {}
+    try:
+        begin_authenticated_session(refreshed)
+    except PyMongoError:
+        current_app.logger.warning("Unable to recreate session after password change", exc_info=True)
+        session.clear()
+        flash(tr("flash.accounts.session_security_retry"), "warning")
+        return redirect(url_for("accounts.login"))
     flash(tr("flash.accounts.password_changed"), "success")
     return redirect(url_for("accounts.manage_account"))
 
@@ -2431,36 +2800,61 @@ def check_availability():
     if field == "username":
         if not username_policy_ok(value):
             return jsonify({"available": False, "message": tr("flash.accounts.username_invalid")})
-        available = bool(normalize_username(value)) and find_user_by_username(value) is None
+        normalized = normalize_username(value)
+        existing = find_user_by_username(value)
+        current_user_oid = get_session_user_oid()
+        available = bool(normalized) and (
+            existing is None or (current_user_oid is not None and existing.get("_id") == current_user_oid)
+        )
         return jsonify({"available": available, "message": "" if available else tr("flash.accounts.username_exists")})
     return jsonify({"available": False, "message": tr("flash.songs.invalid_request")}), 400
 
 
 @bp.route("/users/<username>")
 def public_profile(username):
-    from blueprints.playlists import can_access_playlist, normalize_playlist_visibility
+    from blueprints.playlists import normalize_playlist_visibility
 
     viewer_oid = get_session_user_oid()
-    target = extensions.users_col.find_one({"username_normalized": normalize_username(username)})
+    target = extensions.users_col.find_one(
+        {"username_normalized": normalize_username(username)},
+        {"username": 1, "created_at": 1, "is_admin": 1, "is_root_admin": 1},
+    )
     if not target:
         abort(404)
 
+    songs_query = compose_and_filters({"created_by": target["_id"]}, visible_song_filter(viewer_oid))
+    songs_projection = {
+        "title": 1,
+        "artist": 1,
+        "genre": 1,
+        "visibility": 1,
+        "shared_with": 1,
+        "created_by": 1,
+        "source_type": 1,
+        "source_url": 1,
+        "url": 1,
+        "external_provider": 1,
+        "is_available": 1,
+        "availability_reason": 1,
+    }
     songs = []
-    for song in extensions.songs_col.find({"created_by": target["_id"]}).sort("created_at", -1).limit(250):
-        if not can_access_song(song, viewer_oid):
-            continue
+    for song in extensions.songs_col.find(songs_query, songs_projection).sort("created_at", -1).limit(50):
         item = serialize_song(song, viewer_oid)
         item["url"] = song_stream_url(item["id"]) if item.get("is_audio_playable", True) else ""
         item["detail_url"] = url_for("songs.song_detail", song_id=item["id"])
         item["external_url"] = item.get("source_url", "")
         songs.append(item)
-        if len(songs) >= 50:
-            break
 
+    playlist_query = compose_and_filters({"user_id": target["_id"]}, youtube_playlist_visibility_clause())
+    if not (viewer_oid and str(viewer_oid) == str(target["_id"])):
+        access_clause = [{"visibility": {"$in": ["public", "unlisted"]}}]
+        if viewer_oid:
+            access_clause.append({"collaborator_ids": viewer_oid})
+        playlist_query = compose_and_filters(playlist_query, {"$or": access_clause})
+
+    playlist_projection = {"name": 1, "song_ids": 1, "visibility": 1, "collaborator_ids": 1, "user_id": 1}
     playlists = []
-    for playlist in extensions.playlists_col.find({"user_id": target["_id"]}).sort("updated_at", -1).limit(250):
-        if not can_access_playlist(playlist, viewer_oid):
-            continue
+    for playlist in extensions.playlists_col.find(playlist_query, playlist_projection).sort("updated_at", -1).limit(50):
         playlists.append({
             "id": str(playlist["_id"]),
             "name": playlist.get("name") or tr("defaults.unnamed"),
@@ -2468,25 +2862,96 @@ def public_profile(username):
             "visibility": normalize_playlist_visibility(playlist),
             "detail_url": url_for("playlists.playlist_detail", playlist_id=str(playlist["_id"])),
         })
-        if len(playlists) >= 50:
-            break
+
+    subscriber_count = count_creator_subscribers(target["_id"])
+    viewer_subscription = get_creator_subscription(target["_id"], viewer_oid) if viewer_oid and str(viewer_oid) != str(target["_id"]) else None
+    subscriber_list = list_creator_subscribers(target["_id"]) if viewer_oid and str(viewer_oid) == str(target["_id"]) else []
 
     return render_template(
         "accounts/public_profile.jinja",
         profile={
+            "id": str(target["_id"]),
             "username": target.get("username", "user"),
             "created_at": target.get("created_at"),
             "is_admin": bool(target.get("is_admin", False)),
             "is_root_admin": bool(target.get("is_root_admin", False)),
             "is_self": bool(viewer_oid and str(viewer_oid) == str(target["_id"])),
             "manage_url": url_for("accounts.manage_account") if viewer_oid and str(viewer_oid) == str(target["_id"]) else "",
+            "subscriber_count": subscriber_count,
+            "viewer_subscription": {
+                "notifications_enabled": bool(viewer_subscription.get("notifications_enabled", False)),
+            } if viewer_subscription else None,
         },
         songs=songs,
         playlists=playlists,
+        subscriber_list=subscriber_list,
         visible_song_count=len(songs),
         visible_playlist_count=len(playlists),
         comment_count=extensions.song_comments_col.count_documents({"user_id": target["_id"]}),
     )
+
+
+@bp.route("/users/<username>/subscribe", methods=["POST"])
+@login_required
+def subscribe_to_creator(username):
+    viewer_oid = get_session_user_oid()
+    target = extensions.users_col.find_one({"username_normalized": normalize_username(username)}, {"username": 1})
+    if not target:
+        abort(404)
+    if str(target["_id"]) == str(viewer_oid):
+        flash(tr("flash.songs.invalid_request"), "warning")
+        return redirect(url_for("accounts.public_profile", username=target.get("username", username)))
+
+    notifications_enabled = request.form.get("notifications_enabled") == "1"
+    now = datetime.utcnow()
+    try:
+        result = safe_mongo_update_one(
+            extensions.creator_subscriptions_col,
+            {"creator_id": target["_id"], "subscriber_id": viewer_oid},
+            {
+                "$set": {"notifications_enabled": notifications_enabled, "updated_at": now},
+                "$setOnInsert": {
+                    "creator_id": target["_id"],
+                    "subscriber_id": viewer_oid,
+                    "created_at": now,
+                },
+            },
+            upsert=True,
+        )
+    except DuplicateKeyError:
+        current_app.logger.info("Duplicate creator subscription resolved by retry path", exc_info=True)
+        result = safe_mongo_update_one(
+            extensions.creator_subscriptions_col,
+            {"creator_id": target["_id"], "subscriber_id": viewer_oid},
+            {"$set": {"notifications_enabled": notifications_enabled, "updated_at": now}},
+        )
+    except PyMongoError:
+        current_app.logger.warning("Unable to subscribe to creator", exc_info=True)
+        flash(tr("flash.accounts.subscription_failed"), "warning")
+        return redirect(url_for("accounts.public_profile", username=target.get("username", username)))
+
+    if getattr(result, "upserted_id", None):
+        flash(tr("flash.accounts.subscription_created"), "success")
+    else:
+        flash(tr("flash.accounts.subscription_updated"), "success")
+    return redirect(url_for("accounts.public_profile", username=target.get("username", username)))
+
+
+@bp.route("/users/<username>/unsubscribe", methods=["POST"])
+@login_required
+def unsubscribe_from_creator(username):
+    viewer_oid = get_session_user_oid()
+    target = extensions.users_col.find_one({"username_normalized": normalize_username(username)}, {"username": 1})
+    if not target:
+        abort(404)
+    try:
+        extensions.creator_subscriptions_col.delete_one({"creator_id": target["_id"], "subscriber_id": viewer_oid})
+    except PyMongoError:
+        current_app.logger.warning("Unable to unsubscribe from creator", exc_info=True)
+        flash(tr("flash.accounts.subscription_failed"), "warning")
+        return redirect(url_for("accounts.public_profile", username=target.get("username", username)))
+    flash(tr("flash.accounts.subscription_removed"), "success")
+    return redirect(url_for("accounts.public_profile", username=target.get("username", username)))
 
 
 @bp.route("/users/suggest")

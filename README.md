@@ -16,7 +16,11 @@ Application de streaming musical en `Flask` + `Jinja`, inspirée de YouTube Musi
 - Verrouillage progressif de connexion par adresse e-mail après échecs répétés (6 tentatives), avec durée doublée à chaque cycle
 - Envoi automatique d'un e-mail de déverrouillage après verrouillage, avec lien sécurisé de déverrouillage + connexion
 - Changement de mot de passe et lock de sécurité si mot de passe compromis
+- Changement du nom d'utilisateur depuis `Gérer mon compte`, avec validation JavaScript en direct + validation serveur
 - Invalidation globale des sessions après changement ou réinitialisation de mot de passe
+- Protection anti-vol de session par appareil de confiance + approbation par courriel des nouveaux appareils
+- Invalidation des sessions suspectes si un cookie semble rejoué depuis un autre environnement
+- Écran de blocage de session suspecte renforcé avec bandeau d'avertissement visuel, animation d'alerte et tentative de son d'avertissement au chargement
 - Ajout de chansons par URL ou upload (avec détection automatique des balises ID3)
 - Enrichissement automatique artiste/genre après upload via recherche en ligne
 - Détection automatique des sous-titres (métadonnées audio + recherche multi-sources en ligne)
@@ -46,6 +50,8 @@ Application de streaming musical en `Flask` + `Jinja`, inspirée de YouTube Musi
 - Préférences utilisateur pour exclure des chansons ou artistes des recommandations
 - Recommandations v2 équilibrées (mix préférences personnelles + populaires + découverte)
 - Statistiques créateur dans `Gérer mon compte` (écoutes, likes/dislikes, top chansons)
+- Abonnements publics aux créateurs avec désabonnement, compteur d'abonnés et notifications internes de nouvelles publications via la cloche PulseBeat
+- Panneau de notifications de publication responsive et utilisable sur mobile
 - Détection des doublons audio à l'upload via fingerprint SHA-256
 - Export des données de compte en JSON et CSV
 - Synchronisation de bibliothèque externe YouTube avec import de playlists (fonctionnelle), avec lecture partielle de certaines pistes selon les limites YouTube/Google
@@ -163,6 +169,236 @@ Comportement actuel :
 - Le lien de déverrouillage valide le verrou, reconnecte l'utilisateur automatiquement, puis réinitialise le compteur de lockout.
 - Une connexion réussie avec les bons identifiants réinitialise le compteur et le niveau de verrouillage.
 - Après un changement de mot de passe ou une réinitialisation, toutes les sessions existantes sont invalidées globalement ; une reconnexion est requise sur tous les appareils.
+
+## Système anti-vol de compte et de session
+
+PulseBeat protège désormais les sessions avec une logique de **sessions liées à l'appareil** plutôt qu'une simple confiance implicite dans le cookie Flask.
+
+Objectif :
+- compliquer l'exploitation d'un cookie de session volé
+- éviter les faux positifs trop agressifs liés à une géolocalisation IP stricte
+- garder une expérience utilisateur raisonnable sur un appareil habituel
+
+### Principe général
+
+Quand un utilisateur se connecte avec succès :
+
+1. PulseBeat crée ou lit un **cookie d'appareil dédié** (`pulsebeat_device_id` par défaut).
+2. Le serveur calcule une empreinte liée à cet appareil :
+   - hash du cookie d'appareil
+   - signature coarse du navigateur (`OS + navigateur`)
+   - préfixe IP approximatif pour contexte
+3. La session authentifiée est enregistrée côté serveur dans le document utilisateur.
+4. L'appareil est enregistré comme **appareil de confiance**.
+
+Ensuite, à chaque requête authentifiée :
+- le serveur vérifie que l'`active_session_id` de la session Flask existe toujours côté base
+- il vérifie aussi que cette session est utilisée depuis le **même appareil logique**
+- si ce n'est plus le cas, la session est considérée comme suspecte et est invalidée immédiatement
+
+### Données suivies côté serveur
+
+Chaque utilisateur peut maintenant contenir :
+
+- `trusted_devices`
+  - liste des appareils de confiance
+  - chaque entrée contient notamment :
+    - `device_hash`
+    - `ua_hash`
+    - `label`
+    - `last_ip_prefix`
+    - dates `first_seen_at` / `last_seen_at`
+
+- `active_sessions`
+  - sessions en cours autorisées
+  - chaque entrée contient notamment :
+    - `session_id`
+    - `device_hash`
+    - `ua_hash`
+    - `label`
+    - `last_ip_prefix`
+    - dates `created_at` / `last_seen_at`
+
+- `pending_device_approvals`
+  - demandes d'approbation de nouveaux appareils encore valides
+
+### Premier appareil vs nouvel appareil
+
+Cas 1 : premier appareil connu d'un compte
+- si aucun appareil de confiance n'existe encore, l'appareil courant devient automatiquement approuvé
+- l'utilisateur n'est pas bloqué
+
+Cas 2 : appareil déjà connu
+- si l'appareil courant correspond à un appareil de confiance, la connexion continue normalement
+
+Cas 3 : nouvel appareil inconnu
+- la connexion est **bloquée**
+- PulseBeat envoie un **courriel d'approbation d'appareil**
+- tant que l'utilisateur n'a pas cliqué sur ce lien, la connexion reste refusée sur cet appareil
+
+### Courriel d'approbation d'appareil
+
+Quand un nouvel appareil est détecté :
+
+- un lien signé temporaire est généré
+- ce lien expire selon `DEVICE_APPROVAL_TOKEN_MAX_AGE`
+- le courriel contient un résumé du contexte détecté, par exemple :
+  - type d'appareil / navigateur
+  - préfixe IP approximatif
+
+Si l'utilisateur clique sur le lien :
+- l'appareil est ajouté aux `trusted_devices`
+- la demande est retirée de `pending_device_approvals`
+- si le clic se fait depuis le même appareil :
+  - la connexion est autorisée directement
+  - si la 2FA est activée, PulseBeat envoie ensuite le code 2FA comme d'habitude
+- si le clic se fait depuis un autre appareil :
+  - l'appareil est tout de même approuvé
+  - l'utilisateur doit ensuite revenir se connecter normalement sur cet appareil
+
+### Détection d'une session suspecte
+
+Si une session active existe côté serveur mais qu'elle est utilisée depuis un environnement différent :
+
+- PulseBeat invalide immédiatement cette session
+- l'entrée correspondante est retirée des `active_sessions`
+- la session Flask locale est vidée
+- un courriel d'alerte est envoyé au propriétaire du compte
+- l'utilisateur qui tente d'utiliser cette session reçoit une page de blocage dédiée
+
+Ce comportement couvre notamment :
+- réutilisation d'un cookie de session sur un autre appareil
+- mismatch entre appareil attendu et appareil réellement utilisé
+- session active qui n'existe plus côté base
+
+### Message affiché en cas de session bloquée
+
+Quand une session est jugée suspecte :
+
+- côté HTML :
+  - PulseBeat affiche une page de blocage pleine page
+  - un bandeau d'**avertissement** rouge très visible est affiché en haut du message
+  - ce bandeau inclut une animation visuelle d'alerte pour attirer immédiatement l'attention
+  - une tentative de son d'alerte est jouée au chargement de la page si le navigateur l'autorise
+  - le message explique que l'utilisation semble illégitime
+  - il rappelle que des actions punitives peuvent s'appliquer en cas d'abus
+- côté AJAX / API :
+  - PulseBeat renvoie une réponse JSON propre avec code `403`
+
+### Interaction avec les autres mécanismes de sécurité
+
+Le système anti-vol de session fonctionne avec les autres protections existantes :
+
+- **2FA**
+  - la 2FA reste demandée après validation de l'identifiant/mot de passe
+  - si un nouvel appareil doit être approuvé, l'approbation d'appareil arrive d'abord
+  - ensuite, si la 2FA est active, le code 2FA est demandé
+
+- **Changement ou réinitialisation de mot de passe**
+  - toutes les `active_sessions` sont vidées
+  - les anciennes sessions deviennent invalides partout
+  - l'utilisateur doit se reconnecter
+
+- **Comptes Google**
+  - ils passent aussi par la logique d'appareil de confiance pour la session
+  - en revanche, la gestion des mots de passe compromis reste désactivée pour eux
+
+### Limites connues
+
+Cette protection augmente nettement la difficulté d'exploitation d'un cookie volé, mais il faut rester réaliste :
+
+- si un attaquant dérobe à la fois le cookie de session **et** le cookie d'appareil depuis le même navigateur compromis, la détection devient plus difficile
+- le système privilégie un bon compromis entre sécurité et UX, pas une preuve absolue d'identité matérielle
+
+En pratique, cela reste beaucoup plus robuste qu'une session Flask classique non liée à un appareil.
+
+## Abonnements créateurs et notifications internes
+
+PulseBeat permet de suivre les créateurs de musique publiant sur la plateforme, avec un modèle proche de YouTube mais volontairement plus simple et moins intrusif.
+
+### S'abonner à un créateur
+
+Depuis la page publique d'un utilisateur :
+
+- un utilisateur connecté peut cliquer sur `S'abonner`
+- il peut activer ou non l'option `Activer les notifications de publication`
+- l'abonnement est **public**
+- le créateur voit donc son nombre total d'abonnés publiquement sur son profil
+
+Comportement :
+
+- si l'utilisateur n'était pas encore abonné, PulseBeat crée l'abonnement
+- s'il était déjà abonné, le même formulaire sert à mettre à jour la préférence `notifications_enabled`
+- le désabonnement est disponible via un bouton `Se désabonner` sur ce même profil
+
+### Se désabonner
+
+PulseBeat gère explicitement le désabonnement :
+
+- le bouton `Se désabonner` supprime l'abonnement du compte courant pour ce créateur
+- l'opération est idempotente : si l'abonnement n'existe déjà plus, l'application reste cohérente
+- après désabonnement :
+  - le compteur public d'abonnés diminue
+  - plus aucune nouvelle notification de publication n'est créée pour ce créateur
+
+### Visibilité publique des abonnements
+
+Contrairement à YouTube, les abonnements sont considérés comme publics dans PulseBeat :
+
+- tous les visiteurs voient le **nombre** d'abonnés d'un créateur
+- seul le propriétaire du profil peut voir la **liste nominative** de ses abonnés
+
+Quand le créateur visite sa propre page publique :
+
+- un bouton ouvre une modale listant les abonnés
+- chaque ligne contient un lien cliquable vers le profil public de l'abonné
+- cette liste n'est jamais affichée aux autres visiteurs, qui ne voient que le compteur
+
+### Notifications de publication
+
+Les notifications liées aux abonnements restent **internes à PulseBeat** :
+
+- elles ne sont pas envoyées par courriel
+- elles apparaissent dans la cloche du header
+- elles sont consultables dans un panneau non bloquant
+
+Une notification est créée lorsqu'un créateur publie :
+
+- une **nouvelle chanson publique**
+- une **nouvelle playlist publique**
+- ou lorsqu'une playlist existante devient publique
+
+Chaque notification contient :
+
+- le nom du créateur
+- un lien vers le profil public du créateur
+- le titre du contenu publié
+- un lien direct vers la chanson ou la playlist
+
+### Lecture et état des notifications
+
+Dans le header :
+
+- la cloche affiche un compteur de notifications non lues
+- l'ouverture du panneau marque les notifications affichées comme lues
+- si aucune notification n'existe, PulseBeat affiche un état vide propre
+- sur mobile, le panneau s'ouvre comme une surface flottante dédiée au-dessus de l'interface, pour éviter qu'il soit masqué par le menu hamburger
+- le panneau reste refermable explicitement et utilisable au tactile
+
+### Résistance aux courses MongoDB
+
+Les flux d'abonnement ont été durcis pour éviter les incohérences sous accès concurrents :
+
+- l'abonnement utilise un **upsert atomique** basé sur le couple `(creator_id, subscriber_id)`
+- un index unique MongoDB empêche les doublons même si deux clics concurrents arrivent presque en même temps
+- le désabonnement utilise une suppression idempotente
+- la création des notifications de publication supporte déjà les doublons concurrents via index unique + gestion des erreurs de duplication
+
+Si une écriture Mongo échoue malgré tout :
+
+- PulseBeat essaie d'abord de récupérer proprement l'opération
+- si la récupération échoue, l'utilisateur reçoit un message clair
+- la page d'erreur globale ne doit apparaître qu'en dernier recours, si la gestion locale ne suffit pas
 
 ## Authentification 2 facteurs (2FA)
 
@@ -579,6 +815,14 @@ Variables disponibles :
 - `TWO_FACTOR_TOGGLE_TOKEN_MAX_AGE=3600` (durée de validité du lien de confirmation activation/désactivation 2FA, en secondes)
 - `TWO_FACTOR_TOGGLE_SALT=pulsebeat-two-factor-toggle` (salt du token de confirmation 2FA)
 
+### Sessions liées aux appareils (optionnel, recommandé)
+
+Variables disponibles :
+- `DEVICE_COOKIE_NAME=pulsebeat_device_id` (nom du cookie d'appareil PulseBeat)
+- `DEVICE_COOKIE_MAX_AGE=31536000` (durée de vie du cookie d'appareil, en secondes)
+- `DEVICE_APPROVAL_TOKEN_MAX_AGE=1800` (durée de validité du lien d'approbation d'un nouvel appareil)
+- `DEVICE_APPROVAL_SALT=pulsebeat-device-approval` (salt du token d'approbation d'appareil)
+
 ### JavaScript client (optionnel)
 
 Variables disponibles :
@@ -635,6 +879,8 @@ Au démarrage, l'application tente aussi de créer des index uniques sur :
 - `listening_history(user_id, song_id)`
 - `song_votes(song_id, user_id)`
 - `comment_votes(comment_id, user_id)` (si la collection est active)
+- `creator_subscriptions(creator_id, subscriber_id)`
+- `user_notifications(recipient_user_id, notification_type, content_type, content_id)`
 
 Pour les collections à risque de concurrence (`listening_history`, votes), PulseBeat tente automatiquement une déduplication avant la création des index uniques.
 
@@ -662,8 +908,25 @@ npm run build:client-js
   - votes chansons
   - votes commentaires
   - disponibilité des chansons externes
+- Les flux sensibles de sécurité session/appareil ont été renforcés :
+  - mise à jour ou insertion idempotente des `trusted_devices`
+  - enregistrement de `active_sessions` par appareil sans doublons logiques
+  - approbation de nouveaux appareils avec mise à jour ciblée de `pending_device_approvals`
+- La gestion de compte limite mieux les courses MongoDB :
+  - changement de `username` avec rattrapage propre des collisions d'index uniques
+  - rotation de `session_token_version` via écriture Mongo sécurisée
+  - reconnexion post-changement de mot de passe protégée par gestion d'erreur locale avant fallback global
+- Les abonnements créateurs sont durcis :
+  - abonnement via `upsert` atomique
+  - désabonnement idempotent
+  - notifications de publication protégées contre les doublons par index uniques
+- Les profils publics et le retour après abonnement/désabonnement ont été optimisés :
+  - filtrage des chansons et playlists visibles directement côté MongoDB
+  - projections de champs allégées sur les pages publiques
+  - index dédiés pour accélérer le chargement des profils créateurs, playlists et commentaires associés
 - Un handler global `PyMongoError` renvoie une réponse propre `503` (JSON pour API/AJAX, page erreur pour HTML) au lieu de faire planter l'application.
 - Les index uniques sur historique/votes limitent fortement les doublons créés par accès concurrents.
+- Quand PulseBeat peut récupérer localement une course MongoDB, il le fait et renvoie un message utilisateur propre ; la page d'erreur n'est utilisée qu'en dernier recours.
 - Le favicon est servi en `204` via `/favicon.ico` pour éviter les 404 répétitifs en logs
 - Correction d'un cas de persistance d'état UI qui pouvait bloquer `previous/next` dans le lecteur (boutons page + boutons média système)
 

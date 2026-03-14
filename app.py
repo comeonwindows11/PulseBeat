@@ -9,11 +9,16 @@ from pymongo.errors import PyMongoError
 
 import extensions
 from auth_helpers import (
+    apply_session_security_cookies,
     compose_and_filters,
+    count_unread_notifications,
     current_user,
+    ensure_request_device_id,
+    get_user_notifications,
     get_session_user_oid,
     normalize_email,
     normalize_username,
+    validate_bound_session_request,
     youtube_playlist_visibility_clause,
 )
 from blueprints.accounts import bp as accounts_bp
@@ -181,6 +186,10 @@ def create_app():
     app.config["TWO_FACTOR_CODE_MAX_AGE"] = int(os.getenv("TWO_FACTOR_CODE_MAX_AGE", "600"))
     app.config["TWO_FACTOR_TOGGLE_TOKEN_MAX_AGE"] = int(os.getenv("TWO_FACTOR_TOGGLE_TOKEN_MAX_AGE", "3600"))
     app.config["TWO_FACTOR_TOGGLE_SALT"] = os.getenv("TWO_FACTOR_TOGGLE_SALT", "pulsebeat-two-factor-toggle")
+    app.config["DEVICE_COOKIE_NAME"] = os.getenv("DEVICE_COOKIE_NAME", "pulsebeat_device_id")
+    app.config["DEVICE_COOKIE_MAX_AGE"] = int(os.getenv("DEVICE_COOKIE_MAX_AGE", str(365 * 24 * 3600)))
+    app.config["DEVICE_APPROVAL_TOKEN_MAX_AGE"] = int(os.getenv("DEVICE_APPROVAL_TOKEN_MAX_AGE", "1800"))
+    app.config["DEVICE_APPROVAL_SALT"] = os.getenv("DEVICE_APPROVAL_SALT", "pulsebeat-device-approval")
     app.config["GOOGLE_CLIENT_ID"] = os.getenv("GOOGLE_CLIENT_ID", "")
     app.config["GOOGLE_CLIENT_SECRET"] = os.getenv("GOOGLE_CLIENT_SECRET", "")
     app.config["GOOGLE_REDIRECT_URI"] = os.getenv("GOOGLE_REDIRECT_URI", "")
@@ -222,6 +231,9 @@ def create_app():
     extensions.users_col.update_many({"player_normalize_volume_enabled": {"$exists": False}}, {"$set": {"player_normalize_volume_enabled": True}})
     extensions.users_col.update_many({"two_factor_enabled": {"$exists": False}}, {"$set": {"two_factor_enabled": False}})
     extensions.users_col.update_many({"two_factor_prompt_pending": {"$exists": False}}, {"$set": {"two_factor_prompt_pending": False}})
+    extensions.users_col.update_many({"trusted_devices": {"$exists": False}}, {"$set": {"trusted_devices": []}})
+    extensions.users_col.update_many({"active_sessions": {"$exists": False}}, {"$set": {"active_sessions": []}})
+    extensions.users_col.update_many({"pending_device_approvals": {"$exists": False}}, {"$set": {"pending_device_approvals": []}})
     extensions.songs_col.update_many({"is_available": {"$exists": False}}, {"$set": {"is_available": True}})
     extensions.songs_col.update_many({"availability_reason": {"$exists": False}}, {"$set": {"availability_reason": ""}})
     for user in extensions.users_col.find({}, {"email": 1, "username": 1}):
@@ -232,6 +244,11 @@ def create_app():
     extensions.users_col.create_index("email_normalized", unique=True, name="uniq_users_email_normalized")
     extensions.users_col.create_index("username_normalized", unique=True, name="uniq_users_username_normalized")
     extensions.songs_col.create_index("audio_fingerprint", name="idx_songs_audio_fingerprint")
+    extensions.songs_col.create_index([("created_by", 1), ("created_at", -1)], name="idx_songs_creator_created")
+    extensions.songs_col.create_index([("created_by", 1), ("visibility", 1), ("created_at", -1)], name="idx_songs_creator_visibility_created")
+    extensions.playlists_col.create_index([("user_id", 1), ("updated_at", -1)], name="idx_playlists_user_updated")
+    extensions.playlists_col.create_index([("user_id", 1), ("visibility", 1), ("updated_at", -1)], name="idx_playlists_user_visibility_updated")
+    extensions.song_comments_col.create_index([("user_id", 1), ("created_at", -1)], name="idx_song_comments_user_created")
     extensions.external_integrations_col.create_index([("user_id", 1), ("provider", 1)], unique=True, name="uniq_ext_integration_user_provider")
     extensions.external_playlists_col.create_index(
         [("user_id", 1), ("provider", 1), ("external_playlist_id", 1)],
@@ -240,6 +257,22 @@ def create_app():
     )
     extensions.external_playlists_col.create_index([("user_id", 1), ("synced_at", -1)], name="idx_ext_playlist_user_synced")
     extensions.data_exports_col.create_index([("user_id", 1), ("created_at", -1)], name="idx_data_exports_user_created")
+    _ensure_unique_index_with_dedupe(
+        extensions.creator_subscriptions_col,
+        [("creator_id", 1), ("subscriber_id", 1)],
+        "uniq_creator_subscription_pair",
+        logger=app.logger,
+    )
+    extensions.creator_subscriptions_col.create_index([("creator_id", 1), ("created_at", -1)], name="idx_creator_subscriptions_creator_created")
+    extensions.creator_subscriptions_col.create_index([("subscriber_id", 1), ("created_at", -1)], name="idx_creator_subscriptions_subscriber_created")
+    _ensure_unique_index_with_dedupe(
+        extensions.user_notifications_col,
+        [("recipient_user_id", 1), ("notification_type", 1), ("content_type", 1), ("content_id", 1)],
+        "uniq_user_notification_publication",
+        logger=app.logger,
+    )
+    extensions.user_notifications_col.create_index([("recipient_user_id", 1), ("created_at", -1)], name="idx_user_notifications_recipient_created")
+    extensions.user_notifications_col.create_index([("recipient_user_id", 1), ("is_read", 1), ("created_at", -1)], name="idx_user_notifications_recipient_read")
     _ensure_unique_index_with_dedupe(
         extensions.listening_history_col,
         [("user_id", 1), ("song_id", 1)],
@@ -277,6 +310,8 @@ def create_app():
     def enforce_initial_setup_and_password_change():
         setup_done = root_admin_exists()
         endpoint = request.endpoint or ""
+        if endpoint != "static" and not endpoint.startswith("static"):
+            ensure_request_device_id()
         if not setup_done:
             allowed = {"accounts.setup_admin", "static"}
             if endpoint in allowed or endpoint.startswith("static"):
@@ -286,7 +321,17 @@ def create_app():
         user_oid = get_session_user_oid()
         if not user_oid:
             return None
-        user = extensions.users_col.find_one({"_id": user_oid}, {"require_password_change": 1, "auth_provider": 1, "session_token_version": 1})
+        user = extensions.users_col.find_one(
+            {"_id": user_oid},
+            {
+                "require_password_change": 1,
+                "auth_provider": 1,
+                "session_token_version": 1,
+                "active_sessions": 1,
+                "email": 1,
+                "username": 1,
+            },
+        )
         session_version = int(session.get("session_token_version", -1))
         user_version = int((user or {}).get("session_token_version", 0) or 0)
         if not user or session_version != user_version:
@@ -296,6 +341,9 @@ def create_app():
             if endpoint not in {"accounts.login", "accounts.google_login", "accounts.google_callback", "accounts.setup_admin", "static"} and not endpoint.startswith("static"):
                 flash(t("flash.accounts.session_invalidated"), "warning")
             return redirect(url_for("accounts.login"))
+        session_security_response = validate_bound_session_request(user)
+        if session_security_response is not None:
+            return session_security_response
         if not user or user.get("auth_provider") == "google" or not user.get("require_password_change", False):
             return None
 
@@ -361,6 +409,7 @@ def create_app():
 
     @app.after_request
     def add_security_headers(response):
+        response = apply_session_security_cookies(response)
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("X-Frame-Options", "DENY")
         response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
@@ -400,15 +449,21 @@ def create_app():
             session["csrf_token"] = csrf_token
         user = current_user()
         nav_playlists = []
+        header_notifications = []
+        unread_notification_count = 0
         if user:
             user_oid = get_session_user_oid()
             nav_query = compose_and_filters({"user_id": user_oid}, youtube_playlist_visibility_clause()) or {"user_id": user_oid}
             raw = list(extensions.playlists_col.find(nav_query).sort("created_at", -1).limit(6))
             nav_playlists = [{"id": str(p["_id"]), "name": p.get("name") or t("defaults.unnamed")} for p in raw]
+            unread_notification_count = count_unread_notifications(user_oid)
+            header_notifications = get_user_notifications(user_oid, limit=20)
         return {
             "app_name": app.config["APP_NAME"],
             "current_user": user,
             "nav_playlists": nav_playlists,
+            "header_notifications": header_notifications,
+            "header_notifications_unread": unread_notification_count,
             "current_lang": get_lang(),
             "t": t,
             "setup_required": not root_admin_exists(),

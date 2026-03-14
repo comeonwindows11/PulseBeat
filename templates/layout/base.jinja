@@ -77,6 +77,59 @@
           <a href="{{ url_for('playlists.list_playlists') }}">{{ t('nav.playlists') }}</a>
           <a href="{{ url_for('accounts.listening_history') }}">{{ t('nav.history') }}</a>
           <a href="{{ url_for('accounts.manage_account') }}">{{ t('nav.manage_account') }}</a>
+          <div class="notification-menu">
+            <button
+              id="notifications-toggle"
+              class="nav-icon-btn"
+              type="button"
+              aria-label="{{ t('notifications.title') }}"
+              aria-expanded="false"
+              data-mark-read-url="{{ url_for('accounts.mark_all_notifications_read') }}"
+            >
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 22a2.5 2.5 0 0 0 2.45-2h-4.9A2.5 2.5 0 0 0 12 22zm6-6V11a6 6 0 1 0-12 0v5l-2 2v1h16v-1l-2-2z"></path>
+              </svg>
+              {% if header_notifications_unread %}
+              <span id="notifications-badge" class="notification-badge">{{ "99+" if header_notifications_unread > 99 else header_notifications_unread }}</span>
+              {% else %}
+              <span id="notifications-badge" class="notification-badge hidden">0</span>
+              {% endif %}
+            </button>
+            <div id="notifications-panel" class="notifications-panel hidden" aria-hidden="true">
+              <div class="notifications-panel-head">
+                <strong>{{ t('notifications.title') }}</strong>
+                <button id="notifications-close" type="button" class="btn secondary notifications-close-btn">{{ t('modal.close') }}</button>
+              </div>
+              {% if header_notifications %}
+              <ul class="notifications-list">
+                {% for item in header_notifications %}
+                <li class="notification-item{% if not item.is_read %} unread{% endif %}">
+                  <p class="small muted">{{ item.created_at.strftime('%Y-%m-%d %H:%M') if item.created_at else '' }}</p>
+                  <p class="notification-item-body">
+                    {% if item.creator_url %}
+                    <a href="{{ item.creator_url }}">{{ item.creator_username }}</a>
+                    {% else %}
+                    <strong>{{ item.creator_username }}</strong>
+                    {% endif %}
+                    {% if item.content_type == "playlist" %}
+                    {{ t('notifications.publication_playlist') }}
+                    {% else %}
+                    {{ t('notifications.publication_song') }}
+                    {% endif %}
+                    {% if item.content_url %}
+                    <a href="{{ item.content_url }}">{{ item.content_title }}</a>
+                    {% else %}
+                    <strong>{{ item.content_title }}</strong>
+                    {% endif %}
+                  </p>
+                </li>
+                {% endfor %}
+              </ul>
+              {% else %}
+              <p class="muted small notifications-empty">{{ t('notifications.empty') }}</p>
+              {% endif %}
+            </div>
+          </div>
           {% if current_user.is_admin %}
             <a href="{{ url_for('admin.dashboard') }}">{{ t('nav.admin') }}</a>
           {% endif %}
@@ -468,4 +521,3 @@
   <script src="{{ url_for('static', filename=client_js_asset('player')) }}"></script>
 </body>
 </html>
-

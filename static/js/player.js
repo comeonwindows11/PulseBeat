@@ -158,6 +158,7 @@
   let creatingPlaylist = false;
   let tabGuardNoticeAt = 0;
   let playerShellVisible = false;
+  let playerShellAnimateOnNextReveal = false;
   let manualPlaybackAssistTimers = [];
   const tabGuardState = {
     tabId: "",
@@ -1658,15 +1659,20 @@
     const shouldShow = Boolean(song && song.id);
     playerShell.classList.toggle("player-shell-hidden", !shouldShow);
     playerShell.setAttribute("aria-hidden", shouldShow ? "false" : "true");
-    if (shouldShow && !playerShellVisible) {
+    if (shouldShow && !playerShellVisible && playerShellAnimateOnNextReveal) {
       playerShell.classList.remove("player-shell-entering");
       void playerShell.offsetWidth;
       playerShell.classList.add("player-shell-entering");
       window.setTimeout(() => {
         if (playerShell) playerShell.classList.remove("player-shell-entering");
       }, 380);
+      playerShellAnimateOnNextReveal = false;
+    } else if (shouldShow && !playerShellVisible) {
+      playerShell.classList.remove("player-shell-entering");
+      playerShellAnimateOnNextReveal = false;
     } else if (!shouldShow) {
       playerShell.classList.remove("player-shell-entering");
+      playerShellAnimateOnNextReveal = false;
     }
     playerShellVisible = shouldShow;
     syncPlayerOffset();
@@ -2286,6 +2292,7 @@
     state.shuffleHistory = [];
     state.queueContext = context === "playlist" ? "playlist" : "auto";
     state.manualStartSongId = manualStart && state.queue[state.index] ? String(state.queue[state.index].id || "") : "";
+    playerShellAnimateOnNextReveal = Boolean(manualStart && !playerShellVisible);
     applySong(true, { manual: manualStart }).catch(() => {});
     saveState();
   }

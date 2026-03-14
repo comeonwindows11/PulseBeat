@@ -158,6 +158,7 @@
 
   const reportModal = document.getElementById("report-modal");
   const shareModal = document.getElementById("share-modal");
+  const profileSubscribersModal = document.getElementById("profile-subscribers-modal");
   const shareModalTitle = document.getElementById("share-modal-title");
   const shareLinkInput = document.getElementById("share-link-input");
   const shareCopyBtn = document.getElementById("share-copy-btn");
@@ -177,7 +178,89 @@
   const reportForm = document.getElementById("report-modal-form");
   const reportCancel = document.getElementById("report-modal-cancel");
   const reportReason = document.getElementById("report-modal-reason");
+  const notificationsToggle = document.getElementById("notifications-toggle");
+  const notificationsPanel = document.getElementById("notifications-panel");
+  const notificationsBadge = document.getElementById("notifications-badge");
+  const notificationsClose = document.getElementById("notifications-close");
   let sharePayload = { url: "", title: "", text: "" };
+
+  function closeNotificationsPanel() {
+    if (!notificationsPanel || !notificationsToggle) return;
+    notificationsPanel.classList.add("hidden");
+    notificationsPanel.setAttribute("aria-hidden", "true");
+    notificationsToggle.setAttribute("aria-expanded", "false");
+  }
+
+  function markHeaderNotificationsRead() {
+    if (!notificationsToggle || !notificationsPanel) return;
+    if (!notificationsBadge || notificationsBadge.classList.contains("hidden")) return;
+    const url = notificationsToggle.getAttribute("data-mark-read-url") || "";
+    if (!url) return;
+    fetch(url, {
+      method: "POST",
+      credentials: "same-origin"
+    }).then((res) => {
+      if (!res.ok) return null;
+      return res.json();
+    }).then((data) => {
+      if (!data || !data.ok) return;
+      notificationsBadge.textContent = "0";
+      notificationsBadge.classList.add("hidden");
+      notificationsPanel.querySelectorAll(".notification-item.unread").forEach((item) => {
+        item.classList.remove("unread");
+      });
+    }).catch(() => {});
+  }
+
+  if (notificationsToggle && notificationsPanel) {
+    notificationsToggle.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const willOpen = notificationsPanel.classList.contains("hidden");
+      if (!willOpen) {
+        closeNotificationsPanel();
+        return;
+      }
+      notificationsPanel.classList.remove("hidden");
+      notificationsPanel.setAttribute("aria-hidden", "false");
+      notificationsToggle.setAttribute("aria-expanded", "true");
+      markHeaderNotificationsRead();
+    });
+
+    notificationsPanel.addEventListener("click", (event) => {
+      event.stopPropagation();
+    });
+
+    if (notificationsClose) {
+      notificationsClose.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        closeNotificationsPanel();
+      });
+    }
+
+    document.addEventListener("click", (event) => {
+      if (!notificationsPanel || notificationsPanel.classList.contains("hidden")) return;
+      if (event.target.closest("#notifications-panel") || event.target.closest("#notifications-toggle")) return;
+      closeNotificationsPanel();
+    });
+  }
+
+  document.addEventListener("click", (event) => {
+    const openBtn = event.target.closest("[data-open-modal]");
+    if (openBtn) {
+      event.preventDefault();
+      const modalId = openBtn.getAttribute("data-open-modal") || "";
+      if (modalId) showModal(document.getElementById(modalId));
+      return;
+    }
+    const closeBtn = event.target.closest("[data-close-modal]");
+    if (closeBtn) {
+      event.preventDefault();
+      const modalId = closeBtn.getAttribute("data-close-modal") || "";
+      if (modalId) hideModal(document.getElementById(modalId));
+    }
+  });
 
   function updateShareModalLinks(payload) {
     const url = String(payload.url || "").trim();
@@ -1801,7 +1884,7 @@
     });
   });
 
-  [confirmModal, reportModal, userPickerModal, tempEmailModal, lyricsCandidateModal, shareModal].forEach((modal) => {
+  [confirmModal, reportModal, userPickerModal, tempEmailModal, lyricsCandidateModal, shareModal, profileSubscribersModal].forEach((modal) => {
     if (!modal) return;
     modal.addEventListener("click", (event) => {
       if (event.target === modal) hideModal(modal);
@@ -1816,10 +1899,10 @@
     hideModal(tempEmailModal);
     hideModal(lyricsCandidateModal);
     hideModal(shareModal);
+    hideModal(profileSubscribersModal);
+    closeNotificationsPanel();
   });
 })();
-
-
 
 
 

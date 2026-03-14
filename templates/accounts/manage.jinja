@@ -42,6 +42,30 @@
         <div><span class="muted small">{{ t('auth.login') }}</span><strong>{% if me.is_google_account %}Google{% else %}PulseBeat{% endif %}</strong></div>
         <div><span class="muted small">{{ t('account.two_factor_status') }}</span><strong>{% if me.two_factor_enabled %}{{ t('account.two_factor_enabled') }}{% else %}{{ t('account.two_factor_disabled') }}{% endif %}</strong></div>
       </div>
+      {% if not me.require_password_change %}
+      <div class="security-split top-gap">
+        <article class="sub-card">
+          <h3>{{ t('account.change_username_title') }}</h3>
+          <p class="muted small">{{ t('account.change_username_hint') }}</p>
+          <form method="post" action="{{ username_update_url }}" class="stack" data-validate-form="1">
+            <label>{{ t('auth.username') }}
+              <input
+                type="text"
+                name="username"
+                value="{{ me.username }}"
+                minlength="3"
+                maxlength="32"
+                pattern="[A-Za-z0-9_.-]{3,32}"
+                data-remote-check="username"
+                data-remote-url="{{ url_for('accounts.check_availability') }}"
+                required
+              >
+            </label>
+            <button type="submit">{{ t('account.change_username_cta') }}</button>
+          </form>
+        </article>
+      </div>
+      {% endif %}
     </section>
 
     <section id="account-security" class="card dashboard-panel">

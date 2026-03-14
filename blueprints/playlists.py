@@ -8,6 +8,7 @@ from auth_helpers import (
     can_access_song,
     compose_and_filters,
     contains_profanity,
+    create_creator_publication_notifications,
     get_session_user_oid,
     is_youtube_integration_enabled,
     is_youtube_linked_playlist,
@@ -180,6 +181,8 @@ def list_playlists():
             link = url_for("playlists.playlist_detail", playlist_id=str(playlist_id), _external=True)
             for target in extensions.users_col.find({"_id": {"$in": collaborator_ids}}, {"email": 1, "username": 1}):
                 send_playlist_share_email(target, owner.get("username", "user"), name, link)
+        if visibility == "public":
+            create_creator_publication_notifications(user_oid, "playlist", playlist_id, name)
         flash(tr("flash.playlists.created"), "success")
         return redirect(url_for("playlists.playlist_detail", playlist_id=str(playlist_id)))
 
@@ -490,6 +493,8 @@ def update_playlist(playlist_id):
         {"_id": playlist_oid},
         {"$set": {"name": name, "visibility": visibility, "updated_at": datetime.utcnow()}},
     )
+    if normalize_playlist_visibility(playlist) != "public" and visibility == "public":
+        create_creator_publication_notifications(user_oid, "playlist", playlist_oid, name)
     flash(tr("flash.playlists.updated"), "success")
     return redirect(url_for("playlists.playlist_detail", playlist_id=playlist_id))
 

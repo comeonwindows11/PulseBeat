@@ -1,6 +1,7 @@
 import hashlib
 import os
 import re
+import secrets
 import smtplib
 import time
 from datetime import datetime, timedelta
@@ -10,8 +11,8 @@ from urllib.parse import parse_qs, urlparse
 
 import requests
 from bson import ObjectId
-from flask import current_app, flash, redirect, session, url_for
-from pymongo.errors import AutoReconnect, DuplicateKeyError, NetworkTimeout, OperationFailure, WriteError
+from flask import current_app, flash, g, jsonify, redirect, render_template, request, session, url_for
+from pymongo.errors import AutoReconnect, BulkWriteError, DuplicateKeyError, NetworkTimeout, OperationFailure, WriteError
 from werkzeug.utils import secure_filename
 
 import extensions
@@ -88,6 +89,9 @@ FEATURE_DEFAULTS_FULL = {
 }
 APP_SETTINGS_DOC_ID = "global"
 YOUTUBE_URL_RE = re.compile(r"(youtube\.com|youtu\.be)", re.IGNORECASE)
+DEVICE_COOKIE_DEFAULT_NAME = "pulsebeat_device_id"
+MAX_TRACKED_DEVICES = 10
+MAX_TRACKED_ACTIVE_SESSIONS = 10
 
 
 def parse_object_id(value: str):
@@ -99,6 +103,428 @@ def parse_object_id(value: str):
 
 def get_session_user_oid():
     return parse_object_id(session.get("user_id", ""))
+
+
+def _hash_text(value: str) -> str:
+    return hashlib.sha256((value or "").encode("utf-8")).hexdigest()
+
+
+def _session_device_cookie_name() -> str:
+    return str(current_app.config.get("DEVICE_COOKIE_NAME", DEVICE_COOKIE_DEFAULT_NAME) or DEVICE_COOKIE_DEFAULT_NAME)
+
+
+def _session_device_cookie_max_age() -> int:
+    return max(3600, int(current_app.config.get("DEVICE_COOKIE_MAX_AGE", 31536000) or 31536000))
+
+
+def _request_wants_json() -> bool:
+    requested_with = (request.headers.get("X-Requested-With", "") or "").strip().lower()
+    accept = (request.headers.get("Accept", "") or "").lower()
+    content_type = (request.content_type or "").lower()
+    return bool(request.is_json or requested_with == "xmlhttprequest" or "application/json" in accept or "application/json" in content_type)
+
+
+def _client_ip_address() -> str:
+    forwarded = (request.headers.get("X-Forwarded-For", "") or "").split(",")[0].strip()
+    if forwarded:
+        return forwarded
+    return (request.headers.get("X-Real-IP", "") or request.remote_addr or "").strip()
+
+
+def _coarse_ip_prefix(ip_address: str) -> str:
+    raw = (ip_address or "").strip()
+    if not raw:
+        return ""
+    if ":" in raw:
+        return ":".join([part for part in raw.split(":") if part][:4])
+    if "." in raw:
+        return ".".join(raw.split(".")[:3])
+    return raw[:32]
+
+
+def _browser_family(user_agent: str) -> str:
+    ua = (user_agent or "").lower()
+    if "edg/" in ua:
+        return "Edge"
+    if "opr/" in ua or "opera" in ua:
+        return "Opera"
+    if "firefox/" in ua:
+        return "Firefox"
+    if "chrome/" in ua or "chromium/" in ua:
+        return "Chrome"
+    if "safari/" in ua:
+        return "Safari"
+    return "Browser"
+
+
+def _os_family(user_agent: str) -> str:
+    ua = (user_agent or "").lower()
+    if "windows" in ua:
+        return "Windows"
+    if "android" in ua:
+        return "Android"
+    if "iphone" in ua or "ipad" in ua or "ios" in ua:
+        return "iOS"
+    if "mac os" in ua or "macintosh" in ua:
+        return "macOS"
+    if "linux" in ua:
+        return "Linux"
+    return "Device"
+
+
+def _user_agent_signature(user_agent: str) -> str:
+    return f"{_os_family(user_agent)}|{_browser_family(user_agent)}"
+
+
+def _device_label(user_agent: str) -> str:
+    return f"{_os_family(user_agent)} / {_browser_family(user_agent)}"
+
+
+def ensure_request_device_id() -> str:
+    cached = getattr(g, "_pulsebeat_device_id", "")
+    if cached:
+        return cached
+
+    cookie_name = _session_device_cookie_name()
+    raw_value = (request.cookies.get(cookie_name, "") or "").strip()
+    if raw_value:
+        g._pulsebeat_device_id = raw_value
+        return raw_value
+
+    raw_value = secrets.token_urlsafe(32)
+    g._pulsebeat_device_id = raw_value
+    g._pulsebeat_device_cookie_needs_set = True
+    return raw_value
+
+
+def get_request_device_context():
+    raw_device_id = ensure_request_device_id()
+    user_agent = (request.headers.get("User-Agent", "") or "").strip()
+    ua_signature = _user_agent_signature(user_agent)
+    ip_address = _client_ip_address()
+    return {
+        "device_id": raw_device_id,
+        "device_hash": _hash_text(raw_device_id),
+        "ua_hash": _hash_text(ua_signature),
+        "ua_signature": ua_signature,
+        "label": _device_label(user_agent),
+        "ip_prefix": _coarse_ip_prefix(ip_address),
+    }
+
+
+def device_summary_text(context: dict | None) -> str:
+    data = context or {}
+    label = str(data.get("label", "") or "").strip()
+    ip_prefix = str(data.get("ip_prefix", "") or "").strip()
+    if label and ip_prefix:
+        return f"{label} ({ip_prefix})"
+    return label or ip_prefix or "unknown"
+
+
+def apply_session_security_cookies(response):
+    if not getattr(g, "_pulsebeat_device_cookie_needs_set", False):
+        return response
+
+    cookie_name = _session_device_cookie_name()
+    raw_value = getattr(g, "_pulsebeat_device_id", "")
+    if not raw_value:
+        return response
+
+    response.set_cookie(
+        cookie_name,
+        raw_value,
+        max_age=_session_device_cookie_max_age(),
+        httponly=True,
+        secure=bool(current_app.config.get("SESSION_COOKIE_SECURE", False)),
+        samesite=str(current_app.config.get("SESSION_COOKIE_SAMESITE", "Lax") or "Lax"),
+        path="/",
+    )
+    return response
+
+
+def _trusted_devices_list(user) -> list:
+    return list((user or {}).get("trusted_devices", []) or [])
+
+
+def is_trusted_device(user, context: dict | None) -> bool:
+    data = context or {}
+    device_hash = str(data.get("device_hash", "") or "")
+    ua_hash = str(data.get("ua_hash", "") or "")
+    if not device_hash:
+        return False
+    for entry in _trusted_devices_list(user):
+        if str(entry.get("device_hash", "") or "") != device_hash:
+            continue
+        entry_ua_hash = str(entry.get("ua_hash", "") or "")
+        if not entry_ua_hash or not ua_hash or entry_ua_hash == ua_hash:
+            return True
+    return False
+
+
+def remember_trusted_device(user_oid, context: dict | None):
+    if not user_oid or not context:
+        return
+    now = datetime.utcnow()
+    entry = {
+        "device_hash": str(context.get("device_hash", "") or ""),
+        "ua_hash": str(context.get("ua_hash", "") or ""),
+        "label": str(context.get("label", "") or ""),
+        "last_ip_prefix": str(context.get("ip_prefix", "") or ""),
+        "first_seen_at": now,
+        "last_seen_at": now,
+    }
+    if not entry["device_hash"]:
+        return
+    result = safe_mongo_update_one(
+        extensions.users_col,
+        {"_id": user_oid, "trusted_devices.device_hash": entry["device_hash"]},
+        {
+            "$set": {
+                "trusted_devices.$.ua_hash": entry["ua_hash"],
+                "trusted_devices.$.label": entry["label"],
+                "trusted_devices.$.last_ip_prefix": entry["last_ip_prefix"],
+                "trusted_devices.$.last_seen_at": now,
+            }
+        },
+    )
+    if result.matched_count:
+        return
+
+    inserted = safe_mongo_update_one(
+        extensions.users_col,
+        {"_id": user_oid, "trusted_devices.device_hash": {"$ne": entry["device_hash"]}},
+        {"$push": {"trusted_devices": {"$each": [entry], "$slice": -MAX_TRACKED_DEVICES}}},
+    )
+    if not inserted.matched_count:
+        safe_mongo_update_one(
+            extensions.users_col,
+            {"_id": user_oid, "trusted_devices.device_hash": entry["device_hash"]},
+            {
+                "$set": {
+                    "trusted_devices.$.ua_hash": entry["ua_hash"],
+                    "trusted_devices.$.label": entry["label"],
+                    "trusted_devices.$.last_ip_prefix": entry["last_ip_prefix"],
+                    "trusted_devices.$.last_seen_at": now,
+                }
+            },
+        )
+
+
+def touch_trusted_device(user_oid, context: dict | None):
+    if not user_oid or not context or not context.get("device_hash"):
+        return
+    now = datetime.utcnow()
+    result = safe_mongo_update_one(
+        extensions.users_col,
+        {"_id": user_oid, "trusted_devices.device_hash": context["device_hash"]},
+        {
+            "$set": {
+                "trusted_devices.$.ua_hash": str(context.get("ua_hash", "") or ""),
+                "trusted_devices.$.label": str(context.get("label", "") or ""),
+                "trusted_devices.$.last_ip_prefix": str(context.get("ip_prefix", "") or ""),
+                "trusted_devices.$.last_seen_at": now,
+            }
+        },
+    )
+    if result.matched_count == 0:
+        remember_trusted_device(user_oid, context)
+
+
+def _register_active_session(user_oid, context: dict | None) -> str:
+    if not user_oid or not context:
+        return ""
+    session_id = secrets.token_urlsafe(32)
+    now = datetime.utcnow()
+    entry = {
+        "session_id": session_id,
+        "device_hash": str(context.get("device_hash", "") or ""),
+        "ua_hash": str(context.get("ua_hash", "") or ""),
+        "label": str(context.get("label", "") or ""),
+        "last_ip_prefix": str(context.get("ip_prefix", "") or ""),
+        "created_at": now,
+        "last_seen_at": now,
+    }
+    device_hash = entry["device_hash"]
+    if device_hash:
+        result = safe_mongo_update_one(
+            extensions.users_col,
+            {"_id": user_oid, "active_sessions.device_hash": device_hash},
+            {
+                "$set": {
+                    "active_sessions.$.session_id": session_id,
+                    "active_sessions.$.ua_hash": entry["ua_hash"],
+                    "active_sessions.$.label": entry["label"],
+                    "active_sessions.$.last_ip_prefix": entry["last_ip_prefix"],
+                    "active_sessions.$.created_at": now,
+                    "active_sessions.$.last_seen_at": now,
+                }
+            },
+        )
+        if not result.matched_count:
+            inserted = safe_mongo_update_one(
+                extensions.users_col,
+                {"_id": user_oid, "active_sessions.device_hash": {"$ne": device_hash}},
+                {"$push": {"active_sessions": {"$each": [entry], "$slice": -MAX_TRACKED_ACTIVE_SESSIONS}}},
+            )
+            if not inserted.matched_count:
+                safe_mongo_update_one(
+                    extensions.users_col,
+                    {"_id": user_oid, "active_sessions.device_hash": device_hash},
+                    {
+                        "$set": {
+                            "active_sessions.$.session_id": session_id,
+                            "active_sessions.$.ua_hash": entry["ua_hash"],
+                            "active_sessions.$.label": entry["label"],
+                            "active_sessions.$.last_ip_prefix": entry["last_ip_prefix"],
+                            "active_sessions.$.created_at": now,
+                            "active_sessions.$.last_seen_at": now,
+                        }
+                    },
+                )
+    else:
+        safe_mongo_update_one(
+            extensions.users_col,
+            {"_id": user_oid},
+            {"$push": {"active_sessions": {"$each": [entry], "$slice": -MAX_TRACKED_ACTIVE_SESSIONS}}},
+        )
+    return session_id
+
+
+def begin_authenticated_session(user):
+    if not user:
+        return ""
+    user_oid = user.get("_id")
+    context = get_request_device_context()
+    remember_trusted_device(user_oid, context)
+    session.clear()
+    session["user_id"] = str(user_oid)
+    session["session_token_version"] = int(user.get("session_token_version", 0) or 0)
+    session["active_session_id"] = _register_active_session(user_oid, context)
+    return session.get("active_session_id", "")
+
+
+def clear_current_session_binding(user_oid=None):
+    session_id = str(session.get("active_session_id", "") or "").strip()
+    if user_oid and session_id:
+        safe_mongo_update_one(
+            extensions.users_col,
+            {"_id": user_oid},
+            {"$pull": {"active_sessions": {"session_id": session_id}}},
+        )
+    session.pop("active_session_id", None)
+
+
+def _build_session_invalid_response():
+    message = tr("flash.accounts.session_invalidated")
+    if _request_wants_json():
+        return jsonify({"ok": False, "message": message}), 401
+    flash(message, "warning")
+    return redirect(url_for("accounts.login"))
+
+
+def _send_suspicious_session_alert(user, context: dict | None):
+    if not user:
+        return False
+    summary = device_summary_text(context)
+    plain_text = tr("auth.suspicious_session_plain_body", username=user.get("username", "user"), device=summary)
+    html_body = f"""
+<html>
+  <body style="margin:0;padding:0;background:#f4f6fb;font-family:Segoe UI,Arial,sans-serif;color:#101828;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f4f6fb;padding:24px 0;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:640px;background:#ffffff;border-radius:18px;overflow:hidden;border:1px solid #d9e1f2;">
+            <tr>
+              <td style="padding:24px;background:#0f172a;color:#f8fafc;">
+                <h1 style="margin:0;font-size:24px;">PulseBeat</h1>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:24px;">
+                <h2 style="margin:0 0 14px 0;font-size:22px;color:#101828;">{tr("auth.suspicious_session_heading")}</h2>
+                <p style="margin:0 0 12px 0;line-height:1.6;">{tr("auth.suspicious_session_html_greeting", username=user.get("username", "user"))}</p>
+                <p style="margin:0 0 12px 0;line-height:1.6;">{tr("auth.suspicious_session_html_intro", device=summary)}</p>
+                <p style="margin:0;line-height:1.6;color:#5b6472;">{tr("auth.suspicious_session_ignore")}</p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>
+"""
+    return send_email_message(user.get("email", ""), tr("auth.suspicious_session_subject"), plain_text, html_body)
+
+
+def _build_suspicious_session_response(user, context: dict | None):
+    _send_suspicious_session_alert(user, context)
+    message = tr("flash.accounts.session_suspicious")
+    if _request_wants_json():
+        return jsonify({"ok": False, "message": message}), 403
+    return (
+        render_template(
+            "accounts/session_blocked.jinja",
+            blocked_title=tr("account.session_blocked_title"),
+            blocked_body=tr("account.session_blocked_body"),
+            blocked_note=tr("account.session_blocked_note"),
+            blocked_login_label=tr("account.session_blocked_cta"),
+        ),
+        403,
+    )
+
+
+def validate_bound_session_request(user):
+    if not user:
+        return None
+
+    user_oid = user.get("_id")
+    if not user_oid:
+        session.clear()
+        return _build_session_invalid_response()
+
+    context = get_request_device_context()
+    session_id = str(session.get("active_session_id", "") or "").strip()
+    if not session_id:
+        touch_trusted_device(user_oid, context)
+        session["active_session_id"] = _register_active_session(user_oid, context)
+        return None
+
+    active_sessions = list(user.get("active_sessions", []) or [])
+    active_entry = next((row for row in active_sessions if str(row.get("session_id", "") or "") == session_id), None)
+    if not active_entry:
+        clear_current_session_binding(user_oid)
+        session.clear()
+        return _build_session_invalid_response()
+
+    expected_device_hash = str(active_entry.get("device_hash", "") or "")
+    expected_ua_hash = str(active_entry.get("ua_hash", "") or "")
+    current_device_hash = str(context.get("device_hash", "") or "")
+    current_ua_hash = str(context.get("ua_hash", "") or "")
+    if expected_device_hash != current_device_hash or (expected_ua_hash and expected_ua_hash != current_ua_hash):
+        clear_current_session_binding(user_oid)
+        session.clear()
+        return _build_suspicious_session_response(user, context)
+
+    now = datetime.utcnow()
+    result = safe_mongo_update_one(
+        extensions.users_col,
+        {"_id": user_oid, "active_sessions.session_id": session_id},
+        {
+            "$set": {
+                "active_sessions.$.last_seen_at": now,
+                "active_sessions.$.label": str(context.get("label", "") or ""),
+                "active_sessions.$.last_ip_prefix": str(context.get("ip_prefix", "") or ""),
+                "active_sessions.$.ua_hash": current_ua_hash,
+            }
+        },
+    )
+    if result.matched_count == 0:
+        clear_current_session_binding(user_oid)
+        session.clear()
+        return _build_session_invalid_response()
+    touch_trusted_device(user_oid, context)
+    return None
 
 
 def get_app_settings():
@@ -558,6 +984,176 @@ def is_email_verified(user):
     if user.get("auth_provider") == "google":
         return True
     return bool(user.get("email_verified", False))
+
+
+def count_creator_subscribers(creator_oid):
+    if not creator_oid or extensions.creator_subscriptions_col is None:
+        return 0
+    return extensions.creator_subscriptions_col.count_documents({"creator_id": creator_oid})
+
+
+def get_creator_subscription(creator_oid, subscriber_oid):
+    if not creator_oid or not subscriber_oid or extensions.creator_subscriptions_col is None:
+        return None
+    return extensions.creator_subscriptions_col.find_one({"creator_id": creator_oid, "subscriber_id": subscriber_oid})
+
+
+def list_creator_subscribers(creator_oid):
+    if not creator_oid or extensions.creator_subscriptions_col is None:
+        return []
+
+    rows = list(
+        extensions.creator_subscriptions_col.find(
+            {"creator_id": creator_oid},
+            {"subscriber_id": 1, "notifications_enabled": 1, "created_at": 1},
+        ).sort("created_at", -1)
+    )
+    user_ids = [row.get("subscriber_id") for row in rows if row.get("subscriber_id")]
+    if not user_ids:
+        return []
+
+    user_map = {
+        row.get("_id"): row
+        for row in extensions.users_col.find({"_id": {"$in": user_ids}}, {"username": 1})
+    }
+    items = []
+    for row in rows:
+        subscriber_oid = row.get("subscriber_id")
+        user = user_map.get(subscriber_oid)
+        if not user:
+            continue
+        username = user.get("username", "user")
+        items.append(
+            {
+                "id": str(user.get("_id")),
+                "username": username,
+                "profile_url": url_for("accounts.public_profile", username=username),
+                "notifications_enabled": bool(row.get("notifications_enabled", False)),
+                "created_at": row.get("created_at"),
+            }
+        )
+    items.sort(key=lambda item: item.get("username", "").lower())
+    return items
+
+
+def create_creator_publication_notifications(creator_oid, content_type: str, content_id, content_title: str):
+    if not creator_oid or not content_id or content_type not in {"song", "playlist"}:
+        return 0
+    if extensions.creator_subscriptions_col is None or extensions.user_notifications_col is None:
+        return 0
+
+    creator = extensions.users_col.find_one({"_id": creator_oid}, {"username": 1})
+    if not creator:
+        return 0
+
+    creator_username = creator.get("username", "user")
+    subscribers = list(
+        extensions.creator_subscriptions_col.find(
+            {"creator_id": creator_oid, "notifications_enabled": True},
+            {"subscriber_id": 1},
+        )
+    )
+    docs = []
+    now = datetime.utcnow()
+    for row in subscribers:
+        subscriber_oid = row.get("subscriber_id")
+        if not subscriber_oid or str(subscriber_oid) == str(creator_oid):
+            continue
+        docs.append(
+            {
+                "recipient_user_id": subscriber_oid,
+                "notification_type": "creator_publication",
+                "creator_id": creator_oid,
+                "creator_username_snapshot": creator_username,
+                "content_type": content_type,
+                "content_id": content_id,
+                "content_title": (content_title or "").strip() or tr("defaults.untitled"),
+                "created_at": now,
+                "is_read": False,
+                "read_at": None,
+            }
+        )
+
+    if not docs:
+        return 0
+
+    try:
+        result = extensions.user_notifications_col.insert_many(docs, ordered=False)
+        return len(getattr(result, "inserted_ids", []) or [])
+    except DuplicateKeyError:
+        return 0
+    except BulkWriteError as exc:
+        details = getattr(exc, "details", {}) or {}
+        write_errors = details.get("writeErrors") or []
+        if write_errors and all(int((row or {}).get("code", 0) or 0) == 11000 for row in write_errors):
+            return max(0, len(docs) - len(write_errors))
+        raise
+
+
+def count_unread_notifications(user_oid):
+    if not user_oid or extensions.user_notifications_col is None:
+        return 0
+    return extensions.user_notifications_col.count_documents({"recipient_user_id": user_oid, "is_read": False})
+
+
+def mark_notifications_read(user_oid):
+    if not user_oid or extensions.user_notifications_col is None:
+        return 0
+    result = extensions.user_notifications_col.update_many(
+        {"recipient_user_id": user_oid, "is_read": False},
+        {"$set": {"is_read": True, "read_at": datetime.utcnow()}},
+    )
+    return int(getattr(result, "modified_count", 0) or 0)
+
+
+def get_user_notifications(user_oid, limit=20):
+    if not user_oid or extensions.user_notifications_col is None:
+        return []
+
+    rows = list(
+        extensions.user_notifications_col.find({"recipient_user_id": user_oid}).sort("created_at", -1).limit(max(1, int(limit or 20)))
+    )
+    if not rows:
+        return []
+
+    creator_ids = [row.get("creator_id") for row in rows if row.get("creator_id")]
+    creator_map = {
+        row.get("_id"): row
+        for row in extensions.users_col.find({"_id": {"$in": creator_ids}}, {"username": 1})
+    } if creator_ids else {}
+
+    items = []
+    for row in rows:
+        creator_oid = row.get("creator_id")
+        creator = creator_map.get(creator_oid)
+        creator_username = (
+            creator.get("username", "user")
+            if creator
+            else (row.get("creator_username_snapshot") or "user")
+        )
+        creator_url = url_for("accounts.public_profile", username=creator_username) if creator_username else ""
+        content_id = row.get("content_id")
+        content_type = (row.get("content_type") or "").strip().lower()
+        if content_type == "playlist" and content_id:
+            content_url = url_for("playlists.playlist_detail", playlist_id=str(content_id))
+        elif content_type == "song" and content_id:
+            content_url = url_for("songs.song_detail", song_id=str(content_id))
+        else:
+            content_url = ""
+
+        items.append(
+            {
+                "id": str(row.get("_id")),
+                "creator_username": creator_username,
+                "creator_url": creator_url,
+                "content_type": content_type,
+                "content_title": row.get("content_title") or tr("defaults.untitled"),
+                "content_url": content_url,
+                "is_read": bool(row.get("is_read", False)),
+                "created_at": row.get("created_at"),
+            }
+        )
+    return items
 
 
 def current_user():

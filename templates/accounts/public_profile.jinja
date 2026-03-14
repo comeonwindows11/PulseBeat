@@ -7,10 +7,31 @@
       <p class="hero-kicker">{{ app_name }}</p>
       <h1>{{ profile.username }}</h1>
       <p class="hero-copy">{{ t('profile.subtitle', username=profile.username) }}</p>
+      {% if current_user and not profile.is_self %}
+      <div class="hero-actions profile-subscribe-actions">
+        <form method="post" action="{{ url_for('accounts.subscribe_to_creator', username=profile.username) }}" class="cardless-form stack compact-stack">
+          <label class="checkbox-row">
+            <input type="checkbox" name="notifications_enabled" value="1" {% if profile.viewer_subscription and profile.viewer_subscription.notifications_enabled %}checked{% endif %}>
+            <span>{{ t('profile.subscription_notifications') }}</span>
+          </label>
+          <button type="submit" class="btn">
+            {% if profile.viewer_subscription %}{{ t('profile.subscription_update') }}{% else %}{{ t('profile.subscribe') }}{% endif %}
+          </button>
+        </form>
+        {% if profile.viewer_subscription %}
+        <form method="post" action="{{ url_for('accounts.unsubscribe_from_creator', username=profile.username) }}" class="cardless-form">
+          <button type="submit" class="btn secondary">{{ t('profile.unsubscribe') }}</button>
+        </form>
+        {% endif %}
+      </div>
+      {% elif not current_user %}
+      <p class="muted">{{ t('profile.login_to_subscribe') }}</p>
+      {% endif %}
       {% if profile.is_self and profile.manage_url %}
       <p class="muted">{{ t('profile.this_is_you') }} <a href="{{ profile.manage_url }}">{{ t('profile.manage_account_link') }}</a></p>
       <div class="hero-actions">
         <a class="btn secondary" href="{{ profile.manage_url }}">{{ t('nav.manage_account') }}</a>
+        <button type="button" class="btn secondary" data-open-modal="profile-subscribers-modal">{{ t('profile.view_subscribers') }}</button>
       </div>
       {% endif %}
     </div>
@@ -18,6 +39,7 @@
       <div class="hero-stat-card"><span class="hero-stat-label">{{ t('profile.visible_song_count_label') }}</span><strong>{{ visible_song_count }}</strong></div>
       <div class="hero-stat-card"><span class="hero-stat-label">{{ t('profile.visible_playlist_count_label') }}</span><strong>{{ visible_playlist_count }}</strong></div>
       <div class="hero-stat-card"><span class="hero-stat-label">{{ t('profile.comment_count_label') }}</span><strong>{{ comment_count }}</strong></div>
+      <div class="hero-stat-card"><span class="hero-stat-label">{{ t('profile.subscriber_count_label') }}</span><strong>{{ profile.subscriber_count }}</strong></div>
     </div>
   </section>
   <section class="grid two-cols">
@@ -46,5 +68,29 @@
     </div>
   </section>
 </section>
+{% if profile.is_self %}
+<div id="profile-subscribers-modal" class="modal hidden" aria-hidden="true" role="dialog" aria-modal="true">
+  <div class="modal-card">
+    <div class="row-actions">
+      <h3>{{ t('profile.subscriber_modal_title') }}</h3>
+      <button type="button" class="btn secondary" data-close-modal="profile-subscribers-modal">{{ t('modal.close') }}</button>
+    </div>
+    {% if subscriber_list %}
+    <ul class="playlist-list subscriber-list top-gap">
+      {% for subscriber in subscriber_list %}
+      <li>
+        <div>
+          <a href="{{ subscriber.profile_url }}"><strong>{{ subscriber.username }}</strong></a>
+        </div>
+        <a class="btn secondary" href="{{ subscriber.profile_url }}">{{ t('song.details') }}</a>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="muted top-gap">{{ t('profile.no_subscribers') }}</p>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
 <script>window.PAGE_SONG_OBJECTS=[{% for song in songs %}{{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url, "detail_url": song.detail_url, "source_type": song.source_type, "source_url": song.source_url, "external_provider": song.external_provider, "youtube_video_id": song.youtube_video_id, "playback_mode": song.playback_mode, "is_available": song.is_available, "is_audio_playable": song.is_audio_playable}|tojson|safe }}{% if not loop.last %},{% endif %}{% endfor %}];</script>
 {% endblock %}

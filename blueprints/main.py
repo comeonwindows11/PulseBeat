@@ -11,6 +11,7 @@ from auth_helpers import (
     visible_song_filter,
 )
 import extensions
+from server_cache import cached_popular_song_ids
 
 bp = Blueprint("main", __name__)
 
@@ -104,23 +105,27 @@ def _top_artists_for_user(user_oid):
 
 
 def _popular_song_ids(limit=400):
-    rows = list(
-        extensions.listening_history_col.aggregate(
-            [
-                {"$match": {"song_id": {"$exists": True}}},
-                {
-                    "$group": {
-                        "_id": "$song_id",
-                        "plays": {"$sum": {"$ifNull": ["$play_count", 0]}},
-                        "updated_at": {"$max": "$updated_at"},
-                    }
-                },
-                {"$sort": {"plays": -1, "updated_at": -1}},
-                {"$limit": int(limit)},
-            ]
+    def builder(safe_limit):
+        rows = list(
+            extensions.listening_history_col.aggregate(
+                [
+                    {"$match": {"song_id": {"$exists": True}}},
+                    {
+                        "$group": {
+                            "_id": "$song_id",
+                            "plays": {"$sum": {"$ifNull": ["$play_count", 0]}},
+                            "updated_at": {"$max": "$updated_at"},
+                        }
+                    },
+                    {"$sort": {"plays": -1, "updated_at": -1}},
+                    {"$limit": int(safe_limit)},
+                ]
+            )
         )
-    )
-    return [row.get("_id") for row in rows if row.get("_id")]
+        return [row.get("_id") for row in rows if row.get("_id")]
+
+    ids = cached_popular_song_ids(current_app, limit, builder)
+    return [parse_object_id(value) for value in ids if parse_object_id(value)]
 
 
 def _discovery_song_ids(limit=400, max_plays=3):

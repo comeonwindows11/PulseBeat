@@ -241,8 +241,18 @@
       tryStartOrJump();
     }
   });
-  canvas.addEventListener('click', tryStartOrJump);
-  canvas.addEventListener('touchstart', (e) => { e.preventDefault(); tryStartOrJump(); }, { passive: false });
+  function handleCanvasPress(event) {
+    if (event && typeof event.button === 'number' && event.button !== 0) return;
+    if (event) event.preventDefault();
+    tryStartOrJump();
+  }
+
+  if (window.PointerEvent) {
+    canvas.addEventListener('pointerdown', handleCanvasPress, { passive: false });
+  } else {
+    canvas.addEventListener('mousedown', handleCanvasPress);
+    canvas.addEventListener('touchstart', handleCanvasPress, { passive: false });
+  }
 
   draw();
   loop();

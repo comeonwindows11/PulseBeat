@@ -1,41 +1,53 @@
 import difflib
 import html
+import mimetypes
 import os
 import re
+import secrets
+import threading
+import time
 import unicodedata
 from datetime import UTC, datetime
 from math import ceil
 from urllib.parse import quote, urlparse
 
 import requests
+from bson import ObjectId
 from flask import Blueprint, abort, current_app, flash, jsonify, redirect, render_template, request, send_from_directory, url_for
 from pymongo.errors import PyMongoError
+from werkzeug.utils import secure_filename
 
 from auth_helpers import (
     VISIBILITY_VALUES,
     admin_required,
     allowed_file,
     audio_upload_signature_ok,
+    can_user_use_database_audio_storage,
     can_access_song,
     cleanup_song,
     compose_and_filters,
     contains_profanity,
     create_creator_publication_notifications,
     get_session_user_oid,
+    invalidate_song_related_caches,
     is_youtube_integration_enabled,
     is_youtube_song,
+    is_database_audio_storage_enabled,
     login_required,
     parse_object_id,
     register_auto_moderation_violation,
     safe_mongo_update_one,
     save_uploaded_file,
     serialize_song,
+    song_gridfs_file_id,
+    song_has_database_audio,
     song_owner_matches,
     compute_audio_fingerprint,
     visible_song_filter,
 )
 import extensions
 from i18n import tr
+from server_cache import cached_popular_song_ids, cached_youtube_audio_info, queue_youtube_audio_cache
 
 bp = Blueprint("songs", __name__, url_prefix="/songs")
 
@@ -43,6 +55,185 @@ bp = Blueprint("songs", __name__, url_prefix="/songs")
 LYRICS_MAX_CHARS = 200_000
 LYRICS_MAX_CUES = 2_000
 LRC_RE = re.compile(r"\[(\d{1,2}):(\d{2})(?:[.:](\d{1,3}))?\]")
+AUDIO_CACHE_REBUILD_WAIT_SECONDS = 1.4
+AUDIO_CACHE_REBUILD_POLL_INTERVAL = 0.1
+
+
+def _song_local_path(file_name: str):
+    if not file_name:
+        return ""
+    return os.path.join(current_app.config["UPLOAD_DIR"], os.path.basename(file_name))
+
+
+def _guess_audio_content_type(file_name: str):
+    guessed, _encoding = mimetypes.guess_type(file_name or "")
+    if guessed and guessed.startswith("audio/"):
+        return guessed
+    return "audio/mpeg"
+
+
+def _default_song_cache_filename(song: dict):
+    original_name = (
+        song.get("original_file_name")
+        or song.get("file_name")
+        or f"{song.get('_id', 'song')}.mp3"
+    )
+    safe_name = secure_filename(str(original_name or "").strip()) or f"{song.get('_id', 'song')}.mp3"
+    root, ext = os.path.splitext(safe_name)
+    ext = (ext or ".mp3").lower()
+    root = root or "song"
+    return f"{song.get('_id')}_{root[:64]}{ext}"
+
+
+def _normalize_storage_target(raw_value: str):
+    value = str(raw_value or "server").strip().lower()
+    return "database" if value == "database" else "server"
+
+
+def _current_user_can_store_audio_in_database():
+    if not is_database_audio_storage_enabled(False):
+        return False
+    user_oid = get_session_user_oid()
+    if not user_oid:
+        return False
+    user = extensions.users_col.find_one({"_id": user_oid}, {"is_admin": 1})
+    if not user:
+        return False
+    user["_id"] = user_oid
+    return can_user_use_database_audio_storage(user)
+
+
+def _upload_audio_file_to_database(local_path: str, *, filename: str, song_meta: dict | None = None):
+    bucket = getattr(extensions, "audio_files_bucket", None)
+    if bucket is None or not local_path or not os.path.isfile(local_path):
+        return None
+    metadata = dict(song_meta or {})
+    metadata["content_type"] = metadata.get("content_type") or _guess_audio_content_type(filename)
+    metadata["uploaded_at"] = metadata.get("uploaded_at") or datetime.utcnow()
+    with open(local_path, "rb") as handle:
+        return bucket.upload_from_stream(filename, handle, metadata=metadata)
+
+
+def _set_song_cache_status(song_oid, *, status: str, extra_set: dict | None = None, unset_fields: list[str] | None = None):
+    update_doc = {"$set": {"audio_cache_status": status, "audio_cache_updated_at": datetime.utcnow()}}
+    if extra_set:
+        update_doc["$set"].update(extra_set)
+    if unset_fields:
+        update_doc["$unset"] = {field: "" for field in unset_fields}
+    safe_mongo_update_one(extensions.songs_col, {"_id": song_oid}, update_doc, upsert=False)
+
+
+def _acquire_song_cache_rebuild(song_oid):
+    result = safe_mongo_update_one(
+        extensions.songs_col,
+        {"_id": song_oid, "audio_cache_status": {"$ne": "rebuilding"}},
+        {"$set": {"audio_cache_status": "rebuilding", "audio_cache_requested_at": datetime.utcnow()}},
+        upsert=False,
+    )
+    return bool(result and int(getattr(result, "matched_count", 0) or 0) > 0)
+
+
+def _perform_song_cache_rebuild(song_oid):
+    song = extensions.songs_col.find_one({"_id": song_oid})
+    if not song or not song_has_database_audio(song):
+        _set_song_cache_status(song_oid, status="missing")
+        return False
+
+    file_name = (song.get("file_name") or "").strip() or _default_song_cache_filename(song)
+    target_path = _song_local_path(file_name)
+    if not target_path:
+        _set_song_cache_status(song_oid, status="error", extra_set={"audio_cache_error": "invalid_target_path"})
+        return False
+
+    os.makedirs(current_app.config["UPLOAD_DIR"], exist_ok=True)
+    temp_path = f"{target_path}.tmp.{secrets.token_hex(6)}"
+    bucket = getattr(extensions, "audio_files_bucket", None)
+    gridfs_id = song_gridfs_file_id(song)
+    if bucket is None or gridfs_id is None:
+        _set_song_cache_status(song_oid, status="missing", extra_set={"audio_cache_error": "database_audio_unavailable"})
+        return False
+
+    try:
+        stream = bucket.open_download_stream(gridfs_id)
+        with stream, open(temp_path, "wb") as output_handle:
+            while True:
+                chunk = stream.read(256 * 1024)
+                if not chunk:
+                    break
+                output_handle.write(chunk)
+        os.replace(temp_path, target_path)
+        _set_song_cache_status(
+            song_oid,
+            status="ready",
+            extra_set={
+                "file_name": file_name,
+                "audio_cache_rebuilt_at": datetime.utcnow(),
+            },
+            unset_fields=["audio_cache_error"],
+        )
+        return True
+    except Exception as exc:
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except Exception:
+            pass
+        _set_song_cache_status(
+            song_oid,
+            status="error",
+            extra_set={
+                "audio_cache_failed_at": datetime.utcnow(),
+                "audio_cache_error": str(exc)[:300],
+            },
+        )
+        current_app.logger.warning("Unable to rebuild audio cache for song %s", song_oid, exc_info=True)
+        return False
+
+
+def _spawn_song_cache_rebuild(song_oid):
+    app_obj = current_app._get_current_object()
+
+    def runner():
+        with app_obj.app_context():
+            _perform_song_cache_rebuild(song_oid)
+
+    thread = threading.Thread(target=runner, daemon=True, name=f"song-cache-rebuild-{song_oid}")
+    thread.start()
+
+
+def _ensure_song_audio_cached(song, *, inline=False):
+    if not song or not song_has_database_audio(song):
+        return False, "missing"
+
+    file_name = (song.get("file_name") or "").strip()
+    local_path = _song_local_path(file_name) if file_name else ""
+    if local_path and os.path.isfile(local_path):
+        if (song.get("audio_cache_status") or "") != "ready":
+            _set_song_cache_status(song["_id"], status="ready", unset_fields=["audio_cache_error"])
+        return True, "ready"
+
+    song_oid = song.get("_id")
+    if not song_oid:
+        return False, "missing"
+
+    if inline:
+        if _acquire_song_cache_rebuild(song_oid):
+            return _perform_song_cache_rebuild(song_oid), "ready"
+        wait_deadline = time.monotonic() + AUDIO_CACHE_REBUILD_WAIT_SECONDS
+        while time.monotonic() < wait_deadline:
+            refreshed = extensions.songs_col.find_one({"_id": song_oid}, {"file_name": 1, "audio_cache_status": 1})
+            refreshed_name = (refreshed or {}).get("file_name", "")
+            refreshed_path = _song_local_path(refreshed_name) if refreshed_name else ""
+            if refreshed_path and os.path.isfile(refreshed_path):
+                return True, "ready"
+            if (refreshed or {}).get("audio_cache_status") == "error":
+                return False, "error"
+            time.sleep(AUDIO_CACHE_REBUILD_POLL_INTERVAL)
+        return False, "rebuilding"
+
+    if _acquire_song_cache_rebuild(song_oid):
+        _spawn_song_cache_rebuild(song_oid)
+    return False, "rebuilding"
 
 
 def _normalize_lyrics_text(raw: str) -> str:
@@ -590,23 +781,27 @@ def _top_artists_for_user(user_oid, current_song_oid=None):
 
 
 def _popular_song_ids(limit=400):
-    rows = list(
-        extensions.listening_history_col.aggregate(
-            [
-                {"$match": {"song_id": {"$exists": True}}},
-                {
-                    "$group": {
-                        "_id": "$song_id",
-                        "plays": {"$sum": {"$ifNull": ["$play_count", 0]}},
-                        "updated_at": {"$max": "$updated_at"},
-                    }
-                },
-                {"$sort": {"plays": -1, "updated_at": -1}},
-                {"$limit": int(limit)},
-            ]
+    def builder(safe_limit):
+        rows = list(
+            extensions.listening_history_col.aggregate(
+                [
+                    {"$match": {"song_id": {"$exists": True}}},
+                    {
+                        "$group": {
+                            "_id": "$song_id",
+                            "plays": {"$sum": {"$ifNull": ["$play_count", 0]}},
+                            "updated_at": {"$max": "$updated_at"},
+                        }
+                    },
+                    {"$sort": {"plays": -1, "updated_at": -1}},
+                    {"$limit": int(safe_limit)},
+                ]
+            )
         )
-    )
-    return [row.get("_id") for row in rows if row.get("_id")]
+        return [row.get("_id") for row in rows if row.get("_id")]
+
+    ids = cached_popular_song_ids(current_app, limit, builder)
+    return [parse_object_id(value) for value in ids if parse_object_id(value)]
 
 
 def _discovery_song_ids(limit=400, max_plays=3):
@@ -887,6 +1082,7 @@ def add_song():
     raw_song_url = request.form.get("song_url", "").strip()
     song_url = _normalize_external_audio_url(raw_song_url) if raw_song_url else ""
     visibility = request.form.get("visibility", "public").strip().lower()
+    storage_target = _normalize_storage_target(request.form.get("storage_target", "server"))
     file = request.files.get("song_file")
     lyrics_file = request.files.get("lyrics_file")
     lyrics_text_form = request.form.get("lyrics_text", "")
@@ -920,6 +1116,18 @@ def add_song():
     if visibility not in VISIBILITY_VALUES:
         visibility = "public"
 
+    wants_database_storage = storage_target == "database"
+    if wants_database_storage:
+        if visibility != "public":
+            flash(tr("flash.songs.database_storage_public_only"), "danger")
+            return redirect(url_for("songs.new_song"))
+        if not _current_user_can_store_audio_in_database():
+            flash(tr("flash.songs.database_storage_forbidden"), "danger")
+            return redirect(url_for("songs.new_song"))
+        if not file or not file.filename:
+            flash(tr("flash.songs.database_storage_upload_only"), "danger")
+            return redirect(url_for("songs.new_song"))
+
     shared_with = []
     if visibility == "private":
         for raw_id in shared_with_raw:
@@ -940,6 +1148,11 @@ def add_song():
     source_url = song_url
     file_name = None
     audio_fingerprint = ""
+    storage_mode = "server"
+    gridfs_file_id = None
+    original_file_name = ""
+    audio_content_type = ""
+    audio_file_size = 0
 
     lyrics_text = ""
     lyrics_cues = []
@@ -957,6 +1170,12 @@ def add_song():
         source_url = None
         file_name = save_uploaded_file(file)
         file_path = os.path.join(current_app.config["UPLOAD_DIR"], file_name)
+        original_file_name = secure_filename(file.filename or "") or os.path.basename(file_name)
+        audio_content_type = _guess_audio_content_type(original_file_name)
+        try:
+            audio_file_size = os.path.getsize(file_path)
+        except OSError:
+            audio_file_size = 0
         audio_fingerprint = compute_audio_fingerprint(file_path)
         if audio_fingerprint:
             duplicate_song = extensions.songs_col.find_one(
@@ -977,6 +1196,24 @@ def add_song():
                     "warning",
                 )
                 return redirect(url_for("songs.new_song"))
+        if wants_database_storage:
+            try:
+                gridfs_file_id = _upload_audio_file_to_database(
+                    file_path,
+                    filename=original_file_name,
+                    song_meta={
+                        "song_title": title,
+                        "song_artist": artist,
+                        "content_type": audio_content_type,
+                        "source_type": "upload",
+                    },
+                )
+                if isinstance(gridfs_file_id, ObjectId):
+                    storage_mode = "database"
+            except Exception as exc:
+                current_app.logger.warning("Unable to store uploaded song in GridFS, falling back to server storage", exc_info=exc)
+                flash(tr("flash.songs.database_storage_fallback_server"), "warning")
+                gridfs_file_id = None
         extracted_text, extracted_cues = _extract_id3_lyrics_from_file(os.path.join(current_app.config["UPLOAD_DIR"], file_name))
         if extracted_text:
             lyrics_text = extracted_text
@@ -1010,7 +1247,13 @@ def add_song():
             "source_type": source_type,
             "source_url": source_url,
             "file_name": file_name,
+            "original_file_name": original_file_name,
+            "audio_content_type": audio_content_type,
+            "audio_file_size": audio_file_size,
             "audio_fingerprint": audio_fingerprint,
+            "storage_mode": storage_mode,
+            "gridfs_file_id": gridfs_file_id,
+            "audio_cache_status": "ready" if storage_mode == "database" else "server_only",
             "visibility": visibility,
             "shared_with": shared_with,
             "lyrics_text": lyrics_text,
@@ -1021,6 +1264,9 @@ def add_song():
             "created_by": user_oid,
         }
     )
+    created_song = extensions.songs_col.find_one({"_id": insert_result.inserted_id})
+    if created_song:
+        invalidate_song_related_caches(created_song)
     if visibility == "public":
         create_creator_publication_notifications(user_oid, "song", insert_result.inserted_id, title)
     flash(tr("flash.songs.added"), "success")
@@ -1030,7 +1276,11 @@ def add_song():
 @bp.route("/new")
 @login_required
 def new_song():
-    return render_template("songs/new.jinja")
+    return render_template(
+        "songs/new.jinja",
+        can_use_database_audio_storage=_current_user_can_store_audio_in_database(),
+        database_audio_storage_enabled=is_database_audio_storage_enabled(False),
+    )
 
 
 @bp.route("/<song_id>/edit", methods=["POST"])
@@ -1095,6 +1345,9 @@ def edit_song(song_id):
         {"_id": song_oid},
         {"$set": update_set},
     )
+    refreshed_song = dict(song)
+    refreshed_song.update(update_set)
+    invalidate_song_related_caches(refreshed_song)
     flash(tr("flash.songs.updated"), "success")
     return redirect(url_for("songs.song_detail", song_id=song_id))
 
@@ -1257,6 +1510,8 @@ def update_progress(song_id):
     except PyMongoError:
         current_app.logger.exception("Failed to update listening history safely")
         return jsonify({"ok": False}), 503
+    if started and is_youtube_song(song):
+        queue_youtube_audio_cache(current_app._get_current_object(), song)
     return jsonify({"ok": True})
 
 
@@ -1684,6 +1939,9 @@ def playback_meta(song_id):
     if not can_access_song(song, user_oid):
         return jsonify({"ok": False}), 403
 
+    if is_youtube_song(song):
+        queue_youtube_audio_cache(current_app._get_current_object(), song)
+
     item = serialize_song(song, user_oid)
     stream_url = url_for("songs.stream_song", song_id=str(song_oid)) if item.get("is_audio_playable", True) else ""
     return jsonify(
@@ -1748,6 +2006,9 @@ def set_song_availability(song_id):
     except PyMongoError:
         current_app.logger.exception("Failed to update song availability safely")
         return jsonify({"ok": False, "message": tr("errors.503.msg")}), 503
+    refreshed_song = dict(song)
+    refreshed_song.update(update_doc)
+    invalidate_song_related_caches(refreshed_song)
     return jsonify({"ok": True, "is_available": available})
 
 
@@ -1766,11 +2027,31 @@ def stream_song(song_id):
         abort(403)
 
     source_type = song.get("source_type")
-    if source_type == "upload" and song.get("file_name"):
-        return send_from_directory(current_app.config["UPLOAD_DIR"], song["file_name"], as_attachment=False)
+    if source_type == "upload":
+        local_name = song.get("file_name", "")
+        local_path = _song_local_path(local_name)
+        if local_name and local_path and os.path.isfile(local_path):
+            return send_from_directory(current_app.config["UPLOAD_DIR"], local_name, as_attachment=False)
+        if song_has_database_audio(song):
+            rebuilt, _status = _ensure_song_audio_cached(song, inline=True)
+            refreshed = extensions.songs_col.find_one({"_id": song_oid}, {"file_name": 1}) or song
+            refreshed_name = refreshed.get("file_name", "")
+            refreshed_path = _song_local_path(refreshed_name)
+            if rebuilt and refreshed_name and refreshed_path and os.path.isfile(refreshed_path):
+                return send_from_directory(current_app.config["UPLOAD_DIR"], refreshed_name, as_attachment=False)
+        abort(404)
     if source_type == "external" and song.get("source_url"):
         if not bool(song.get("is_available", True)):
             abort(404)
+        cached_youtube_audio = cached_youtube_audio_info(current_app, song)
+        if cached_youtube_audio and os.path.isfile(cached_youtube_audio.get("file_path", "")):
+            return send_from_directory(
+                os.path.dirname(cached_youtube_audio["file_path"]),
+                os.path.basename(cached_youtube_audio["file_path"]),
+                as_attachment=False,
+            )
+        if is_youtube_song(song):
+            queue_youtube_audio_cache(current_app._get_current_object(), song)
         target = _normalize_external_audio_url(song.get("source_url", ""))
         if target:
             return redirect(target)
@@ -1787,6 +2068,53 @@ def stream_song(song_id):
         abort(404)
 
     abort(404)
+
+
+@bp.route("/<song_id>/recover-audio", methods=["POST"])
+def recover_song_audio(song_id):
+    song_oid = parse_object_id(song_id)
+    if not song_oid:
+        return jsonify({"ok": False, "recoverable": False, "message": tr("flash.songs.not_found")}), 404
+
+    song = extensions.songs_col.find_one({"_id": song_oid})
+    if not song:
+        return jsonify({"ok": False, "recoverable": False, "message": tr("flash.songs.not_found")}), 404
+
+    user_oid = get_session_user_oid()
+    if not can_access_song(song, user_oid):
+        return jsonify({"ok": False, "recoverable": False, "message": tr("errors.403.msg")}), 403
+
+    if not song_has_database_audio(song):
+        return jsonify({"ok": False, "recoverable": False, "message": tr("player.stream_error_no_database_copy")}), 404
+
+    rebuilt, status = _ensure_song_audio_cached(song, inline=True)
+    refreshed = extensions.songs_col.find_one({"_id": song_oid}, {"file_name": 1, "audio_cache_status": 1}) or song
+    refreshed_name = refreshed.get("file_name", "")
+    refreshed_path = _song_local_path(refreshed_name) if refreshed_name else ""
+    if rebuilt and refreshed_name and refreshed_path and os.path.isfile(refreshed_path):
+        return jsonify(
+            {
+                "ok": True,
+                "recoverable": True,
+                "status": "ready",
+                "stream_url": url_for("songs.stream_song", song_id=str(song_oid)),
+                "message": tr("player.stream_error_recovered"),
+            }
+        )
+
+    if status != "error":
+        _ensure_song_audio_cached(song, inline=False)
+    return (
+        jsonify(
+            {
+                "ok": True,
+                "recoverable": True,
+                "status": "rebuilding",
+                "message": tr("player.stream_error_rebuild_wait"),
+            }
+        ),
+        202,
+    )
 
 
 @bp.route("/<song_id>/delete", methods=["POST"])

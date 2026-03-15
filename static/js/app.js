@@ -793,6 +793,11 @@
   const lyricsCandidateReject = document.getElementById("lyrics-candidate-reject");
   const lyricsLoadingModal = document.getElementById("lyrics-loading-modal");
   const lyricsLoadingStep = document.getElementById("lyrics-loading-step");
+  const addSongForm = document.getElementById("add-song-form");
+  const songStorageTargetInput = document.getElementById("song-storage-target");
+  const databaseAudioChoiceModal = document.getElementById("database-audio-choice-modal");
+  const databaseAudioChoiceServer = document.getElementById("database-audio-choice-server");
+  const databaseAudioChoiceDatabase = document.getElementById("database-audio-choice-database");
 
   let pendingLyricsCandidate = null;
 
@@ -1329,6 +1334,82 @@
     form.querySelectorAll("button, input, select, textarea").forEach((el) => {
       if (el.type === "hidden") return;
       el.disabled = disabled;
+    });
+  }
+
+  function resetSongStorageChoice() {
+    if (songStorageTargetInput) {
+      songStorageTargetInput.value = "server";
+    }
+    if (addSongForm) {
+      delete addSongForm.dataset.storageChoiceConfirmed;
+    }
+  }
+
+  function addSongWantsStorageChoice() {
+    if (!addSongForm || !databaseAudioChoiceModal || !songStorageTargetInput) return false;
+    if (addSongForm.dataset.dbStorageEnabled !== "1" || addSongForm.dataset.dbStorageAllowed !== "1") return false;
+    if (addSongForm.dataset.storageChoiceConfirmed === "1") return false;
+
+    const visibilityField = document.getElementById(addSongForm.dataset.privateVisibility || "visibility-select");
+    if (!visibilityField || visibilityField.value !== "public") return false;
+
+    const fileField = document.getElementById(addSongForm.dataset.sourceFile || "song-file-input");
+    if (!fileField || !fileField.files || !fileField.files.length) return false;
+
+    return true;
+  }
+
+  function submitAddSongWithStorageTarget(target) {
+    if (!addSongForm || !songStorageTargetInput) return;
+    songStorageTargetInput.value = target === "database" ? "database" : "server";
+    addSongForm.dataset.storageChoiceConfirmed = "1";
+    hideModal(databaseAudioChoiceModal);
+    if (typeof addSongForm.requestSubmit === "function") addSongForm.requestSubmit();
+    else addSongForm.submit();
+  }
+
+  if (addSongForm) {
+    resetSongStorageChoice();
+
+    addSongForm.addEventListener("submit", async (event) => {
+      if (event.defaultPrevented) return;
+      if (!addSongWantsStorageChoice()) return;
+      const ok = await validateForm(addSongForm);
+      if (!ok) return;
+      event.preventDefault();
+      showModal(databaseAudioChoiceModal);
+    });
+
+    [songFileInput, songArtistInput, songTitleInput, songGenreInput].forEach((field) => {
+      if (!field) return;
+      field.addEventListener("change", resetSongStorageChoice);
+      field.addEventListener("input", resetSongStorageChoice);
+    });
+
+    const visibilityField = document.getElementById(addSongForm.dataset.privateVisibility || "visibility-select");
+    if (visibilityField) {
+      visibilityField.addEventListener("change", () => {
+        resetSongStorageChoice();
+      });
+    }
+
+    const urlField = document.getElementById(addSongForm.dataset.sourceUrl || "song-url-input");
+    if (urlField) {
+      urlField.addEventListener("input", resetSongStorageChoice);
+      urlField.addEventListener("change", resetSongStorageChoice);
+    }
+  }
+
+  if (databaseAudioChoiceServer) {
+    databaseAudioChoiceServer.addEventListener("click", () => {
+      submitAddSongWithStorageTarget("server");
+    });
+  }
+
+  if (databaseAudioChoiceDatabase) {
+    databaseAudioChoiceDatabase.addEventListener("click", () => {
+      submitAddSongWithStorageTarget("database");
     });
   }
 
@@ -1997,7 +2078,7 @@
     });
   });
 
-  [confirmModal, reportModal, userPickerModal, tempEmailModal, lyricsCandidateModal, shareModal, profileSubscribersModal].forEach((modal) => {
+  [confirmModal, reportModal, userPickerModal, tempEmailModal, lyricsCandidateModal, shareModal, profileSubscribersModal, databaseAudioChoiceModal].forEach((modal) => {
     if (!modal) return;
     modal.addEventListener("click", (event) => {
       if (event.target === modal) hideModal(modal);
@@ -2013,10 +2094,10 @@
     hideModal(lyricsCandidateModal);
     hideModal(shareModal);
     hideModal(profileSubscribersModal);
+    hideModal(databaseAudioChoiceModal);
     closeNotificationsPanel();
   });
 })();
-
 
 
 

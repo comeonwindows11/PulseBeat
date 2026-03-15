@@ -17,6 +17,12 @@ from werkzeug.utils import secure_filename
 
 import extensions
 from i18n import tr
+from server_cache import (
+    bump_popular_public_songs_cache,
+    bump_public_playlist_cache,
+    bump_public_profile_cache,
+    has_cached_youtube_audio,
+)
 
 ALLOWED_EXTENSIONS = {"mp3", "wav", "ogg", "m4a"}
 VISIBILITY_VALUES = {"public", "private", "unlisted"}
@@ -86,6 +92,8 @@ FEATURE_DEFAULTS_FULL = {
     "enable_google_oauth": True,
     "enable_email_notifications": True,
     "enable_youtube_integration": True,
+    "enable_database_audio_storage": False,
+    "database_audio_storage_allowed_user_ids": [],
 }
 APP_SETTINGS_DOC_ID = "global"
 YOUTUBE_URL_RE = re.compile(r"(youtube\.com|youtu\.be)", re.IGNORECASE)
@@ -596,6 +604,69 @@ def is_youtube_integration_enabled(default=True):
     return is_feature_enabled("enable_youtube_integration", default=default)
 
 
+def get_database_audio_storage_settings():
+    settings = get_app_settings()
+    enabled_raw = settings.get("enable_database_audio_storage", False)
+    if isinstance(enabled_raw, str):
+        enabled = enabled_raw.strip().lower() in {"1", "true", "yes", "on"}
+    else:
+        enabled = bool(enabled_raw)
+
+    raw_ids = settings.get("database_audio_storage_allowed_user_ids", [])
+    if isinstance(raw_ids, str):
+        raw_ids = [part.strip() for part in raw_ids.split(",") if part.strip()]
+    elif not isinstance(raw_ids, (list, tuple, set)):
+        raw_ids = []
+
+    normalized_ids = []
+    for value in raw_ids:
+        text = str(value or "").strip()
+        if text:
+            normalized_ids.append(text)
+
+    return {"enabled": enabled, "allowed_user_ids": normalized_ids}
+
+
+def is_database_audio_storage_enabled(default=False):
+    settings = get_database_audio_storage_settings()
+    if settings:
+        return bool(settings.get("enabled", False))
+    return bool(default)
+
+
+def can_user_use_database_audio_storage(user) -> bool:
+    if not user or not is_database_audio_storage_enabled(False):
+        return False
+    if bool((user or {}).get("is_admin", False)):
+        return True
+    user_id = str((user or {}).get("_id", "") or "").strip()
+    if not user_id:
+        return False
+    settings = get_database_audio_storage_settings()
+    allowed_ids = set(settings.get("allowed_user_ids", []))
+    return user_id in allowed_ids
+
+
+def song_has_database_audio(song) -> bool:
+    if not song:
+        return False
+    if str((song or {}).get("storage_mode", "server") or "server").strip().lower() != "database":
+        return False
+    gridfs_id = (song or {}).get("gridfs_file_id")
+    if isinstance(gridfs_id, ObjectId):
+        return True
+    return parse_object_id(str(gridfs_id or "")) is not None
+
+
+def song_gridfs_file_id(song):
+    if not song:
+        return None
+    gridfs_id = song.get("gridfs_file_id")
+    if isinstance(gridfs_id, ObjectId):
+        return gridfs_id
+    return parse_object_id(str(gridfs_id or ""))
+
+
 def is_youtube_song(song) -> bool:
     if not song:
         return False
@@ -1036,6 +1107,48 @@ def list_creator_subscribers(creator_oid):
     return items
 
 
+def invalidate_public_profile_cache(user_oid):
+    if user_oid:
+        bump_public_profile_cache(current_app, user_oid)
+
+
+def invalidate_playlist_cache(playlist_id):
+    if playlist_id:
+        bump_public_playlist_cache(current_app, playlist_id)
+
+
+def invalidate_song_related_caches(song):
+    if not song:
+        return
+    creator_oid = song.get("created_by")
+    if creator_oid:
+        invalidate_public_profile_cache(creator_oid)
+    bump_popular_public_songs_cache(current_app)
+    song_oid = song.get("_id")
+    if not song_oid:
+        return
+    try:
+        linked_playlists = extensions.playlists_col.find({"song_ids": song_oid}, {"_id": 1}).limit(400)
+        for row in linked_playlists:
+            playlist_id = row.get("_id")
+            if playlist_id:
+                invalidate_playlist_cache(playlist_id)
+    except Exception:
+        current_app.logger.warning("Unable to invalidate linked playlist caches for song %s", song_oid, exc_info=True)
+
+
+def invalidate_playlist_related_caches(playlist):
+    if not playlist:
+        return
+    playlist_id = playlist.get("_id") if isinstance(playlist, dict) else playlist
+    if playlist_id:
+        invalidate_playlist_cache(playlist_id)
+    if isinstance(playlist, dict):
+        owner_oid = playlist.get("user_id")
+        if owner_oid:
+            invalidate_public_profile_cache(owner_oid)
+
+
 def create_creator_publication_notifications(creator_oid, content_type: str, content_id, content_title: str):
     if not creator_oid or not content_id or content_type not in {"song", "playlist"}:
         return 0
@@ -1296,6 +1409,7 @@ def song_owner_matches(song, user_oid):
 
 def cleanup_song(song):
     song_oid = song["_id"]
+    linked_playlist_ids = [row.get("_id") for row in extensions.playlists_col.find({"song_ids": song_oid}, {"_id": 1}) if row.get("_id")]
     file_name = song.get("file_name")
     if file_name:
         local_path = os.path.join(current_app.config["UPLOAD_DIR"], file_name)
@@ -1310,6 +1424,14 @@ def cleanup_song(song):
             if os.path.exists(legacy_path):
                 os.remove(legacy_path)
 
+    gridfs_id = song_gridfs_file_id(song)
+    bucket = getattr(extensions, "audio_files_bucket", None)
+    if gridfs_id is not None and bucket is not None:
+        try:
+            bucket.delete(gridfs_id)
+        except Exception:
+            pass
+
     extensions.playlists_col.update_many({}, {"$pull": {"song_ids": song_oid}})
     extensions.song_votes_col.delete_many({"song_id": song_oid})
     if getattr(extensions, "comment_votes_col", None) is not None:
@@ -1320,6 +1442,9 @@ def cleanup_song(song):
     extensions.listening_history_col.delete_many({"song_id": song_oid})
     extensions.song_reports_col.delete_many({"$or": [{"target_song_id": song_oid}, {"song_id": song_oid}]})
     extensions.songs_col.delete_one({"_id": song_oid})
+    invalidate_song_related_caches(song)
+    for playlist_id in linked_playlist_ids:
+        invalidate_playlist_cache(playlist_id)
 
 
 def cleanup_user(user_oid, delete_songs=False):
@@ -1415,10 +1540,11 @@ def serialize_song(song, user_oid):
 
     is_youtube_source = external_provider == "youtube" or bool(youtube_video_id)
     is_available = bool(song.get("is_available", True))
-    is_audio_playable = is_available and not is_youtube_source
+    has_youtube_cache = is_youtube_source and has_cached_youtube_audio(current_app, song)
+    is_audio_playable = is_available and (not is_youtube_source or has_youtube_cache)
     playback_mode = "audio"
     if is_youtube_source:
-        playback_mode = "youtube"
+        playback_mode = "audio" if has_youtube_cache else "youtube"
     if not is_available:
         playback_mode = "disabled"
 

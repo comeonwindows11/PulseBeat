@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from pymongo.errors import PyMongoError
 
 import extensions
+from server_cache import init_server_cache, prune_server_cache
 from auth_helpers import (
     apply_session_security_cookies,
     compose_and_filters,
@@ -161,6 +162,7 @@ def _ensure_unique_index_with_dedupe(collection, key_spec, name, dedupe_callback
 def create_app():
     load_dotenv()
     app = Flask(__name__)
+    os.makedirs(app.instance_path, exist_ok=True)
     app.secret_key = os.getenv("FLASK_SECRET_KEY", "change-me-in-production")
     app.config["APP_NAME"] = "PulseBeat"
     app.config["MONGO_URI"] = os.getenv(
@@ -209,8 +211,18 @@ def create_app():
     ) == "1"
     app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=max(1, int(os.getenv("REMEMBER_ME_SESSION_DAYS", "30"))))
     app.config["JS_SERVE_OBFUSCATED"] = os.getenv("JS_SERVE_OBFUSCATED", "1") == "1"
+    app.config["SERVER_CACHE_DIR"] = os.getenv("SERVER_CACHE_DIR", os.path.join(app.instance_path, "server_cache"))
+    app.config["SERVER_CACHE_JSON_MAX_BYTES"] = int(os.getenv("SERVER_CACHE_JSON_MAX_BYTES", str(20 * 1024 * 1024)))
+    app.config["SERVER_CACHE_JSON_MAX_FILES"] = int(os.getenv("SERVER_CACHE_JSON_MAX_FILES", "500"))
+    app.config["PUBLIC_PROFILE_CACHE_TTL_SECONDS"] = int(os.getenv("PUBLIC_PROFILE_CACHE_TTL_SECONDS", "180"))
+    app.config["PUBLIC_PLAYLIST_CACHE_TTL_SECONDS"] = int(os.getenv("PUBLIC_PLAYLIST_CACHE_TTL_SECONDS", "180"))
+    app.config["POPULAR_PUBLIC_SONGS_CACHE_TTL_SECONDS"] = int(os.getenv("POPULAR_PUBLIC_SONGS_CACHE_TTL_SECONDS", "180"))
+    app.config["YOUTUBE_AUDIO_CACHE_ENABLED"] = os.getenv("YOUTUBE_AUDIO_CACHE_ENABLED", "1") == "1"
+    app.config["YOUTUBE_AUDIO_CACHE_MAX_BYTES"] = int(os.getenv("YOUTUBE_AUDIO_CACHE_MAX_BYTES", str(512 * 1024 * 1024)))
+    app.config["YOUTUBE_AUDIO_CACHE_MAX_FILES"] = int(os.getenv("YOUTUBE_AUDIO_CACHE_MAX_FILES", "80"))
 
     extensions.init_mongo(app)
+    init_server_cache(app)
     now = datetime.now(UTC)
     extensions.users_col.update_many({"email_verified": {"$exists": False}}, {"$set": {"email_verified": True, "email_verified_at": now}})
     extensions.users_col.update_many({"email_verification_sent_at": {"$exists": False}}, {"$set": {"email_verification_sent_at": None}})
@@ -292,6 +304,13 @@ def create_app():
     extensions.users_col.update_many({"pending_device_approvals": {"$exists": False}}, {"$set": {"pending_device_approvals": []}})
     extensions.songs_col.update_many({"is_available": {"$exists": False}}, {"$set": {"is_available": True}})
     extensions.songs_col.update_many({"availability_reason": {"$exists": False}}, {"$set": {"availability_reason": ""}})
+    extensions.songs_col.update_many({"storage_mode": {"$exists": False}}, {"$set": {"storage_mode": "server"}})
+    extensions.songs_col.update_many({"gridfs_file_id": {"$exists": False}}, {"$set": {"gridfs_file_id": None}})
+    extensions.songs_col.update_many({"audio_cache_status": {"$exists": False}}, {"$set": {"audio_cache_status": "server_only"}})
+    extensions.songs_col.update_many({"audio_cache_error": {"$exists": False}}, {"$set": {"audio_cache_error": ""}})
+    extensions.songs_col.update_many({"original_file_name": {"$exists": False}}, {"$set": {"original_file_name": ""}})
+    extensions.songs_col.update_many({"audio_content_type": {"$exists": False}}, {"$set": {"audio_content_type": ""}})
+    extensions.songs_col.update_many({"audio_file_size": {"$exists": False}}, {"$set": {"audio_file_size": 0}})
     for user in extensions.users_col.find({}, {"email": 1, "username": 1}):
         extensions.users_col.update_one(
             {"_id": user["_id"]},
@@ -300,6 +319,9 @@ def create_app():
     extensions.users_col.create_index("email_normalized", unique=True, name="uniq_users_email_normalized")
     extensions.users_col.create_index("username_normalized", unique=True, name="uniq_users_username_normalized")
     extensions.songs_col.create_index("audio_fingerprint", name="idx_songs_audio_fingerprint")
+    extensions.songs_col.create_index([("storage_mode", 1), ("created_at", -1)], name="idx_songs_storage_mode_created")
+    extensions.songs_col.create_index([("gridfs_file_id", 1)], name="idx_songs_gridfs_file_id")
+    extensions.songs_col.create_index([("audio_cache_status", 1), ("created_at", -1)], name="idx_songs_audio_cache_status_created")
     extensions.songs_col.create_index([("created_by", 1), ("created_at", -1)], name="idx_songs_creator_created")
     extensions.songs_col.create_index([("created_by", 1), ("visibility", 1), ("created_at", -1)], name="idx_songs_creator_visibility_created")
     extensions.playlists_col.create_index([("user_id", 1), ("updated_at", -1)], name="idx_playlists_user_updated")
@@ -353,6 +375,7 @@ def create_app():
             logger=app.logger,
         )
     os.makedirs(app.config["UPLOAD_DIR"], exist_ok=True)
+    prune_server_cache(app)
 
     app.register_blueprint(accounts_bp)
     app.register_blueprint(admin_bp)

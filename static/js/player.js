@@ -17,6 +17,8 @@
     playerViewFullscreen: "Lecteur plein écran",
     playerStreamError: "Une erreur s'est produite lors de l'obtention de la chanson.",
     playerStreamErrorCode: "Code {code}.",
+    playerStreamErrorRecovered: "Le fichier audio a été reconstruit depuis la base de données.",
+    playerStreamErrorRebuildWait: "Le fichier audio est en cours de reconstruction depuis la base de données.",
     playerTryNext: "Essaie de passer à la chanson suivante.",
     playerTabBlockedNotice: "Lecture bloquée sur cet onglet tant que tu n'as pas confirmé l'activation audio.",
     playerAlbum: "PulseBeat",
@@ -555,7 +557,8 @@
       song.__metaLoaded = true;
       return song;
     }
-    if (song.playback_mode || song.source_type || song.youtube_video_id || song.external_provider) {
+    const shouldFetchServerMeta = isYouTubeSong(song);
+    if (!shouldFetchServerMeta && (song.playback_mode || song.source_type || song.youtube_video_id || song.external_provider)) {
       const inferred = {
         playback_mode: isYouTubeSong(song) ? "youtube" : "audio",
         is_available: isSongAvailable(song),
@@ -884,6 +887,30 @@
     playerErrorBanner.classList.remove("hidden");
   }
 
+  async function tryRecoverSongAudio(song) {
+    if (!song || !song.id) return null;
+    try {
+      const res = await fetch(`/songs/${encodeURIComponent(song.id)}/recover-audio`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: jsonHeaders(true),
+        body: JSON.stringify({ reason: "stream_404" }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!data) return null;
+      return {
+        httpStatus: res.status,
+        ok: !!data.ok,
+        recoverable: !!data.recoverable,
+        status: data.status || "",
+        message: data.message || "",
+        streamUrl: data.stream_url || "",
+      };
+    } catch (_e) {
+      return null;
+    }
+  }
+
   async function detectSongHttpStatus(song) {
     if (!song || !song.url) return null;
     const req = { credentials: "same-origin", cache: "no-store", headers: { Range: "bytes=0-0" } };
@@ -897,10 +924,38 @@
 
   async function handleSongStreamError(song) {
     const status = await detectSongHttpStatus(song);
-    if (status === 404) {
+    if (status === 404 && song && song.source_type === "upload") {
+      const recovery = await tryRecoverSongAudio(song);
+      if (recovery && recovery.ok && recovery.status === "ready") {
+        if (recovery.streamUrl) {
+          song.url = recovery.streamUrl;
+          song.__forceReload = true;
+          updateSongInQueueById(song.id, (row) => {
+            row.url = recovery.streamUrl;
+            row.__forceReload = true;
+            return row;
+          });
+        }
+        clearPlayerError();
+        showPlaylistToast(recovery.message || i18n.playerStreamErrorRecovered || "Audio rebuilt from database.", "success");
+        await applySong(true, { manual: true });
+        return;
+      }
+      if (recovery && recovery.recoverable && recovery.status === "rebuilding") {
+        showPlayerError(recovery.message || i18n.playerStreamErrorRebuildWait || "Audio rebuild in progress. Please wait or skip.");
+      } else if (recovery && recovery.message) {
+        showPlayerError(recovery.message);
+      } else {
+        showPlayerError(404);
+      }
+    } else if (status === 404) {
       showPlayerError(404);
     } else {
-      showPlayerError(status || 404);
+      if (typeof status === "number" && status >= 400) {
+        showPlayerError(status);
+      } else {
+        showPlayerError(`${i18n.playerStreamError || "An error occurred while fetching this song."} ${(i18n.playerTryNext || "Try skipping to the next song.").trim()}`.trim());
+      }
     }
     state.isPlaying = false;
     updateMeta(song || currentSong());
@@ -2204,13 +2259,14 @@
       return;
     }
 
-    if (audio.src !== song.url) {
+    if (song.__forceReload || audio.src !== song.url) {
       audio.src = song.url;
       audio.load();
       state.startedSongId = null;
       state.normalizationGain = 1;
       resetNormalizationProbe();
     }
+    delete song.__forceReload;
 
     audio.playbackRate = Number(state.playbackRate) || 1;
     if (speedSelect) {

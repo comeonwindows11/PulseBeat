@@ -33,8 +33,10 @@
       alertDismissFailed: {{ t('admin.alert_dismiss_failed')|tojson }},
       alertRestored: {{ t('admin.alert_restored')|tojson }},
       alertRestoreFailed: {{ t('admin.alert_restore_failed')|tojson }},
-      undo: {{ t('player.menu.undo')|tojson }}
+      undo: {{ t('player.menu.undo')|tojson }},
+      userPickerNoResults: {{ t('search.no_results')|tojson }}
     };
+    window.ADMIN_USER_CHOICES = {{ (admin_user_picker_choices or [])|tojson }};
   </script>
   <script src="{{ url_for('static', filename=client_js_asset('admin')) }}"></script>
 </body>

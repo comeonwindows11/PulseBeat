@@ -19,7 +19,7 @@
   <section class="grid two-cols">
     <div class="card">
       <h2>{{ t('main.add_song') }}</h2>
-      <form method="post" action="{{ url_for('songs.add_song') }}" enctype="multipart/form-data" class="stack" id="add-song-form" data-validate-form="1" data-require-source="1" data-source-url="song-url-input" data-source-file="song-file-input" data-private-visibility="visibility-select" data-private-target="song-shared-inputs">
+      <form method="post" action="{{ url_for('songs.add_song') }}" enctype="multipart/form-data" class="stack" id="add-song-form" data-validate-form="1" data-require-source="1" data-source-url="song-url-input" data-source-file="song-file-input" data-private-visibility="visibility-select" data-private-target="song-shared-inputs" data-db-storage-enabled="{{ 1 if database_audio_storage_enabled else 0 }}" data-db-storage-allowed="{{ 1 if can_use_database_audio_storage else 0 }}">
         <label>{{ t('main.field.title') }}
           <input type="text" name="title" id="song-title-input" required>
         </label>
@@ -40,6 +40,7 @@
         </label>
         <input type="hidden" name="lyrics_text" id="song-lyrics-text-input" value="">
         <input type="hidden" name="lyrics_source" id="song-lyrics-source-input" value="">
+        <input type="hidden" name="storage_target" id="song-storage-target" value="server">
         <div id="lyrics-file-wrap" class="stack hidden">
           <label>{{ t('song.lyrics_upload_optional') }}
             <input type="file" name="lyrics_file" id="lyrics-file-input" accept=".txt,.lrc">
@@ -65,6 +66,10 @@
           <div id="song-shared-list" class="selected-users"></div>
           <div id="song-shared-inputs"></div>
         </div>
+
+        {% if can_use_database_audio_storage %}
+        <p class="muted small">{{ t('songs.database_storage_allowed_hint') }}</p>
+        {% endif %}
 
         <button type="submit" id="add-song-submit">{{ t('main.add') }}</button>
       </form>
@@ -98,5 +103,19 @@
     </div>
   </section>
 </section>
+
+{% if can_use_database_audio_storage %}
+<div id="database-audio-choice-modal" class="modal hidden" aria-hidden="true" role="dialog" aria-modal="true">
+  <div class="modal-card">
+    <h3>{{ t('songs.database_storage_modal_title') }}</h3>
+    <p>{{ t('songs.database_storage_modal_body') }}</p>
+    <p class="muted small">{{ t('songs.database_storage_modal_hint') }}</p>
+    <div class="row-actions">
+      <button type="button" id="database-audio-choice-server" class="btn secondary">{{ t('songs.database_storage_server_option') }}</button>
+      <button type="button" id="database-audio-choice-database" class="btn">{{ t('songs.database_storage_database_option') }}</button>
+    </div>
+  </div>
+</div>
+{% endif %}
 
 {% endblock %}

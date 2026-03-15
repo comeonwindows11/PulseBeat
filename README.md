@@ -24,6 +24,7 @@ Application de streaming musical en `Flask` + `Jinja`, inspirée de YouTube Musi
 - Invalidation des sessions suspectes si un cookie semble rejoué depuis un autre environnement
 - Écran de blocage de session suspecte renforcé avec bandeau d'avertissement visuel, animation d'alerte et tentative de son d'avertissement au chargement
 - Ajout de chansons par URL ou upload (avec détection automatique des balises ID3)
+- Stockage optionnel des chansons publiques dans MongoDB GridFS avec cache local reconstructible côté serveur
 - Enrichissement automatique artiste/genre après upload via recherche en ligne
 - Détection automatique des sous-titres (métadonnées audio + recherche multi-sources en ligne)
 - Normalisation titre/artiste pour améliorer le matching des sous-titres
@@ -36,6 +37,7 @@ Application de streaming musical en `Flask` + `Jinja`, inspirée de YouTube Musi
 - Éditeur de file d'attente (réordonner, retirer, lire un élément précis)
 - Option de crossfade entre chansons
 - Option de normalisation de volume côté lecteur
+- Cache serveur intelligent : audio YouTube récemment écouté + cache JSON des données publiques coûteuses
 - Lecteur avec vues `mini`, `normale` et `plein écran`
 - Bouton `previous` type lecteur moderne : avant 5 secondes il revient à la chanson précédente, à partir de 5 secondes il redémarre la chanson courante
 - Anti-superposition audio multi-onglets (modal de garde audio + blocage de lecture sur onglet récent tant que non confirmé)
@@ -134,6 +136,166 @@ Workflow précis :
 4. si non trouvée, la chanson est créée normalement
 
 Effet pratique : une même piste audio ne peut pas être uploadée deux fois, même avec un titre/artiste différent.
+
+## Stockage audio durable en base (GridFS + cache local)
+
+### Objectif
+
+- Cette fonctionnalité permet, pour certaines chansons publiques, de conserver une copie durable du fichier audio directement dans MongoDB Atlas via `GridFS`.
+- Le but est de simplifier une migration de serveur ou une reconstruction après perte du dossier `static/uploads/`, tout en évitant de lire les gros blobs audio directement depuis MongoDB à chaque écoute.
+
+### Activation admin et contrôle d'accès
+
+- La fonctionnalité se configure depuis la zone admin dans le bloc `Stockage audio en base`.
+- Deux niveaux de contrôle existent :
+  - activation globale ou non de la fonctionnalité
+  - liste d'utilisateurs autorisés à voir cette option pendant l'upload
+- Les administrateurs gardent toujours l'accès à l'option, même s'ils ne figurent pas explicitement dans la liste.
+- Si la fonctionnalité est désactivée ou si l'utilisateur n'est pas autorisé, le formulaire d'ajout reste sur le mode classique `stockage serveur`.
+
+### Expérience utilisateur pendant l'upload
+
+- Lorsqu'un utilisateur autorisé ajoute une chanson publique avec un vrai fichier audio, PulseBeat affiche un modal de choix juste avant l'envoi final.
+- Deux options sont proposées :
+  - `Stocker sur le serveur`
+  - `Stocker dans la base`
+- L'interface explique aussi que :
+  - le stockage serveur reste l'option recommandée si l'utilisateur n'est pas certain
+  - le stockage en base peut être un peu plus lent au premier chargement dans le lecteur
+- Cette demande de choix n'apparaît pas :
+  - pour les chansons privées
+  - pour les chansons non répertoriées
+  - pour les ajouts par URL seule
+  - pour les utilisateurs non autorisés
+
+### Modèle de stockage
+
+- PulseBeat n'enregistre pas le MP3 directement dans le document `songs`.
+- À la place, le fichier est envoyé dans un bucket `GridFS` (`audio_files`) et la chanson garde des métadonnées de pilotage :
+  - `storage_mode`
+  - `gridfs_file_id`
+  - `audio_cache_status`
+  - `original_file_name`
+  - `audio_content_type`
+  - `audio_file_size`
+- Le mode `database` signifie que MongoDB devient la source durable de vérité.
+- Le fichier local peut néanmoins rester présent sur le serveur comme cache de lecture.
+
+### Lecture et reconstruction automatique
+
+- Le lecteur ne lit pas en continu depuis GridFS.
+- Il essaie toujours d'abord de lire la version locale du fichier dans `static/uploads/`.
+- Si le fichier local manque mais qu'une copie `GridFS` existe :
+  - la route de stream tente une reconstruction vers le serveur
+  - le lecteur peut aussi déclencher une route dédiée de récupération en cas de `404`
+- Une fois le fichier reconstruit localement :
+  - les lectures suivantes passent de nouveau par le serveur
+  - MongoDB n'est plus sollicité pour chaque lecture
+
+### Comportement du lecteur en cas de `404`
+
+- Si une chanson uploadée retourne `404` :
+  - PulseBeat vérifie si une copie de secours existe dans GridFS
+  - si oui, il tente de reconstruire le fichier local
+  - si la reconstruction est terminée, le lecteur relance automatiquement la lecture
+  - sinon, il affiche un message indiquant que la reconstruction est en cours et suggère d'attendre ou de passer à la chanson suivante
+- Si aucune copie en base n'existe, le comportement `404` normal est conservé.
+
+### Robustesse et optimisation MongoDB
+
+- `GridFS` est utilisé au lieu d'un champ binaire direct dans `songs` pour éviter :
+  - la limite MongoDB de `16 MB` par document
+  - les documents trop lourds
+  - les lectures massives répétées côté cluster Atlas
+- Les chansons conservent aussi un état de cache (`audio_cache_status`) pour éviter des reconstructions concurrentes inutiles.
+- Des index dédiés existent sur :
+  - `storage_mode`
+  - `gridfs_file_id`
+  - `audio_cache_status`
+- En cas d'échec du stockage GridFS lors d'un upload, PulseBeat bascule proprement en stockage serveur avec un message d'avertissement, au lieu de perdre la chanson.
+
+## Cache serveur intelligent (audio YouTube + données publiques)
+
+### Objectif
+
+- PulseBeat ajoute maintenant une couche de cache serveur pour réduire :
+  - les appels MongoDB coûteux sur Atlas free tier
+  - les téléchargements répétés côté YouTube
+  - le temps de rendu de certaines pages publiques très consultées
+- Le cache reste borné en taille et en nombre de fichiers pour éviter qu'il grossisse sans limite sur le serveur.
+
+### Cache audio YouTube
+
+- Lorsqu'une chanson YouTube commence réellement à être lue :
+  - PulseBeat planifie un téléchargement audio local en arrière-plan
+  - le téléchargement utilise `yt-dlp`
+  - le fichier est stocké dans le cache serveur local, pas dans MongoDB
+- Tant que ce cache n'existe pas, la lecture continue en mode YouTube classique.
+- Dès que le cache audio local est disponible :
+  - `serialize_song()` bascule automatiquement la chanson en mode `audio`
+  - le lecteur peut alors passer par la route de stream locale au lieu de l'iframe YouTube
+
+### Stratégie de lecture hybride
+
+- Pour une chanson `external` YouTube :
+  - si un fichier audio cache existe déjà : PulseBeat sert directement le fichier local
+  - sinon : PulseBeat lance ou réutilise un worker de cache audio, puis redirige vers la source YouTube comme avant
+- Cela garde une lecture immédiate pour l'utilisateur, tout en préparant les prochaines écoutes pour qu'elles soient plus rapides et moins dépendantes de YouTube.
+
+### Contrôle de taille du cache audio
+
+- Le cache YouTube applique une politique simple de type `LRU` :
+  - on met à jour la date d'accès quand un fichier est relu
+  - les fichiers les moins récemment utilisés sont supprimés en premier quand les limites sont dépassées
+- Deux limites bornent le cache :
+  - taille totale max (`YOUTUBE_AUDIO_CACHE_MAX_BYTES`)
+  - nombre max de fichiers (`YOUTUBE_AUDIO_CACHE_MAX_FILES`)
+
+### Cache JSON des données publiques
+
+- PulseBeat met aussi en cache certaines données texte/JSON coûteuses :
+  - profils publics (vue publique de base)
+  - pages de playlists publiques non collaboratives
+  - agrégats de chansons populaires utilisés dans les recommandations
+- Le cache JSON est stocké dans le dossier serveur de cache et non dans la base.
+
+### Invalidation intelligente
+
+- Le cache n'est pas seulement basé sur un `TTL`.
+- PulseBeat conserve aussi des `versions` locales par groupe de données.
+- Quand une donnée importante change, PulseBeat invalide la bonne famille de cache :
+  - ajout / édition / suppression / changement de disponibilité d'une chanson
+  - ajout / suppression / réorganisation / renommage / changement de visibilité d'une playlist
+  - abonnement / désabonnement à un créateur
+  - changement de nom d'utilisateur
+- Pour les agrégats très volatils comme la popularité globale des chansons, PulseBeat privilégie un `TTL` court au lieu d'une invalidation à chaque écoute, pour ne pas recréer de charge Mongo inutile.
+
+### Profils publics
+
+- La vue publique de base d'un profil est cacheable côté serveur.
+- Pour un visiteur anonyme :
+  - PulseBeat peut servir directement cette version mise en cache
+- Pour un utilisateur connecté non propriétaire :
+  - PulseBeat réutilise la base publique mise en cache
+  - puis rajoute au besoin les éléments privés explicitement partagés avec lui
+- Pour le propriétaire du profil :
+  - PulseBeat garde un rendu live complet, car il voit plus d'informations (gestion du compte, abonnés, contenus non publics)
+
+### Playlists publiques
+
+- Quand une playlist est publique et que le visiteur n'est ni propriétaire ni collaborateur, PulseBeat peut réutiliser une vue cacheable de la playlist.
+- Si certains éléments privés de la playlist sont partagés avec l'utilisateur connecté, ils sont réinjectés dynamiquement dans le rendu live pour ne pas casser les permissions.
+- Si une recherche interne est active sur la playlist, PulseBeat repasse sur un calcul live pour éviter les ambiguïtés de pagination/filtrage.
+
+### Robustesse
+
+- Si le cache est absent, expiré ou corrompu :
+  - PulseBeat retombe automatiquement sur le calcul live
+  - puis régénère le cache proprement
+- Si un téléchargement YouTube échoue :
+  - la lecture ne casse pas
+  - le lecteur garde la stratégie YouTube normale
+- Le cache est donc une optimisation opportuniste, jamais une dépendance bloquante.
 
 ## Recherche avancée (accueil + playlists)
 
@@ -928,6 +1090,7 @@ PulseBeat peut envoyer des e-mails pour :
 - `app.py` : création de l'application Flask, config, startup
 - `extensions.py` : connexion MongoDB et collections
 - `auth_helpers.py` : helpers auth, sécurité, mail, permissions
+- `server_cache.py` : cache serveur intelligent (JSON public + audio YouTube local)
 - `blueprints/accounts.py` : auth, setup initial, reset password, vérification e-mail, Google OAuth, profils publics, 2FA multi-méthodes, import YouTube persistant
 - `blueprints/main.py` : accueil et navigation principale
 - `blueprints/songs.py` : chansons, détails, votes, commentaires, signalements
@@ -1096,6 +1259,24 @@ Comportement :
 - sinon, PulseBeat retombe automatiquement sur les sources lisibles de `static/js/`
 - cela permet de garder un workflow simple en développement tout en réduisant l'exposition des sources côté navigateur
 
+### Cache serveur intelligent (optionnel, recommandé)
+
+Variables disponibles :
+- `SERVER_CACHE_DIR=` (racine locale du cache serveur ; vide = `instance/server_cache`)
+- `SERVER_CACHE_JSON_MAX_BYTES=20971520` (taille max du cache JSON)
+- `SERVER_CACHE_JSON_MAX_FILES=500` (nombre max de fichiers JSON)
+- `PUBLIC_PROFILE_CACHE_TTL_SECONDS=180` (TTL des profils publics cacheables)
+- `PUBLIC_PLAYLIST_CACHE_TTL_SECONDS=180` (TTL des playlists publiques cacheables)
+- `POPULAR_PUBLIC_SONGS_CACHE_TTL_SECONDS=180` (TTL des agrégats de popularité utilisés dans les recommandations)
+- `YOUTUBE_AUDIO_CACHE_ENABLED=1` (active le cache audio local des chansons YouTube)
+- `YOUTUBE_AUDIO_CACHE_MAX_BYTES=536870912` (taille max du cache audio YouTube local)
+- `YOUTUBE_AUDIO_CACHE_MAX_FILES=80` (nombre max de fichiers audio YouTube gardés en cache)
+
+Comportement :
+- les fichiers audio YouTube récemment écoutés peuvent être conservés localement sur le serveur
+- les fichiers les moins récemment utilisés sont supprimés en premier quand les limites sont dépassées
+- les données publiques coûteuses sont sérialisées en JSON côté serveur avec invalidation ciblée + TTL court
+
 ### Sync bibliothèque YouTube (optionnel)
 
 Pour activer la connexion de bibliothèques externes depuis `Gérer mon compte` :
@@ -1109,6 +1290,7 @@ Sans ces variables, les boutons d'intégration restent visibles mais marqués `N
 
 - la synchronisation YouTube fonctionne bien (connexion OAuth, récupération des playlists, import dans PulseBeat)
 - la lecture des chansons importées depuis YouTube fonctionne pour certaines pistes uniquement
+- les pistes YouTube réellement écoutées peuvent maintenant être mises en cache audio localement sur le serveur pour accélérer les écoutes suivantes
 - selon les titres, la lecture peut échouer à cause de restrictions côté YouTube/Google API (droits, disponibilité, limitations d'accès/embeds), ou de limites techniques côté PulseBeat sur les sources externes
 
 Détails techniques de l'import :

@@ -11,6 +11,7 @@ from auth_helpers import (
     contains_profanity,
     create_creator_publication_notifications,
     get_session_user_oid,
+    invalidate_playlist_related_caches,
     is_youtube_integration_enabled,
     is_youtube_linked_playlist,
     login_required,
@@ -25,6 +26,7 @@ from auth_helpers import (
 )
 import extensions
 from i18n import tr
+from server_cache import cached_public_playlist_payload
 
 bp = Blueprint("playlists", __name__, url_prefix="/playlists")
 
@@ -143,6 +145,54 @@ def parse_collaborator_ids(values, owner_oid):
     return [u["_id"] for u in extensions.users_col.find({"_id": {"$in": items}}, {"_id": 1})]
 
 
+def _playlist_song_item(song, viewer_oid):
+    item = serialize_song(song, viewer_oid)
+    item["url"] = song_stream_url(item["id"]) if item.get("is_audio_playable", True) else ""
+    item["external_url"] = item.get("source_url", "")
+    return item
+
+
+def _playlist_cache_payload(playlist):
+    song_ids = list(playlist.get("song_ids", []) or [])
+    raw_songs = list(extensions.songs_col.find({"_id": {"$in": song_ids}}))
+    songs_by_id = {song["_id"]: song for song in raw_songs if can_access_song(song, None)}
+    ordered_items = []
+    for song_id in song_ids:
+        song = songs_by_id.get(song_id)
+        if not song:
+            continue
+        ordered_items.append(_playlist_song_item(song, None))
+
+    collaborators = []
+    for user in extensions.users_col.find({"_id": {"$in": playlist.get("collaborator_ids", [])}}, {"username": 1, "email": 1}):
+        collaborators.append({"id": str(user["_id"]), "username": user.get("username", "user"), "email": user.get("email", "")})
+
+    return {
+        "playlist": playlist_public_data(playlist, None),
+        "song_ids": [str(song_id) for song_id in song_ids],
+        "songs": ordered_items,
+        "collaborators": collaborators,
+    }
+
+
+def _playlist_extra_song_map(song_ids, viewer_oid):
+    if not viewer_oid or not song_ids:
+        return {}
+    rows = extensions.songs_col.find(
+        {
+            "_id": {"$in": song_ids},
+            "visibility": "private",
+            "shared_with": viewer_oid,
+        }
+    )
+    items = {}
+    for song in rows:
+        if can_access_song(song, viewer_oid):
+            item = _playlist_song_item(song, viewer_oid)
+            items[str(song["_id"])] = item
+    return items
+
+
 @bp.route("", methods=["GET", "POST"])
 @login_required
 def list_playlists():
@@ -179,6 +229,7 @@ def list_playlists():
                 "updated_at": datetime.utcnow(),
             }
         ).inserted_id
+        invalidate_playlist_related_caches({"_id": playlist_id, "user_id": user_oid})
         if collaborator_ids:
             owner = extensions.users_col.find_one({"_id": user_oid}, {"username": 1}) or {"username": "user"}
             link = url_for("playlists.playlist_detail", playlist_id=str(playlist_id), _external=True)
@@ -263,6 +314,7 @@ def quick_add_song_to_playlist():
         {"_id": playlist_oid},
         {"$push": {"song_ids": song_oid}, "$set": {"updated_at": datetime.utcnow()}},
     )
+    invalidate_playlist_related_caches(playlist)
     return jsonify({"ok": True, "already_exists": False, "message": tr("flash.playlists.song_added")})
 
 
@@ -301,6 +353,7 @@ def quick_create_playlist_with_song():
             "updated_at": datetime.utcnow(),
         }
     ).inserted_id
+    invalidate_playlist_related_caches({"_id": playlist_id, "user_id": user_oid})
 
     return jsonify(
         {
@@ -326,6 +379,7 @@ def delete_playlist(playlist_id):
         return redirect(url_for("playlists.list_playlists"))
 
     extensions.playlists_col.delete_one({"_id": playlist_oid})
+    invalidate_playlist_related_caches(playlist)
     flash(tr("flash.playlists.deleted"), "success")
     return redirect(url_for("playlists.list_playlists"))
 
@@ -407,36 +461,66 @@ def playlist_detail(playlist_id):
 
     song_ids = playlist.get("song_ids", [])
     songs = []
-    if song_ids:
-        raw_songs = list(extensions.songs_col.find({"_id": {"$in": song_ids}}))
-        songs_by_id = {song["_id"]: song for song in raw_songs}
-        ordered = [songs_by_id[sid] for sid in song_ids if sid in songs_by_id]
-        if songs_q:
-            needle = re.escape(songs_q)
-            pattern = re.compile(needle, re.IGNORECASE)
-            ordered = [
-                song
-                for song in ordered
-                if pattern.search(song.get("title", ""))
-                or pattern.search(song.get("artist", ""))
-                or pattern.search(song.get("genre", ""))
-                or pattern.search(song.get("lyrics_text", ""))
-            ]
-        total_playlist_songs = len(ordered)
+    is_public_viewer = (not is_playlist_owner(playlist, user_oid)) and (not is_playlist_collaborator(playlist, user_oid)) and normalize_playlist_visibility(playlist) in {"public", "unlisted"}
+    cached_payload = None
+    if is_public_viewer and not songs_q:
+        cached_payload = cached_public_playlist_payload(
+            current_app,
+            playlist["_id"],
+            lambda: _playlist_cache_payload(playlist),
+        )
+
+    if cached_payload and not songs_q:
+        base_song_map = {str(item.get("id")): item for item in cached_payload.get("songs", []) if item.get("id")}
+        extra_song_map = _playlist_extra_song_map(song_ids, user_oid)
+        ordered_items = []
+        for sid in song_ids:
+            key = str(sid)
+            item = extra_song_map.get(key) or base_song_map.get(key)
+            if item:
+                ordered_items.append(item)
+        total_playlist_songs = len(ordered_items)
         songs_pages = max(1, ceil(total_playlist_songs / per_page)) if total_playlist_songs else 1
         if songs_page > songs_pages:
             songs_page = songs_pages
         start = (songs_page - 1) * per_page
         end = start + per_page
-        ordered = ordered[start:end]
-        for song in ordered:
-            if can_access_song(song, user_oid):
-                item = serialize_song(song, user_oid)
-                item["url"] = song_stream_url(item["id"]) if item.get("is_audio_playable", True) else ""
-                item["external_url"] = item.get("source_url", "")
-                songs.append(item)
+        songs = ordered_items[start:end]
+        collaborators = list(cached_payload.get("collaborators", []))
+        playlist_data = dict(cached_payload.get("playlist", {}))
     else:
-        songs_pages = 1
+        if song_ids:
+            raw_songs = list(extensions.songs_col.find({"_id": {"$in": song_ids}}))
+            songs_by_id = {song["_id"]: song for song in raw_songs}
+            ordered = [songs_by_id[sid] for sid in song_ids if sid in songs_by_id]
+            if songs_q:
+                needle = re.escape(songs_q)
+                pattern = re.compile(needle, re.IGNORECASE)
+                ordered = [
+                    song
+                    for song in ordered
+                    if pattern.search(song.get("title", ""))
+                    or pattern.search(song.get("artist", ""))
+                    or pattern.search(song.get("genre", ""))
+                    or pattern.search(song.get("lyrics_text", ""))
+                ]
+            total_playlist_songs = len(ordered)
+            songs_pages = max(1, ceil(total_playlist_songs / per_page)) if total_playlist_songs else 1
+            if songs_page > songs_pages:
+                songs_page = songs_pages
+            start = (songs_page - 1) * per_page
+            end = start + per_page
+            ordered = ordered[start:end]
+            for song in ordered:
+                if can_access_song(song, user_oid):
+                    songs.append(_playlist_song_item(song, user_oid))
+        else:
+            songs_pages = 1
+
+        collaborators = []
+        for u in extensions.users_col.find({"_id": {"$in": playlist.get("collaborator_ids", [])}}, {"username": 1, "email": 1}):
+            collaborators.append({"id": str(u["_id"]), "username": u.get("username", "user"), "email": u.get("email", "")})
+        playlist_data = playlist_public_data(playlist, user_oid)
 
     add_total = extensions.songs_col.count_documents(visible_song_filter(user_oid))
     add_pages = max(1, ceil(add_total / per_page)) if add_total else 1
@@ -445,13 +529,9 @@ def playlist_detail(playlist_id):
 
     all_songs = []
 
-    collaborators = []
-    for u in extensions.users_col.find({"_id": {"$in": playlist.get("collaborator_ids", [])}}, {"username": 1, "email": 1}):
-        collaborators.append({"id": str(u["_id"]), "username": u.get("username", "user"), "email": u.get("email", "")})
-
     return render_template(
         "playlists/detail.jinja",
-        playlist=playlist_public_data(playlist, user_oid),
+        playlist=playlist_data if cached_payload and not is_playlist_owner(playlist, user_oid) and not is_playlist_collaborator(playlist, user_oid) else playlist_public_data(playlist, user_oid),
         songs=songs,
         all_songs=all_songs,
         collaborators=collaborators,
@@ -496,6 +576,9 @@ def update_playlist(playlist_id):
         {"_id": playlist_oid},
         {"$set": {"name": name, "visibility": visibility, "updated_at": datetime.utcnow()}},
     )
+    refreshed_playlist = dict(playlist)
+    refreshed_playlist.update({"name": name, "visibility": visibility, "updated_at": datetime.utcnow()})
+    invalidate_playlist_related_caches(refreshed_playlist)
     if normalize_playlist_visibility(playlist) != "public" and visibility == "public":
         create_creator_publication_notifications(user_oid, "playlist", playlist_oid, name)
     flash(tr("flash.playlists.updated"), "success")
@@ -522,6 +605,9 @@ def update_playlist_collaborators(playlist_id):
         {"_id": playlist_oid},
         {"$set": {"collaborator_ids": collaborator_ids, "updated_at": datetime.utcnow()}},
     )
+    refreshed_playlist = dict(playlist)
+    refreshed_playlist.update({"collaborator_ids": collaborator_ids, "updated_at": datetime.utcnow()})
+    invalidate_playlist_related_caches(refreshed_playlist)
     if collaborator_ids:
         owner = extensions.users_col.find_one({"_id": user_oid}, {"username": 1}) or {"username": "user"}
         new_ids = [cid for cid in collaborator_ids if str(cid) not in old_ids]
@@ -561,6 +647,7 @@ def add_song_to_playlist(playlist_id):
         {"_id": playlist_oid},
         {"$push": {"song_ids": song_oid}, "$set": {"updated_at": datetime.utcnow()}},
     )
+    invalidate_playlist_related_caches(playlist)
     flash(tr("flash.playlists.song_added"), "success")
     return redirect(url_for("playlists.playlist_detail", playlist_id=playlist_id))
 
@@ -584,6 +671,7 @@ def remove_song_from_playlist(playlist_id, song_id):
         {"_id": playlist_oid},
         {"$pull": {"song_ids": song_oid}, "$set": {"updated_at": datetime.utcnow()}},
     )
+    invalidate_playlist_related_caches(playlist)
     flash(tr("flash.playlists.song_removed"), "success")
     return redirect(url_for("playlists.playlist_detail", playlist_id=playlist_id))
 
@@ -656,6 +744,7 @@ def reorder_playlist_songs(playlist_id):
         current_app.logger.warning("Unable to reorder playlist songs", exc_info=True)
         return jsonify({"ok": False, "message": tr("flash.playlists.reorder_failed")}), 503
 
+    invalidate_playlist_related_caches(playlist)
     return jsonify({"ok": True, "message": tr("flash.playlists.reordered")})
 
 

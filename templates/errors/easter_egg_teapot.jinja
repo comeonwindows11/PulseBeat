@@ -658,15 +658,19 @@
     if (event.code === "ArrowDown") setDuck(false);
   });
 
-  canvas.addEventListener("click", () => {
+  function handleCanvasPress(event) {
+    if (event && typeof event.button === "number" && event.button !== 0) return;
+    if (event) event.preventDefault();
     if (robotEnabled) setRobotEnabled(false);
     startRun();
-  });
-  canvas.addEventListener("touchstart", (event) => {
-    event.preventDefault();
-    if (robotEnabled) setRobotEnabled(false);
-    startRun();
-  }, { passive: false });
+  }
+
+  if (window.PointerEvent) {
+    canvas.addEventListener("pointerdown", handleCanvasPress, { passive: false });
+  } else {
+    canvas.addEventListener("mousedown", handleCanvasPress);
+    canvas.addEventListener("touchstart", handleCanvasPress, { passive: false });
+  }
   if (robotToggleButton) {
     robotToggleButton.addEventListener("click", () => {
       setRobotEnabled(!robotEnabled);

@@ -17,8 +17,10 @@ from auth_helpers import (
     cleanup_song,
     cleanup_user,
     compose_and_filters,
+    get_database_audio_storage_settings,
     get_session_user_oid,
     is_youtube_integration_enabled,
+    save_app_settings,
     normalize_email,
     normalize_username,
     notify_admins,
@@ -28,6 +30,7 @@ from auth_helpers import (
     safe_mongo_update_one,
     send_email_message,
     username_policy_ok,
+    user_choice_list,
     youtube_song_visibility_clause,
 )
 from i18n import tr
@@ -318,6 +321,33 @@ def dashboard():
         youtube_toggle_url = url_for("admin.set_youtube_toggle")
     except BuildError:
         youtube_toggle_url = ""
+    database_audio_settings = get_database_audio_storage_settings()
+    database_audio_enabled = bool(database_audio_settings.get("enabled", False))
+    database_audio_allowed_user_ids = [
+        parse_object_id(value) for value in database_audio_settings.get("allowed_user_ids", [])
+    ]
+    database_audio_allowed_user_ids = [value for value in database_audio_allowed_user_ids if value]
+    database_audio_allowed_users = []
+    if database_audio_allowed_user_ids:
+        users_by_id = {
+            row["_id"]: row
+            for row in extensions.users_col.find(
+                {"_id": {"$in": database_audio_allowed_user_ids}},
+                {"username": 1, "email": 1},
+            )
+        }
+        for raw_value in database_audio_settings.get("allowed_user_ids", []):
+            oid = parse_object_id(raw_value)
+            if oid and oid in users_by_id:
+                row = users_by_id[oid]
+                database_audio_allowed_users.append(
+                    {
+                        "id": str(oid),
+                        "username": row.get("username", "user"),
+                        "email": row.get("email", ""),
+                    }
+                )
+    database_audio_settings_url = url_for("admin.save_database_audio_storage_settings")
 
     return render_template(
         "admin/dashboard.jinja",
@@ -347,6 +377,10 @@ def dashboard():
         weak_recovery_accounts_count=weak_recovery_accounts_count,
         youtube_integration_enabled=youtube_integration_enabled,
         youtube_toggle_url=youtube_toggle_url,
+        database_audio_enabled=database_audio_enabled,
+        database_audio_allowed_users=database_audio_allowed_users,
+        database_audio_settings_url=database_audio_settings_url,
+        admin_user_picker_choices=user_choice_list(),
     )
 
 
@@ -368,6 +402,38 @@ def set_youtube_toggle():
         {"enable_youtube_integration": enabled},
     )
     flash(tr("flash.admin.youtube_settings_saved_enabled" if enabled else "flash.admin.youtube_settings_saved_disabled"), "success")
+    return redirect(url_for("admin.dashboard"))
+
+
+@bp.route("/database-audio-storage", methods=["POST"])
+@admin_required
+def save_database_audio_storage_settings():
+    admin_oid = get_session_user_oid()
+    enabled = request.form.get("enable_database_audio_storage", "0") == "1"
+    raw_ids = request.form.getlist("database_audio_storage_allowed_user_ids")
+    allowed_ids = []
+    for raw_id in raw_ids:
+        oid = parse_object_id(raw_id)
+        if oid:
+            allowed_ids.append(str(oid))
+    allowed_ids = list(dict.fromkeys(allowed_ids))
+    save_app_settings(
+        {
+            "enable_database_audio_storage": enabled,
+            "database_audio_storage_allowed_user_ids": allowed_ids,
+        }
+    )
+    create_audit_log(
+        admin_oid,
+        "save_database_audio_storage_settings",
+        "app_settings",
+        "global",
+        {
+            "enable_database_audio_storage": enabled,
+            "allowed_user_count": len(allowed_ids),
+        },
+    )
+    flash(tr("flash.admin.database_audio_settings_saved"), "success")
     return redirect(url_for("admin.dashboard"))
 
 

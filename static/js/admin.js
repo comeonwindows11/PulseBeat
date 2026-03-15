@@ -153,3 +153,172 @@
     }
   });
 })();
+
+(function () {
+  const openBtn = document.getElementById("open-db-audio-user-picker");
+  const modal = document.getElementById("admin-user-picker-modal");
+  const searchInput = document.getElementById("admin-user-picker-search");
+  const suggestions = document.getElementById("admin-user-picker-suggestions");
+  const selectedWrap = document.getElementById("admin-user-picker-selected");
+  const applyBtn = document.getElementById("admin-user-picker-apply");
+  const cancelBtn = document.getElementById("admin-user-picker-cancel");
+  const targetInputs = document.getElementById("db-audio-allowed-users-inputs");
+  const targetList = document.getElementById("db-audio-allowed-users-list");
+
+  if (!openBtn || !modal || !searchInput || !suggestions || !selectedWrap || !applyBtn || !cancelBtn || !targetInputs || !targetList) {
+    return;
+  }
+
+  const i18n = window.ADMIN_I18N || {};
+  const allUsers = Array.isArray(window.ADMIN_USER_CHOICES) ? window.ADMIN_USER_CHOICES : [];
+  let selected = new Map();
+  let filtered = [];
+  let activeIndex = -1;
+
+  function showModal() {
+    modal.classList.remove("hidden");
+    modal.setAttribute("aria-hidden", "false");
+  }
+
+  function hideModal() {
+    modal.classList.add("hidden");
+    modal.setAttribute("aria-hidden", "true");
+  }
+
+  function renderSelected() {
+    selectedWrap.innerHTML = "";
+    if (!selected.size) return;
+    selected.forEach((item) => {
+      const pill = document.createElement("button");
+      pill.type = "button";
+      pill.className = "selected-user-pill";
+      pill.textContent = `${item.username} (${item.email}) ×`;
+      pill.addEventListener("click", () => {
+        selected.delete(item.id);
+        renderSelected();
+        renderSuggestions();
+      });
+      selectedWrap.appendChild(pill);
+    });
+  }
+
+  function renderSuggestions() {
+    suggestions.innerHTML = "";
+    if (!filtered.length) {
+      const empty = document.createElement("div");
+      empty.className = "autocomplete-item disabled";
+      empty.textContent = i18n.userPickerNoResults || "No results.";
+      suggestions.appendChild(empty);
+      return;
+    }
+    filtered.forEach((item, index) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = `autocomplete-item${index === activeIndex ? " active" : ""}`;
+      btn.textContent = `${item.username} (${item.email})`;
+      btn.disabled = selected.has(item.id);
+      btn.addEventListener("click", () => {
+        if (btn.disabled) return;
+        selected.set(item.id, item);
+        searchInput.value = "";
+        activeIndex = -1;
+        updateFilter();
+      });
+      suggestions.appendChild(btn);
+    });
+  }
+
+  function updateFilter() {
+    const q = String(searchInput.value || "").trim().toLowerCase();
+    filtered = allUsers.filter((item) => {
+      const haystack = `${item.username || ""} ${item.email || ""}`.toLowerCase();
+      return !q || haystack.includes(q);
+    });
+    activeIndex = filtered.length ? 0 : -1;
+    renderSelected();
+    renderSuggestions();
+  }
+
+  function loadSelectedFromForm() {
+    selected = new Map();
+    const ids = Array.from(targetInputs.querySelectorAll('input[name="database_audio_storage_allowed_user_ids"]')).map((input) => String(input.value || "").trim()).filter(Boolean);
+    const pills = Array.from(targetList.querySelectorAll(".selected-user-pill"));
+    ids.forEach((id, index) => {
+      const existing = allUsers.find((row) => String(row.id) === id);
+      if (existing) {
+        selected.set(id, existing);
+        return;
+      }
+      const label = pills[index] ? pills[index].textContent || id : id;
+      const match = /^(.*)\s\((.*)\)/.exec(label);
+      selected.set(id, {
+        id,
+        username: match ? match[1] : label,
+        email: match ? match[2] : "",
+      });
+    });
+  }
+
+  function persistSelection() {
+    targetInputs.innerHTML = "";
+    targetList.innerHTML = "";
+    selected.forEach((item) => {
+      const hidden = document.createElement("input");
+      hidden.type = "hidden";
+      hidden.name = "database_audio_storage_allowed_user_ids";
+      hidden.value = item.id;
+      targetInputs.appendChild(hidden);
+
+      const pill = document.createElement("span");
+      pill.className = "selected-user-pill";
+      pill.textContent = `${item.username} (${item.email})`;
+      targetList.appendChild(pill);
+    });
+  }
+
+  openBtn.addEventListener("click", () => {
+    loadSelectedFromForm();
+    searchInput.value = "";
+    updateFilter();
+    showModal();
+    window.setTimeout(() => {
+      searchInput.focus();
+    }, 30);
+  });
+
+  cancelBtn.addEventListener("click", () => {
+    hideModal();
+  });
+
+  applyBtn.addEventListener("click", () => {
+    persistSelection();
+    hideModal();
+  });
+
+  searchInput.addEventListener("input", updateFilter);
+  searchInput.addEventListener("keydown", (event) => {
+    if (!filtered.length) return;
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      activeIndex = Math.min(activeIndex + 1, filtered.length - 1);
+      renderSuggestions();
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      activeIndex = Math.max(activeIndex - 1, 0);
+      renderSuggestions();
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      const item = filtered[activeIndex];
+      if (!item || selected.has(item.id)) return;
+      selected.set(item.id, item);
+      searchInput.value = "";
+      updateFilter();
+    } else if (event.key === "Escape") {
+      hideModal();
+    }
+  });
+
+  modal.addEventListener("click", (event) => {
+    if (event.target === modal) hideModal();
+  });
+})();

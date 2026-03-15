@@ -52,6 +52,7 @@ from auth_helpers import (
     is_trusted_device,
     is_youtube_integration_enabled,
     is_user_banned,
+    invalidate_public_profile_cache,
     login_required,
     normalize_email,
     normalize_username,
@@ -70,6 +71,7 @@ from auth_helpers import (
     youtube_playlist_visibility_clause,
 )
 from i18n import tr
+from server_cache import cached_public_profile_payload
 
 bp = Blueprint("accounts", __name__)
 IMPORT_EXECUTOR = ThreadPoolExecutor(max_workers=2)
@@ -3760,6 +3762,7 @@ def update_username():
         current_app.logger.warning("Unable to update username", exc_info=True)
         flash(tr("flash.accounts.username_update_failed"), "warning")
         return redirect(url_for("accounts.manage_account"))
+    invalidate_public_profile_cache(user_oid)
     flash(tr("flash.accounts.username_updated"), "success")
     return redirect(url_for("accounts.manage_account"))
 
@@ -4319,19 +4322,42 @@ def check_availability():
     return jsonify({"available": False, "message": tr("flash.songs.invalid_request")}), 400
 
 
-@bp.route("/users/<username>")
-def public_profile(username):
-    from blueprints.playlists import normalize_playlist_visibility
+def _profile_song_item(song, viewer_oid):
+    item = serialize_song(song, viewer_oid)
+    item["url"] = song_stream_url(item["id"]) if item.get("is_audio_playable", True) else ""
+    item["detail_url"] = url_for("songs.song_detail", song_id=item["id"])
+    item["external_url"] = item.get("source_url", "")
+    created_at = song.get("created_at")
+    if created_at:
+        try:
+            item["created_ts"] = float(created_at.timestamp())
+        except Exception:
+            item["created_ts"] = 0.0
+    else:
+        item["created_ts"] = 0.0
+    return item
 
-    viewer_oid = get_session_user_oid()
-    target = extensions.users_col.find_one(
-        {"username_normalized": normalize_username(username)},
-        {"username": 1, "created_at": 1, "is_admin": 1, "is_root_admin": 1},
-    )
-    if not target:
-        abort(404)
 
-    songs_query = compose_and_filters({"created_by": target["_id"]}, visible_song_filter(viewer_oid))
+def _profile_playlist_item(playlist):
+    updated_at = playlist.get("updated_at") or playlist.get("created_at")
+    updated_ts = 0.0
+    if updated_at:
+        try:
+            updated_ts = float(updated_at.timestamp())
+        except Exception:
+            updated_ts = 0.0
+    return {
+        "id": str(playlist["_id"]),
+        "name": playlist.get("name") or tr("defaults.unnamed"),
+        "song_count": len(playlist.get("song_ids", [])),
+        "visibility": (playlist.get("visibility") or "private").strip().lower() or "private",
+        "detail_url": url_for("playlists.playlist_detail", playlist_id=str(playlist["_id"])),
+        "updated_ts": updated_ts,
+    }
+
+
+def _build_public_profile_cache_payload(target):
+    songs_query = compose_and_filters({"created_by": target["_id"]}, visible_song_filter(None))
     songs_projection = {
         "title": 1,
         "artist": 1,
@@ -4339,6 +4365,7 @@ def public_profile(username):
         "visibility": 1,
         "shared_with": 1,
         "created_by": 1,
+        "created_at": 1,
         "source_type": 1,
         "source_url": 1,
         "url": 1,
@@ -4346,35 +4373,155 @@ def public_profile(username):
         "is_available": 1,
         "availability_reason": 1,
     }
-    songs = []
-    for song in extensions.songs_col.find(songs_query, songs_projection).sort("created_at", -1).limit(50):
-        item = serialize_song(song, viewer_oid)
-        item["url"] = song_stream_url(item["id"]) if item.get("is_audio_playable", True) else ""
-        item["detail_url"] = url_for("songs.song_detail", song_id=item["id"])
-        item["external_url"] = item.get("source_url", "")
-        songs.append(item)
+    songs = [
+        _profile_song_item(song, None)
+        for song in extensions.songs_col.find(songs_query, songs_projection).sort("created_at", -1).limit(80)
+    ]
 
-    playlist_query = compose_and_filters({"user_id": target["_id"]}, youtube_playlist_visibility_clause())
-    if not (viewer_oid and str(viewer_oid) == str(target["_id"])):
-        access_clause = [{"visibility": {"$in": ["public", "unlisted"]}}]
+    playlist_query = compose_and_filters(
+        {"user_id": target["_id"], "visibility": {"$in": ["public", "unlisted"]}},
+        youtube_playlist_visibility_clause(),
+    )
+    playlist_projection = {"name": 1, "song_ids": 1, "visibility": 1, "updated_at": 1, "created_at": 1}
+    playlists = [
+        _profile_playlist_item(playlist)
+        for playlist in extensions.playlists_col.find(playlist_query, playlist_projection).sort("updated_at", -1).limit(80)
+    ]
+
+    return {
+        "profile": {
+            "id": str(target["_id"]),
+            "username": target.get("username", "user"),
+            "created_at": target.get("created_at"),
+            "is_admin": bool(target.get("is_admin", False)),
+            "is_root_admin": bool(target.get("is_root_admin", False)),
+        },
+        "songs": songs,
+        "playlists": playlists,
+        "subscriber_count": count_creator_subscribers(target["_id"]),
+        "comment_count": extensions.song_comments_col.count_documents({"user_id": target["_id"]}),
+    }
+
+
+def _merge_profile_song_lists(base_items, extra_items, limit=50):
+    merged = {}
+    for item in list(base_items or []) + list(extra_items or []):
+        if not item or not item.get("id"):
+            continue
+        merged[str(item["id"])] = item
+    return sorted(merged.values(), key=lambda row: float(row.get("created_ts", 0) or 0), reverse=True)[:limit]
+
+
+def _merge_profile_playlist_lists(base_items, extra_items, limit=50):
+    merged = {}
+    for item in list(base_items or []) + list(extra_items or []):
+        if not item or not item.get("id"):
+            continue
+        merged[str(item["id"])] = item
+    return sorted(merged.values(), key=lambda row: float(row.get("updated_ts", 0) or 0), reverse=True)[:limit]
+
+
+@bp.route("/users/<username>")
+def public_profile(username):
+    viewer_oid = get_session_user_oid()
+    target = extensions.users_col.find_one(
+        {"username_normalized": normalize_username(username)},
+        {"username": 1, "created_at": 1, "is_admin": 1, "is_root_admin": 1},
+    )
+    if not target:
+        abort(404)
+    is_self = bool(viewer_oid and str(viewer_oid) == str(target["_id"]))
+
+    cached_payload = cached_public_profile_payload(
+        current_app,
+        target["_id"],
+        lambda: _build_public_profile_cache_payload(target),
+    ) or _build_public_profile_cache_payload(target)
+
+    if is_self:
+        songs_query = compose_and_filters({"created_by": target["_id"]}, visible_song_filter(viewer_oid))
+        songs_projection = {
+            "title": 1,
+            "artist": 1,
+            "genre": 1,
+            "visibility": 1,
+            "shared_with": 1,
+            "created_by": 1,
+            "created_at": 1,
+            "source_type": 1,
+            "source_url": 1,
+            "url": 1,
+            "external_provider": 1,
+            "is_available": 1,
+            "availability_reason": 1,
+        }
+        songs = [
+            _profile_song_item(song, viewer_oid)
+            for song in extensions.songs_col.find(songs_query, songs_projection).sort("created_at", -1).limit(50)
+        ]
+
+        playlist_query = compose_and_filters({"user_id": target["_id"]}, youtube_playlist_visibility_clause())
+        playlist_projection = {
+            "name": 1,
+            "song_ids": 1,
+            "visibility": 1,
+            "updated_at": 1,
+            "created_at": 1,
+            "collaborator_ids": 1,
+            "user_id": 1,
+        }
+        playlists = [
+            _profile_playlist_item(playlist)
+            for playlist in extensions.playlists_col.find(playlist_query, playlist_projection).sort("updated_at", -1).limit(50)
+        ]
+        subscriber_count = count_creator_subscribers(target["_id"])
+        comment_count = extensions.song_comments_col.count_documents({"user_id": target["_id"]})
+        subscriber_list = list_creator_subscribers(target["_id"])
+    else:
+        songs = list(cached_payload.get("songs", []))
+        playlists = list(cached_payload.get("playlists", []))
+        subscriber_count = int(cached_payload.get("subscriber_count", 0) or 0)
+        comment_count = int(cached_payload.get("comment_count", 0) or 0)
+        subscriber_list = []
+
         if viewer_oid:
-            access_clause.append({"collaborator_ids": viewer_oid})
-        playlist_query = compose_and_filters(playlist_query, {"$or": access_clause})
+            extra_song_query = compose_and_filters(
+                {"created_by": target["_id"], "visibility": "private", "shared_with": viewer_oid},
+                visible_song_filter(viewer_oid),
+            )
+            extra_song_projection = {
+                "title": 1,
+                "artist": 1,
+                "genre": 1,
+                "visibility": 1,
+                "shared_with": 1,
+                "created_by": 1,
+                "created_at": 1,
+                "source_type": 1,
+                "source_url": 1,
+                "url": 1,
+                "external_provider": 1,
+                "is_available": 1,
+                "availability_reason": 1,
+            }
+            extra_songs = [
+                _profile_song_item(song, viewer_oid)
+                for song in extensions.songs_col.find(extra_song_query, extra_song_projection).sort("created_at", -1).limit(50)
+            ]
+            songs = _merge_profile_song_lists(songs, extra_songs, limit=50)
 
-    playlist_projection = {"name": 1, "song_ids": 1, "visibility": 1, "collaborator_ids": 1, "user_id": 1}
-    playlists = []
-    for playlist in extensions.playlists_col.find(playlist_query, playlist_projection).sort("updated_at", -1).limit(50):
-        playlists.append({
-            "id": str(playlist["_id"]),
-            "name": playlist.get("name") or tr("defaults.unnamed"),
-            "song_count": len(playlist.get("song_ids", [])),
-            "visibility": normalize_playlist_visibility(playlist),
-            "detail_url": url_for("playlists.playlist_detail", playlist_id=str(playlist["_id"])),
-        })
+            extra_playlist_query = compose_and_filters(
+                {"user_id": target["_id"], "collaborator_ids": viewer_oid},
+                youtube_playlist_visibility_clause(),
+            )
+            extra_playlist_projection = {"name": 1, "song_ids": 1, "visibility": 1, "updated_at": 1, "created_at": 1}
+            extra_playlists = [
+                _profile_playlist_item(playlist)
+                for playlist in extensions.playlists_col.find(extra_playlist_query, extra_playlist_projection).sort("updated_at", -1).limit(50)
+            ]
+            playlists = _merge_profile_playlist_lists(playlists, extra_playlists, limit=50)
 
-    subscriber_count = count_creator_subscribers(target["_id"])
-    viewer_subscription = get_creator_subscription(target["_id"], viewer_oid) if viewer_oid and str(viewer_oid) != str(target["_id"]) else None
-    subscriber_list = list_creator_subscribers(target["_id"]) if viewer_oid and str(viewer_oid) == str(target["_id"]) else []
+    viewer_subscription = get_creator_subscription(target["_id"], viewer_oid) if viewer_oid and not is_self else None
 
     return render_template(
         "accounts/public_profile.jinja",
@@ -4384,8 +4531,8 @@ def public_profile(username):
             "created_at": target.get("created_at"),
             "is_admin": bool(target.get("is_admin", False)),
             "is_root_admin": bool(target.get("is_root_admin", False)),
-            "is_self": bool(viewer_oid and str(viewer_oid) == str(target["_id"])),
-            "manage_url": url_for("accounts.manage_account") if viewer_oid and str(viewer_oid) == str(target["_id"]) else "",
+            "is_self": is_self,
+            "manage_url": url_for("accounts.manage_account") if is_self else "",
             "subscriber_count": subscriber_count,
             "viewer_subscription": {
                 "notifications_enabled": bool(viewer_subscription.get("notifications_enabled", False)),
@@ -4396,7 +4543,7 @@ def public_profile(username):
         subscriber_list=subscriber_list,
         visible_song_count=len(songs),
         visible_playlist_count=len(playlists),
-        comment_count=extensions.song_comments_col.count_documents({"user_id": target["_id"]}),
+        comment_count=comment_count,
     )
 
 
@@ -4443,6 +4590,7 @@ def subscribe_to_creator(username):
         flash(tr("flash.accounts.subscription_created"), "success")
     else:
         flash(tr("flash.accounts.subscription_updated"), "success")
+    invalidate_public_profile_cache(target["_id"])
     return redirect(url_for("accounts.public_profile", username=target.get("username", username)))
 
 
@@ -4459,6 +4607,7 @@ def unsubscribe_from_creator(username):
         current_app.logger.warning("Unable to unsubscribe from creator", exc_info=True)
         flash(tr("flash.accounts.subscription_failed"), "warning")
         return redirect(url_for("accounts.public_profile", username=target.get("username", username)))
+    invalidate_public_profile_cache(target["_id"])
     flash(tr("flash.accounts.subscription_removed"), "success")
     return redirect(url_for("accounts.public_profile", username=target.get("username", username)))
 

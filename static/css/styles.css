@@ -1303,6 +1303,8 @@ input[type="password"]::-ms-clear {
   border: 1px solid #35507f;
   border-radius: 10px;
   background: #0b1830;
+  touch-action: manipulation;
+  user-select: none;
 }
 
 .dino-easter-card {
@@ -1328,6 +1330,7 @@ input[type="password"]::-ms-clear {
   margin-top: 10px;
   border-radius: 16px;
   box-shadow: 0 18px 44px rgba(0, 0, 0, 0.28);
+  touch-action: manipulation;
 }
 
 .dino-easter-meta {

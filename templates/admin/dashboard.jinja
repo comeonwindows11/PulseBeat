@@ -78,6 +78,37 @@
           </form>
         </article>
 
+        <article class="sub-card admin-settings-card">
+          <h3>{{ t('admin.database_audio_settings_title') }}</h3>
+          <p class="muted small">{{ t('admin.database_audio_settings_hint') }}</p>
+          <form method="post" action="{{ database_audio_settings_url }}" class="stack admin-settings-form" id="database-audio-settings-form">
+            <label class="admin-setting-row">
+              <span class="admin-setting-text">{{ t('admin.database_audio_toggle_label') }}</span>
+              <input type="checkbox" name="enable_database_audio_storage" value="1" {% if database_audio_enabled %}checked{% endif %}>
+            </label>
+            <div class="stack">
+              <button
+                type="button"
+                id="open-db-audio-user-picker"
+                class="btn secondary"
+                data-open-admin-user-picker="1"
+              >{{ t('admin.database_audio_choose_users') }}</button>
+              <div id="db-audio-allowed-users-list" class="selected-users">
+                {% for user in database_audio_allowed_users %}
+                <span class="selected-user-pill">{{ user.username }} ({{ user.email }})</span>
+                {% endfor %}
+              </div>
+              <div id="db-audio-allowed-users-inputs">
+                {% for user in database_audio_allowed_users %}
+                <input type="hidden" name="database_audio_storage_allowed_user_ids" value="{{ user.id }}">
+                {% endfor %}
+              </div>
+              <p class="muted small">{{ t('admin.database_audio_admins_always_allowed') }}</p>
+            </div>
+            <button type="submit">{{ t('admin.database_audio_save') }}</button>
+          </form>
+        </article>
+
         <article class="sub-card">
           <h3>{{ t('admin.create_admin') }}</h3>
           <form method="post" action="{{ url_for('admin.create_admin') }}" class="stack" data-validate-form="1">
@@ -99,6 +130,26 @@
         </article>
       </div>
     </section>
+
+    <div id="admin-user-picker-modal" class="modal hidden" aria-hidden="true" role="dialog" aria-modal="true">
+      <div class="modal-card">
+        <h3>{{ t('admin.database_audio_choose_users') }}</h3>
+        <div class="stack">
+          <input
+            type="text"
+            id="admin-user-picker-search"
+            autocomplete="off"
+            placeholder="{{ t('search.user_placeholder') }}"
+          >
+          <div id="admin-user-picker-suggestions" class="autocomplete-box"></div>
+          <div id="admin-user-picker-selected" class="selected-users"></div>
+          <div class="row-actions">
+            <button type="button" id="admin-user-picker-cancel" class="btn secondary">{{ t('modal.cancel') }}</button>
+            <button type="button" id="admin-user-picker-apply" class="btn">{{ t('modal.apply') }}</button>
+          </div>
+        </div>
+      </div>
+    </div>
 
     {% if me.is_root_admin %}
     <section id="admin-reset" class="dashboard-panel card danger-panel">

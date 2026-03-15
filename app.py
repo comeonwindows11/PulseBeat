@@ -1,3 +1,4 @@
+import hashlib
 import os
 import secrets
 from datetime import UTC, datetime, timedelta
@@ -19,6 +20,7 @@ from auth_helpers import (
     get_session_user_oid,
     normalize_email,
     normalize_username,
+    safe_mongo_update_one,
     validate_bound_session_request,
     youtube_playlist_visibility_clause,
 )
@@ -54,6 +56,60 @@ def register_error_handlers(app):
 
 def root_admin_exists():
     return extensions.users_col.count_documents({"is_admin": True, "is_root_admin": True}, limit=1) > 0
+
+
+def _dino_actor_identity():
+    user = current_user()
+    if user:
+        return {
+            "owner_key": f"user:{user.get('_id')}",
+            "actor_type": "user",
+            "user_id": user.get("_id"),
+            "display_name": str(user.get("username") or user.get("email") or "PulseBeat user"),
+            "guest_code": "",
+        }
+
+    device_id = ensure_request_device_id()
+    guest_digest = hashlib.sha256((device_id or "").encode("utf-8")).hexdigest()
+    guest_code = guest_digest[:6].upper() or "GUEST"
+    return {
+        "owner_key": f"guest:{guest_digest}",
+        "actor_type": "guest",
+        "user_id": None,
+        "display_name": "",
+        "guest_code": guest_code,
+    }
+
+
+def _serialize_dino_entry(entry):
+    actor_type = str(entry.get("actor_type") or "guest")
+    if actor_type == "user" and str(entry.get("display_name") or "").strip():
+        name = str(entry.get("display_name") or "").strip()
+    else:
+        name = f"{t('errors.easter_egg_guest_label')} {str(entry.get('guest_code') or 'GUEST').upper()}"
+    return {
+        "name": name,
+        "score": int(entry.get("best_score", 0) or 0),
+        "updated_at": entry.get("updated_at").isoformat() if entry.get("updated_at") else "",
+    }
+
+
+def get_dino_leaderboard_snapshot():
+    projection = {"best_score": 1, "display_name": 1, "actor_type": 1, "guest_code": 1, "updated_at": 1}
+    players = list(
+        extensions.dino_leaderboard_col.find({"is_robot": False}, projection)
+        .sort([("best_score", -1), ("updated_at", 1), ("_id", 1)])
+        .limit(3)
+    )
+    robots = list(
+        extensions.dino_leaderboard_col.find({"is_robot": True}, projection)
+        .sort([("best_score", -1), ("updated_at", 1), ("_id", 1)])
+        .limit(3)
+    )
+    return {
+        "players": [_serialize_dino_entry(row) for row in players],
+        "robots": [_serialize_dino_entry(row) for row in robots],
+    }
 
 
 def _dedupe_listening_history():
@@ -355,6 +411,13 @@ def create_app():
     extensions.user_notifications_col.create_index([("recipient_user_id", 1), ("created_at", -1)], name="idx_user_notifications_recipient_created")
     extensions.user_notifications_col.create_index([("recipient_user_id", 1), ("is_read", 1), ("created_at", -1)], name="idx_user_notifications_recipient_read")
     _ensure_unique_index_with_dedupe(
+        extensions.dino_leaderboard_col,
+        [("owner_key", 1), ("is_robot", 1)],
+        "uniq_dino_leaderboard_owner_mode",
+        logger=app.logger,
+    )
+    extensions.dino_leaderboard_col.create_index([("is_robot", 1), ("best_score", -1), ("updated_at", 1)], name="idx_dino_leaderboard_mode_score")
+    _ensure_unique_index_with_dedupe(
         extensions.listening_history_col,
         [("user_id", 1), ("song_id", 1)],
         "uniq_history_user_song",
@@ -391,7 +454,69 @@ def create_app():
 
     @app.route("/dino")
     def dino_easter_egg():
-        return render_template("errors/easter_egg_teapot.jinja", error_code=418), 418
+        return render_template(
+            "errors/easter_egg_teapot.jinja",
+            error_code=418,
+            dino_leaderboard=get_dino_leaderboard_snapshot(),
+        ), 418
+
+    @app.route("/dino/leaderboard", methods=["GET", "POST"])
+    def dino_leaderboard_api():
+        if request.method == "GET":
+            return jsonify({"ok": True, **get_dino_leaderboard_snapshot()})
+
+        payload = request.get_json(silent=True) or {}
+        try:
+            score = int(payload.get("score", 0) or 0)
+        except (TypeError, ValueError):
+            score = 0
+        score = max(0, min(score, 10_000_000))
+        if score <= 0:
+            return jsonify({"ok": False, "message": t("errors.easter_egg_leaderboard_invalid_score")}), 400
+
+        identity = _dino_actor_identity()
+        is_robot = bool(payload.get("is_robot", False))
+        now = datetime.now(UTC)
+        existing = extensions.dino_leaderboard_col.find_one(
+            {"owner_key": identity["owner_key"], "is_robot": is_robot},
+            {"best_score": 1},
+        )
+        existing_score = int((existing or {}).get("best_score", 0) or 0)
+
+        update_doc = {
+            "$setOnInsert": {
+                "owner_key": identity["owner_key"],
+                "actor_type": identity["actor_type"],
+                "user_id": identity["user_id"],
+                "guest_code": identity["guest_code"],
+                "is_robot": is_robot,
+                "created_at": now,
+            },
+            "$set": {
+                "updated_at": now,
+            },
+        }
+        if identity["display_name"]:
+            update_doc["$set"]["display_name"] = identity["display_name"]
+        if identity["guest_code"]:
+            update_doc["$set"]["guest_code"] = identity["guest_code"]
+        if score > existing_score:
+            update_doc["$set"]["best_score"] = score
+            update_doc["$set"]["best_score_at"] = now
+
+        try:
+            safe_mongo_update_one(
+                extensions.dino_leaderboard_col,
+                {"owner_key": identity["owner_key"], "is_robot": is_robot},
+                update_doc,
+                upsert=True,
+                max_retries=3,
+            )
+        except PyMongoError:
+            app.logger.exception("Failed to store dino leaderboard entry")
+            return jsonify({"ok": False, "message": t("errors.503.msg")}), 503
+
+        return jsonify({"ok": True, "improved": score > existing_score, **get_dino_leaderboard_snapshot()})
 
     @app.before_request
     def enforce_initial_setup_and_password_change():
@@ -400,7 +525,7 @@ def create_app():
         if endpoint != "static" and not endpoint.startswith("static"):
             ensure_request_device_id()
         if not setup_done:
-            allowed = {"accounts.setup_admin", "dino_easter_egg", "static"}
+            allowed = {"accounts.setup_admin", "dino_easter_egg", "dino_leaderboard_api", "static"}
             if endpoint in allowed or endpoint.startswith("static"):
                 return None
             return redirect(url_for("accounts.setup_admin"))
@@ -425,7 +550,7 @@ def create_app():
             session.clear()
             if endpoint == "static" or endpoint.startswith("static"):
                 return None
-            if endpoint not in {"accounts.login", "accounts.google_login", "accounts.google_callback", "accounts.setup_admin", "dino_easter_egg", "static"} and not endpoint.startswith("static"):
+            if endpoint not in {"accounts.login", "accounts.google_login", "accounts.google_callback", "accounts.setup_admin", "dino_easter_egg", "dino_leaderboard_api", "static"} and not endpoint.startswith("static"):
                 flash(t("flash.accounts.session_invalidated"), "warning")
             return redirect(url_for("accounts.login"))
         session_security_response = validate_bound_session_request(user)
@@ -438,6 +563,7 @@ def create_app():
             "accounts.manage_account",
             "accounts.change_password",
             "dino_easter_egg",
+            "dino_leaderboard_api",
             "main.set_language",
             "static",
         }

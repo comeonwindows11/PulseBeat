@@ -1343,6 +1343,86 @@ input[type="password"]::-ms-clear {
   margin: 0;
 }
 
+.dino-leaderboard-panel {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(69, 103, 167, 0.28);
+}
+
+.dino-leaderboard-head h3 {
+  margin: 0 0 12px;
+}
+
+.dino-leaderboard-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.dino-leaderboard-card {
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid #2d4672;
+  border-radius: 14px;
+  background: rgba(9, 19, 38, 0.55);
+}
+
+.dino-leaderboard-card h4 {
+  margin: 0 0 10px;
+}
+
+.dino-leaderboard-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 8px;
+}
+
+.dino-leaderboard-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(69, 103, 167, 0.24);
+  border-radius: 12px;
+  background: rgba(11, 24, 48, 0.88);
+}
+
+.dino-leaderboard-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.dino-leaderboard-rank {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 38px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(76, 119, 255, 0.18);
+  color: #b8cfff;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.dino-leaderboard-meta strong {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dino-leaderboard-score {
+  color: #ffd7b5;
+  font-weight: 700;
+}
+
 .dino-easter-controls {
   display: flex;
   align-items: center;
@@ -1370,6 +1450,10 @@ input[type="password"]::-ms-clear {
 }
 
 @media (max-width: 700px) {
+  .dino-leaderboard-grid {
+    grid-template-columns: 1fr;
+  }
+
   .dino-easter-controls {
     flex-direction: column;
     align-items: stretch;

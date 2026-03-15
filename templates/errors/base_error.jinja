@@ -65,20 +65,28 @@
     spawnCooldown = 22;
   }
 
-  function restartFromGameOver() {
+  function restartFromGameOver(jumpOnStart) {
     resetRun();
     started = true;
     startedOnce = true;
+    if (jumpOnStart && !dino.jump) {
+      dino.jump = true;
+      dino.vy = -11.5;
+    }
   }
 
-  function tryStartOrJump() {
+  function tryStartOrJump(jumpOnStart = true) {
     if (!started) {
       started = true;
       startedOnce = true;
+      if (jumpOnStart && !dino.jump) {
+        dino.jump = true;
+        dino.vy = -11.5;
+      }
       return;
     }
     if (over) {
-      restartFromGameOver();
+      restartFromGameOver(jumpOnStart);
       return;
     }
     if (!dino.jump) {

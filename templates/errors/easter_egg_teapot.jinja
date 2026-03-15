@@ -28,6 +28,24 @@
       <p class="muted small">{{ t('errors.easter_egg_secret') }}</p>
     </div>
 
+    <section class="dino-leaderboard-panel" aria-labelledby="dino-leaderboard-title">
+      <div class="dino-leaderboard-head">
+        <h3 id="dino-leaderboard-title">{{ t('errors.easter_egg_leaderboard_title') }}</h3>
+      </div>
+      <div class="dino-leaderboard-grid">
+        <div class="dino-leaderboard-card">
+          <h4>{{ t('errors.easter_egg_leaderboard_players') }}</h4>
+          <ol id="dino-leaderboard-players" class="dino-leaderboard-list"></ol>
+          <p id="dino-leaderboard-players-empty" class="muted small hidden">{{ t('errors.easter_egg_leaderboard_empty') }}</p>
+        </div>
+        <div class="dino-leaderboard-card">
+          <h4>{{ t('errors.easter_egg_leaderboard_robots') }}</h4>
+          <ol id="dino-leaderboard-robots" class="dino-leaderboard-list"></ol>
+          <p id="dino-leaderboard-robots-empty" class="muted small hidden">{{ t('errors.easter_egg_leaderboard_empty') }}</p>
+        </div>
+      </div>
+    </section>
+
     <div class="row-actions">
       <a class="btn" href="{{ url_for('main.index') }}">{{ t('errors.back_home') }}</a>
       {% if not current_user %}
@@ -47,6 +65,8 @@
   const h = canvas.height;
   const groundY = h - 34;
   const storageKey = "pulsebeat_dino_easter_best";
+  const leaderboardApiUrl = {{ url_for('dino_leaderboard_api')|tojson }};
+  const initialLeaderboard = {{ (dino_leaderboard or {"players": [], "robots": []})|tojson }};
   const labels = {
     start: {{ t('errors.easter_egg_label_start')|tojson }},
     over: {{ t('errors.easter_egg_label_over')|tojson }},
@@ -60,10 +80,15 @@
     robotOn: {{ t('errors.easter_egg_robot_status_on')|tojson }},
     robotOff: {{ t('errors.easter_egg_robot_status_off')|tojson }},
     robotEnable: {{ t('errors.easter_egg_robot_enable')|tojson }},
-    robotDisable: {{ t('errors.easter_egg_robot_disable')|tojson }}
+    robotDisable: {{ t('errors.easter_egg_robot_disable')|tojson }},
+    leaderboardEmpty: {{ t('errors.easter_egg_leaderboard_empty')|tojson }}
   };
   const robotToggleButton = document.getElementById("dino-robot-toggle");
   const robotStatus = document.getElementById("dino-robot-status");
+  const playerLeaderboard = document.getElementById("dino-leaderboard-players");
+  const robotLeaderboard = document.getElementById("dino-leaderboard-robots");
+  const playerLeaderboardEmpty = document.getElementById("dino-leaderboard-players-empty");
+  const robotLeaderboardEmpty = document.getElementById("dino-leaderboard-robots-empty");
 
   const dino = {
     x: 88,
@@ -87,6 +112,8 @@
   let spawnCooldown = 0;
   let robotEnabled = false;
   let robotRestartCooldown = 0;
+  let runUsedRobot = false;
+  let scoreSubmittedForRun = false;
 
   const obstacles = [];
   const collectibles = [];
@@ -124,17 +151,29 @@
     dino.jumping = false;
     dino.ducking = false;
     robotRestartCooldown = 0;
+    runUsedRobot = false;
+    scoreSubmittedForRun = false;
   }
 
-  function startRun() {
+  function startRun(jumpOnStart = true) {
     if (!started) {
       started = true;
       over = false;
+      if (jumpOnStart && !dino.jumping) {
+        dino.jumping = true;
+        dino.vy = -13.2;
+        createDust(dino.x + 10, groundY - 4, 5, "#ffd2a7");
+      }
       return;
     }
     if (over) {
       resetRun();
       started = true;
+      if (jumpOnStart) {
+        dino.jumping = true;
+        dino.vy = -13.2;
+        createDust(dino.x + 10, groundY - 4, 5, "#ffd2a7");
+      }
       return;
     }
     if (!dino.jumping) {
@@ -166,8 +205,73 @@
 
   function setRobotEnabled(nextValue) {
     robotEnabled = Boolean(nextValue);
+    if (robotEnabled && started && !over) {
+      runUsedRobot = true;
+    }
     if (!robotEnabled) setDuck(false);
     updateRobotUI();
+  }
+
+  function renderLeaderboardList(target, emptyNode, items) {
+    if (!target || !emptyNode) return;
+    target.innerHTML = "";
+    const rows = Array.isArray(items) ? items : [];
+    if (!rows.length) {
+      emptyNode.classList.remove("hidden");
+      return;
+    }
+    emptyNode.classList.add("hidden");
+    rows.forEach((entry, index) => {
+      const li = document.createElement("li");
+      li.className = "dino-leaderboard-item";
+
+      const meta = document.createElement("div");
+      meta.className = "dino-leaderboard-meta";
+
+      const rank = document.createElement("span");
+      rank.className = "dino-leaderboard-rank";
+      rank.textContent = `#${index + 1}`;
+
+      const name = document.createElement("strong");
+      name.textContent = entry && entry.name ? entry.name : "PulseBeat";
+
+      meta.appendChild(rank);
+      meta.appendChild(name);
+
+      const value = document.createElement("span");
+      value.className = "dino-leaderboard-score";
+      value.textContent = String((entry && entry.score) || 0);
+
+      li.appendChild(meta);
+      li.appendChild(value);
+      target.appendChild(li);
+    });
+  }
+
+  function renderLeaderboards(snapshot) {
+    const safeSnapshot = snapshot || {};
+    renderLeaderboardList(playerLeaderboard, playerLeaderboardEmpty, safeSnapshot.players || []);
+    renderLeaderboardList(robotLeaderboard, robotLeaderboardEmpty, safeSnapshot.robots || []);
+  }
+
+  async function submitLeaderboardScore(finalScore, isRobotRun) {
+    if (scoreSubmittedForRun || !Number.isFinite(finalScore) || finalScore <= 0) return;
+    scoreSubmittedForRun = true;
+    try {
+      const res = await fetch(leaderboardApiUrl, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({
+          score: Math.max(0, Math.floor(finalScore)),
+          is_robot: !!isRobotRun,
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (res.ok && data && data.ok) {
+        renderLeaderboards(data);
+      }
+    } catch (_e) {}
   }
 
   function nextObstacle() {
@@ -188,14 +292,14 @@
     if (!robotEnabled) return;
 
     if (!started) {
-      startRun();
+      startRun(false);
       return;
     }
 
     if (over) {
       robotRestartCooldown += 1;
       if (robotRestartCooldown > 45) {
-        startRun();
+        startRun(false);
       }
       return;
     }
@@ -386,6 +490,7 @@
           best = score;
           window.localStorage.setItem(storageKey, String(best));
         }
+        submitLeaderboardScore(score, runUsedRobot || robotEnabled);
         return;
       }
     }
@@ -679,6 +784,7 @@
 
   resetRun();
   updateRobotUI();
+  renderLeaderboards(initialLeaderboard);
   draw();
   loop();
 })();

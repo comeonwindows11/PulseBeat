@@ -832,7 +832,7 @@ def _append_rec_song(song, user_oid, picked, recs, blocked_song_ids, blocked_art
     return True
 
 
-def build_basic_recommendations(user_oid, current_song_oid=None, limit=20):
+def build_basic_recommendations(user_oid, current_song_oid=None, limit=20, exclude_song_ids=None):
     limit = max(1, int(limit or 20))
     blocked_song_ids, blocked_artists = recommendation_filters_for_user(user_oid)
     top_artists = _top_artists_for_user(user_oid, current_song_oid=current_song_oid)
@@ -840,7 +840,7 @@ def build_basic_recommendations(user_oid, current_song_oid=None, limit=20):
     discovery_ids = _discovery_song_ids(limit=max(200, limit * 20), max_plays=3)
 
     recs = []
-    picked = set()
+    picked = {str(song_id) for song_id in (exclude_song_ids or set()) if song_id}
     if current_song_oid:
         picked.add(str(current_song_oid))
 
@@ -1419,11 +1419,21 @@ def song_detail(song_id):
 def recommendations_api():
     user_oid = get_session_user_oid()
     current_song_oid = parse_object_id(request.args.get("song_id", ""))
+    exclude_song_ids = {
+        value.strip()
+        for value in (request.args.get("exclude_ids", "") or "").split(",")
+        if value.strip()
+    }
     limit_raw = request.args.get("limit", "20").strip()
     limit = 20
     if limit_raw.isdigit():
         limit = max(1, min(int(limit_raw), 50))
-    items = build_basic_recommendations(user_oid, current_song_oid=current_song_oid, limit=limit)
+    items = build_basic_recommendations(
+        user_oid,
+        current_song_oid=current_song_oid,
+        limit=limit,
+        exclude_song_ids=exclude_song_ids,
+    )
     return jsonify({"items": items})
 
 

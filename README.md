@@ -1,6 +1,6 @@
 # PulseBeat
 
-Application de streaming musical en `Flask` + `Jinja`, inspirée de YouTube Music, avec lecteur flottant, comptes utilisateurs, playlists collaboratives, espace admin, i18n FR/EN et stockage MongoDB.
+Plateforme de streaming musical hybride en `Flask` + `Jinja`, inspirée de YouTube Music, avec lecteur flottant persistant, comptes utilisateurs, playlists collaboratives, recommandations, espace admin, i18n FR/EN et stockage MongoDB.
 
 ## Fonctionnalités
 

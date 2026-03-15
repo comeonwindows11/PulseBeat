@@ -2364,24 +2364,36 @@
     return idx;
   }
 
-  function pickPageRecommendation(excludeIds) {
+  function pickPageRecommendations(excludeIds, limit = 50) {
     const pool = Array.isArray(window.PAGE_RECOMMENDED_SONGS) ? window.PAGE_RECOMMENDED_SONGS : [];
-    return pool.find((item) => !excludeIds.has(normalizeSongId(item && item.id))) || null;
+    return getUniqueQueue(
+      pool.filter((item) => !excludeIds.has(normalizeSongId(item && item.id)))
+    ).slice(0, Math.max(1, Number(limit) || 50));
   }
 
-  async function fetchRecommendation(currentSongId, excludeIds) {
-    const local = pickPageRecommendation(excludeIds);
-    if (local) return local;
+  async function fetchRecommendations(currentSongId, excludeIds, limit = 50) {
+    const safeLimit = Math.max(1, Math.min(Number(limit) || 50, 50));
+    const localItems = pickPageRecommendations(excludeIds, safeLimit);
+    const params = new URLSearchParams({
+      song_id: String(currentSongId || ""),
+      limit: String(safeLimit),
+    });
+    if (excludeIds && excludeIds.size) {
+      params.set("exclude_ids", Array.from(excludeIds).join(","));
+    }
 
-    const url = `/songs/recommendations?song_id=${encodeURIComponent(currentSongId)}&limit=20`;
     try {
-      const res = await fetch(url, { credentials: "same-origin" });
-      if (!res.ok) return null;
+      const res = await fetch(`/songs/recommendations?${params.toString()}`, { credentials: "same-origin" });
+      if (!res.ok) {
+        return localItems;
+      }
       const data = await res.json();
-      const items = Array.isArray(data.items) ? data.items : [];
-      return items.find((item) => !excludeIds.has(normalizeSongId(item && item.id))) || null;
+      const remoteItems = Array.isArray(data.items) ? data.items : [];
+      return getUniqueQueue(
+        [...localItems, ...remoteItems].filter((item) => !excludeIds.has(normalizeSongId(item && item.id)))
+      ).slice(0, safeLimit);
     } catch (_e) {
-      return null;
+      return localItems;
     }
   }
 
@@ -2413,6 +2425,50 @@
     if (!["playlist", "auto"].includes(state.queueContext)) {
       state.queueContext = "auto";
     }
+    return true;
+  }
+
+  function stopPlaybackBecauseQueueIsExhausted(message) {
+    clearManualPlaybackAssist();
+    audio.pause();
+    if (isYoutubeEngineActive() && ytPlayer && typeof ytPlayer.pauseVideo === "function") {
+      try {
+        ytPlayer.pauseVideo();
+      } catch (_e) {}
+    }
+    state.isPlaying = false;
+    updateMeta(currentSong());
+    showPlayerError(message || i18n.playerNoNewContent || "No new content is available right now. Playback has been stopped.");
+    saveState();
+  }
+
+  async function rebuildAutoQueue(previousQueue, current) {
+    const previousIds = new Set(
+      (Array.isArray(previousQueue) ? previousQueue : [])
+        .map((item) => normalizeSongId(item && item.id))
+        .filter(Boolean)
+    );
+    if (current && current.id) {
+      previousIds.add(normalizeSongId(current.id));
+    }
+
+    const localPool = buildPageNavigationPool().filter((item) => !previousIds.has(normalizeSongId(item && item.id)));
+    const remotePool = current && current.id ? await fetchRecommendations(current.id, previousIds, 50) : [];
+    const nextQueue = getUniqueQueue([...localPool, ...remotePool]).filter(
+      (item) => !previousIds.has(normalizeSongId(item && item.id))
+    );
+
+    if (!nextQueue.length) {
+      return false;
+    }
+
+    state.queue = nextQueue;
+    state.index = 0;
+    state.time = 0;
+    state.shuffleHistory = [];
+    state.queueContext = "auto";
+    state.manualStartSongId = "";
+    sanitizeQueueState(nextQueue[0] && nextQueue[0].id ? nextQueue[0].id : "");
     return true;
   }
 
@@ -2482,23 +2538,14 @@
       return;
     }
 
-    // En navigation manuelle, si on est à la fin d'une file "auto",
-    // on boucle sur le début pour éviter un bouton next "inerte".
-    if (manual && state.queue.length > 1) {
-      await navigateToIndex(0, { manual: true, useCrossfade: false });
+    const current = currentSong();
+    const exhaustedQueue = Array.isArray(state.queue) ? state.queue.slice() : [];
+    const rebuilt = await rebuildAutoQueue(exhaustedQueue, current);
+    if (rebuilt) {
+      await navigateToIndex(0, { manual: !!manual, useCrossfade: !manual });
       return;
     }
-
-    const current = currentSong();
-    const excludeIds = new Set(state.queue.map((s) => normalizeSongId(s && s.id)).filter(Boolean));
-    if (current) {
-      const rec = await fetchRecommendation(current.id, excludeIds);
-      if (rec && !excludeIds.has(normalizeSongId(rec.id))) {
-        state.queue.push(rec);
-        sanitizeQueueState(current.id);
-        await navigateToIndex(state.queue.length - 1, { manual: !!manual, useCrossfade: !manual });
-      }
-    }
+    stopPlaybackBecauseQueueIsExhausted();
   }
 
   function resolvePreviousIndex() {

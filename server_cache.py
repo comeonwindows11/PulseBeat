@@ -7,6 +7,8 @@ import time
 from hashlib import sha1
 from urllib.parse import parse_qs, urlparse
 
+import extensions
+
 try:
     import yt_dlp
 except Exception:  # pragma: no cover - optional dependency at runtime
@@ -494,6 +496,71 @@ def queue_youtube_audio_cache(app, song):
         thread = threading.Thread(target=runner, name=f"pb-yt-cache-{cache_key[:8]}", daemon=True)
         _youtube_downloads[cache_key] = thread
         thread.start()
+    return True
+
+
+def schedule_youtube_activation_warmup(app, limit=12):
+    if not app or not bool(app.config.get("YOUTUBE_AUDIO_CACHE_ENABLED", True)):
+        return False
+
+    def runner():
+        with app.app_context():
+            try:
+                rows = list(
+                    extensions.listening_history_col.aggregate(
+                        [
+                            {"$match": {"song_id": {"$exists": True}}},
+                            {
+                                "$group": {
+                                    "_id": "$song_id",
+                                    "plays": {"$sum": {"$ifNull": ["$play_count", 0]}},
+                                    "updated_at": {"$max": "$updated_at"},
+                                }
+                            },
+                            {"$sort": {"plays": -1, "updated_at": -1}},
+                            {"$limit": max(1, int(limit or 12))},
+                        ]
+                    )
+                )
+                popular_ids = [row.get("_id") for row in rows if row.get("_id")]
+                warmed = set()
+                if popular_ids:
+                    for song in extensions.songs_col.find({"_id": {"$in": popular_ids}}).limit(max(1, int(limit or 12)) * 2):
+                        if not _youtube_video_id(song):
+                            continue
+                        if not str(song.get("source_type", "") or "").strip().lower() == "external":
+                            continue
+                        queue_youtube_audio_cache(app, song)
+                        warmed.add(str(song.get("_id", "")))
+                        if len(warmed) >= max(1, int(limit or 12)):
+                            break
+
+                if len(warmed) < max(1, int(limit or 12)):
+                    remaining = max(1, int(limit or 12)) - len(warmed)
+                    fallback_query = {
+                        "$and": [
+                            {"source_type": "external"},
+                            {
+                                "$or": [
+                                    {"external_provider": "youtube"},
+                                    {"source_url": {"$regex": r"(youtube\.com|youtu\.be)", "$options": "i"}},
+                                ]
+                            },
+                        ]
+                    }
+                    for song in extensions.songs_col.find(fallback_query).sort("updated_at", -1).limit(max(remaining * 3, remaining)):
+                        song_id = str(song.get("_id", ""))
+                        if not song_id or song_id in warmed or not _youtube_video_id(song):
+                            continue
+                        queue_youtube_audio_cache(app, song)
+                        warmed.add(song_id)
+                        if len(warmed) >= max(1, int(limit or 12)):
+                            break
+            except Exception:
+                app.logger.warning("Unable to warm YouTube audio cache after activation", exc_info=True)
+
+    thread = threading.Thread(target=runner, name="pb-youtube-reactivation-warmup", daemon=True)
+    thread.start()
     return True
 
 

@@ -32,3 +32,6 @@ Thumbs.db
 # Runtime uploads
 static/uploads/*
 !static/uploads/.gitkeep
+
+# Server-side cache
+instance/server_cache/

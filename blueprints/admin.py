@@ -34,6 +34,7 @@ from auth_helpers import (
     youtube_song_visibility_clause,
 )
 from i18n import tr
+from server_cache import schedule_youtube_activation_warmup
 
 bp = Blueprint("admin", __name__, url_prefix="/admin")
 PLATFORM_RESET_REQUEST_KEY = "platform_reset_request"
@@ -394,6 +395,36 @@ def set_youtube_toggle():
 
     enabled = request.form.get("enable_youtube_integration", "0") == "1"
     save_app_settings({"enable_youtube_integration": enabled})
+    if enabled:
+        now = datetime.utcnow()
+        youtube_query = {
+            "$and": [
+                {
+                    "$or": [
+                        {"external_provider": "youtube"},
+                        {"source_url": {"$regex": r"(youtube\.com|youtu\.be)", "$options": "i"}},
+                    ]
+                },
+                {"source_type": "external"},
+                {"is_available": False},
+            ]
+        }
+        try:
+            extensions.songs_col.update_many(
+                youtube_query,
+                {
+                    "$set": {
+                        "is_available": True,
+                        "availability_reason": "",
+                        "available_at": now,
+                        "updated_at": now,
+                    },
+                    "$unset": {"unavailable_at": ""},
+                },
+            )
+        except Exception:
+            current_app.logger.warning("Unable to reset stale YouTube availability flags on re-enable", exc_info=True)
+        schedule_youtube_activation_warmup(current_app._get_current_object(), limit=12)
     create_audit_log(
         admin_oid,
         "toggle_youtube_integration",

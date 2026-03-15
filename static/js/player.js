@@ -2101,6 +2101,8 @@
     if (!waveform) return;
     const ctx = waveform.getContext("2d");
     if (!ctx) return;
+    const song = currentSongOrNull();
+    const useSyntheticBars = !analyser || (song && isYouTubeSong(song) && state.activeEngine === "youtube");
 
     const w = waveform.clientWidth || waveform.width;
     const h = waveform.clientHeight || waveform.height;
@@ -2111,7 +2113,7 @@
     ctx.fillStyle = "rgba(255,255,255,0.08)";
     ctx.fillRect(0, 0, w, h);
 
-    if (!analyser) {
+    if (useSyntheticBars) {
       drawBars(ctx, w, h, fallbackWaveBars());
       waveformRaf = requestAnimationFrame(drawWaveform);
       return;

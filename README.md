@@ -23,6 +23,7 @@ Plateforme de streaming musical hybride en `Flask` + `Jinja`, inspirée de YouTu
 - Protection anti-vol de session par appareil de confiance + approbation par courriel des nouveaux appareils
 - Invalidation des sessions suspectes si un cookie semble rejoué depuis un autre environnement
 - Écran de blocage de session suspecte renforcé avec bandeau d'avertissement visuel, animation d'alerte et tentative de son d'avertissement au chargement
+- Watchdog d'intégrité MongoDB : tentative d'auto-récupération des documents invalides, suppression en dernier recours, alerte admins et fallback `422`
 - Ajout de chansons par URL ou upload (avec détection automatique des balises ID3)
 - Stockage optionnel des chansons publiques dans MongoDB GridFS avec cache local reconstructible côté serveur
 - Enrichissement automatique artiste/genre après upload via recherche en ligne
@@ -1382,6 +1383,227 @@ npm run build:client-js
 - Le favicon est servi en `204` via `/favicon.ico` pour éviter les 404 répétitifs en logs
 - Correction d'un cas de persistance d'état UI qui pouvait bloquer `previous/next` dans le lecteur (boutons page + boutons média système)
 
+## Intégrité automatique des documents MongoDB et erreur 422
+
+PulseBeat inclut maintenant un watchdog d'intégrité côté serveur pour éviter qu'un document corrompu ou partiellement invalide fasse tomber l'application entière.
+
+L'objectif est double :
+
+- protéger l'expérience utilisateur en continuant l'opération quand c'est raisonnablement possible
+- empêcher qu'une donnée cassée ne provoque des `500` en cascade sur plusieurs pages
+
+### Philosophie générale
+
+PulseBeat **ne supprime pas immédiatement** un document invalide.
+
+La stratégie est volontairement progressive :
+
+1. **validation structurelle minimale**
+2. **tentative de récupération locale et persistée**
+3. **contournement propre si l'élément peut être ignoré**
+4. **suppression seulement en dernier recours**
+5. **erreur HTTP `422` si l'opération ne peut pas continuer proprement**
+
+Autrement dit :
+
+- si la donnée peut être réparée sans ambiguïté, PulseBeat la répare
+- si la donnée peut être ignorée sans casser la page, PulseBeat l'ignore
+- si la donnée reste inutilisable et dangereuse pour la logique, PulseBeat la supprime et bloque l'opération concernée
+
+### Ce que PulseBeat considère comme récupérable
+
+Le watchdog ne tente pas de "deviner" des données métier complexes. Il ne répare que les cas simples et sûrs.
+
+Exemples de récupération automatique :
+
+- **utilisateurs**
+  - conversion des champs de sécurité attendus en listes vides si leur format est cassé :
+    - `trusted_devices`
+    - `active_sessions`
+    - `dismissed_admin_alerts`
+    - `pending_device_approvals`
+- **chansons**
+  - remplacement d'un `title` invalide par `Untitled`
+  - remplacement d'un `artist` invalide par `Unknown artist`
+  - remise à vide de champs texte secondaires invalides :
+    - `genre`
+    - `source_type`
+    - `source_url`
+    - `external_provider`
+    - `availability_reason`
+  - remise à `[]` de `shared_with` si le champ est corrompu
+  - normalisation ou fallback de `visibility` vers `public`
+- **playlists**
+  - remplacement d'un nom vide/invalide par `Playlist`
+  - remise à `[]` de `song_ids` ou `collaborator_ids` si le format est corrompu
+  - normalisation ou fallback de `visibility` vers `private`
+- **commentaires**
+  - conversion d'un contenu scalaire en texte
+  - fallback vers un texte neutre si le contenu n'est plus exploitable
+- **historique d'écoute**
+  - normalisation de `play_count` en entier
+  - remise à plat de `last_position` / `last_duration` en flottants sûrs
+- **votes chansons / commentaires**
+  - coercition prudente du `vote` vers `1` ou `-1` quand la valeur reste interprétable
+- **signalements**
+  - normalisation de `target_type`
+  - fallback du `status` vers `open`
+  - conversion du motif en texte si besoin
+- **audit admin**
+  - fallback sur `action` / `target_type` si un champ texte critique a été cassé
+  - encapsulation des `details` en objet si leur type est invalide
+- **abonnements créateurs**
+  - normalisation de `notifications_enabled` en booléen
+- **notifications internes**
+  - normalisation de `notification_type`, `content_type`, `content_title`, `is_read`
+- **workers et intégrations externes**
+  - récupération prudente des statuts et champs texte des documents :
+    - `external_integrations`
+    - `external_playlists`
+    - `external_import_jobs`
+    - `data_exports`
+- **leaderboard Dino 418**
+  - normalisation de `best_score`, `is_robot`, `actor_type`, `display_name`, `guest_code`
+
+Quand cette récupération réussit :
+
+- PulseBeat essaie de persister immédiatement les champs réparés en base
+- la requête continue sans afficher de page d'erreur
+- un warning est journalisé côté serveur pour garder une trace technique
+
+### Quand PulseBeat ignore simplement l'élément
+
+Sur certaines vues liste, un document cassé n'a pas besoin de faire échouer toute la page.
+
+Exemples :
+
+- listes de chansons sur l'accueil
+- recommandations
+- historique d'écoute
+- chansons d'une playlist
+- éléments secondaires d'un profil public
+- listes utilisateurs/commentaires/chansons en zone admin
+- notifications internes
+- abonnements créateurs
+- workers d'import YouTube et playlists externes
+- leaderboard du `/dino`
+
+Dans ces cas :
+
+- PulseBeat tente d'abord la récupération
+- si la récupération échoue, l'élément est retiré du rendu
+- le reste de la page continue normalement
+
+### Suppression en dernier recours
+
+Si le document est toujours invalide après tentative de récupération, PulseBeat considère qu'il n'est plus sûr à conserver tel quel.
+
+La suppression automatique devient alors le **dernier recours**.
+
+Elle est utilisée surtout quand :
+
+- le document n'a plus de structure de base fiable
+- le document principal d'une opération reste inutilisable après normalisation
+- laisser le document en place risquerait de reproduire la même panne à chaque requête
+
+Quand une suppression automatique a lieu :
+
+- PulseBeat supprime le document dans la collection concernée
+- enregistre une entrée d'audit admin
+- met à jour `system_status` avec la clé `invalid_document_watchdog`
+- informe tous les admins du problème et de la collection touchée
+- journalise aussi l'événement côté serveur
+
+### Quand PulseBeat renvoie une erreur 422
+
+Si le document corrompu est **central** à l'opération en cours et qu'il n'a pas pu être réparé proprement, PulseBeat refuse de continuer et renvoie une erreur HTTP `422`.
+
+Concrètement, cela couvre les cas où :
+
+- la page ou l'action dépend directement de ce document pour fonctionner
+- l'ignorer produirait un résultat incohérent ou dangereux
+- la suppression seule ne permet pas de terminer la requête proprement
+
+Comportement :
+
+- pour HTML : page d'erreur personnalisée `422`
+- pour AJAX / API JSON : réponse JSON propre avec message utilisateur
+
+Le but est d'expliquer qu'il s'agit d'une donnée invalide, pas d'une panne MongoDB générale ni d'un crash interne opaque.
+
+### Collections et points d'entrée actuellement protégés
+
+Le watchdog couvre déjà les flux les plus sensibles et fréquents :
+
+- récupération de l'utilisateur courant et wrappers `login_required` / `admin_required`
+- sérialisation des chansons
+- vues de l'accueil et recommandations
+- détails chansons
+- profils publics
+- widgets `Gérer mon compte` liés aux intégrations externes et workers persistants
+- détails playlists et listes de chansons associées
+- historique d'écoute
+- votes chansons / votes commentaires
+- commentaires et fragments de commentaires
+- signalements
+- abonnements créateurs et notifications internes
+- leaderboard global du Dino `418`
+- plusieurs listes de la zone admin (`users`, `songs`, `comments`, `reports`, `audit logs`)
+- documents d'état et de configuration transverses (`system_status`, `app_settings`)
+- navigation globale chargée sur presque toutes les pages (ex. playlists du header)
+- certaines routines internes de maintenance/dédoublonnage qui passent sur des lots de documents
+
+Cela permet de protéger les écrans les plus visibles sans attendre qu'une corruption se propage partout.
+
+Collections désormais prises en charge par le watchdog :
+
+- `users`
+- `songs`
+- `playlists`
+- `song_comments`
+- `song_votes`
+- `comment_votes`
+- `listening_history`
+- `song_reports`
+- `admin_audit`
+- `creator_subscriptions`
+- `user_notifications`
+- `external_integrations`
+- `external_playlists`
+- `external_import_jobs`
+- `data_exports`
+- `system_status`
+- `app_settings`
+- `dino_leaderboard`
+
+### Relation avec les autres handlers d'erreur
+
+Ce mécanisme complète les autres défenses existantes :
+
+- `PyMongoError` global continue de renvoyer une erreur `503` propre quand MongoDB lui-même échoue
+- le watchdog documents invalides traite un problème différent : **une donnée stockée, mais mal formée**
+- PulseBeat essaie donc :
+  - d'abord de récupérer la donnée
+  - ensuite de l'ignorer si c'est sans danger
+  - puis seulement de supprimer / renvoyer `422`
+
+En résumé :
+
+- `503` = problème d'accès ou d'écriture MongoDB
+- `422` = donnée présente, mais invalide ou corrompue pour l'opération demandée
+
+### Ce qui a été étendu dans la dernière passe
+
+La couverture a aussi été élargie aux documents qui servent de support à l'application et qui étaient encore plus "silencieux" :
+
+- les lignes `system_status` utilisées par la zone admin et les alertes de santé
+- le document `app_settings` chargé globalement pour les feature flags
+- les playlists du header chargées sur toutes les pages pour un utilisateur connecté
+- certaines lectures de sécurité côté admin/root admin
+- les lots d'historique d'écoute parcourus pendant les routines internes de déduplication
+
+L'intérêt de cette extension est d'éviter qu'un document corrompu dans une collection annexe ou technique ne casse une page entière simplement parce qu'il est consulté partout ou très souvent.
+
 ## Comptes Google
 
 Les comptes connectés via Google OAuth ont un comportement spécifique :
@@ -1393,6 +1615,33 @@ Les comptes connectés via Google OAuth ont un comportement spécifique :
 ## Erreurs HTTP
 
 - Les pages d'erreur personnalisées incluent aussi le code `501` (requête non prise en charge).
+
+## Conditions d'usage importantes
+
+PulseBeat est un projet que tu peux utiliser librement dans un cadre **personnel**.
+
+- l'usage personnel est gratuit
+- l'usage personnel le restera toujours
+- la modification du code est autorisée
+- la modification du code est même encouragée pour adapter PulseBeat à tes besoins
+
+En revanche, par défaut :
+
+- l'usage **commercial** de PulseBeat **sans adaptations significatives du code** est strictement interdit
+- toute exploitation commerciale de ce type nécessite une **entente écrite préalable** avec le créateur du projet
+
+Pour toute demande d'entente commerciale, tu peux contacter le créateur à :
+
+- `computerguy020@gmail.com`
+- `comeonwindows@mail.com`
+
+En pratique, cela signifie que :
+
+- l'auto-hébergement personnel, les tests, l'apprentissage et les forks personnels sont autorisés
+- la revente, la redistribution commerciale ou l'hébergement commercial du projet quasi tel quel ne sont pas autorisés par défaut
+- si tu veux utiliser PulseBeat dans un contexte commercial sérieux, il faut d'abord obtenir un accord écrit
+
+Le détail formel de ces conditions figure aussi dans le fichier [LICENSE](LICENSE). En cas de différence d'interprétation, il faut se référer au contenu du fichier de licence présent dans le dépôt.
 
 ## Sécurité
 

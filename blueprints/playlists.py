@@ -6,6 +6,7 @@ from flask import Blueprint, current_app, flash, jsonify, redirect, render_templ
 from pymongo.errors import PyMongoError
 
 from auth_helpers import (
+    InvalidStoredDocumentError,
     can_access_song,
     compose_and_filters,
     contains_profanity,
@@ -21,6 +22,7 @@ from auth_helpers import (
     serialize_song,
     song_stream_url,
     send_email_message,
+    validate_or_purge_document,
     visible_song_filter,
     youtube_playlist_visibility_clause,
 )
@@ -53,6 +55,9 @@ def is_playlist_collaborator(playlist, user_oid):
 
 
 def can_access_playlist(playlist, user_oid):
+    playlist = validate_or_purge_document("playlists", playlist, context="playlists.can_access_playlist")
+    if not playlist:
+        return False
     if playlist_hidden_by_feature_toggle(playlist):
         return False
     if is_playlist_owner(playlist, user_oid) or is_playlist_collaborator(playlist, user_oid):
@@ -62,6 +67,9 @@ def can_access_playlist(playlist, user_oid):
 
 
 def can_edit_playlist(playlist, user_oid):
+    playlist = validate_or_purge_document("playlists", playlist, context="playlists.can_edit_playlist")
+    if not playlist:
+        return False
     if playlist_hidden_by_feature_toggle(playlist):
         return False
     return is_playlist_owner(playlist, user_oid) or is_playlist_collaborator(playlist, user_oid)
@@ -146,13 +154,20 @@ def parse_collaborator_ids(values, owner_oid):
 
 
 def _playlist_song_item(song, viewer_oid):
-    item = serialize_song(song, viewer_oid)
+    valid_song = validate_or_purge_document("songs", song, context="playlists._playlist_song_item")
+    if not valid_song:
+        return None
+    try:
+        item = serialize_song(valid_song, viewer_oid)
+    except InvalidStoredDocumentError:
+        return None
     item["url"] = song_stream_url(item["id"]) if item.get("is_audio_playable", True) else ""
     item["external_url"] = item.get("source_url", "")
     return item
 
 
 def _playlist_cache_payload(playlist):
+    playlist = validate_or_purge_document("playlists", playlist, context="playlists._playlist_cache_payload", fatal=True)
     song_ids = list(playlist.get("song_ids", []) or [])
     raw_songs = list(extensions.songs_col.find({"_id": {"$in": song_ids}}))
     songs_by_id = {song["_id"]: song for song in raw_songs if can_access_song(song, None)}
@@ -161,7 +176,9 @@ def _playlist_cache_payload(playlist):
         song = songs_by_id.get(song_id)
         if not song:
             continue
-        ordered_items.append(_playlist_song_item(song, None))
+        item = _playlist_song_item(song, None)
+        if item:
+            ordered_items.append(item)
 
     collaborators = []
     for user in extensions.users_col.find({"_id": {"$in": playlist.get("collaborator_ids", [])}}, {"username": 1, "email": 1}):
@@ -189,7 +206,8 @@ def _playlist_extra_song_map(song_ids, viewer_oid):
     for song in rows:
         if can_access_song(song, viewer_oid):
             item = _playlist_song_item(song, viewer_oid)
-            items[str(song["_id"])] = item
+            if item:
+                items[str(song["_id"])] = item
     return items
 
 
@@ -513,7 +531,9 @@ def playlist_detail(playlist_id):
             ordered = ordered[start:end]
             for song in ordered:
                 if can_access_song(song, user_oid):
-                    songs.append(_playlist_song_item(song, user_oid))
+                    item = _playlist_song_item(song, user_oid)
+                    if item:
+                        songs.append(item)
         else:
             songs_pages = 1
 

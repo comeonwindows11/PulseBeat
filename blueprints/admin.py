@@ -31,6 +31,7 @@ from auth_helpers import (
     send_email_message,
     username_policy_ok,
     user_choice_list,
+    validate_or_purge_document,
     youtube_song_visibility_clause,
 )
 from i18n import tr
@@ -164,6 +165,7 @@ def _load_platform_reset_request(token: str):
         return None, "", tr("flash.admin.reset_invalid")
 
     user = extensions.users_col.find_one({"_id": user_oid})
+    user = validate_or_purge_document("users", user, context="admin._load_platform_reset_request")
     if not user or not user.get("is_root_admin", False):
         return None, "", tr("flash.admin.reset_invalid")
 
@@ -206,6 +208,7 @@ def _perform_platform_reset():
 def _get_root_admin_or_redirect():
     admin_oid = get_session_user_oid()
     admin_user = extensions.users_col.find_one({"_id": admin_oid})
+    admin_user = validate_or_purge_document("users", admin_user, context="admin._get_root_admin_or_redirect")
     if not admin_user or not admin_user.get("is_root_admin", False):
         flash(tr("flash.admin.only_root_settings"), "danger")
         return None
@@ -250,40 +253,78 @@ def dashboard():
     users_total = extensions.users_col.count_documents({})
     users_pages = max(1, ceil(users_total / per_page)) if users_total else 1
     users_page = min(users_page, users_pages)
-    users = list(extensions.users_col.find().sort("created_at", -1).skip((users_page - 1) * per_page).limit(per_page))
+    users = []
+    for user in extensions.users_col.find().sort("created_at", -1).skip((users_page - 1) * per_page).limit(per_page):
+        valid_user = validate_or_purge_document("users", user, context="admin.dashboard.users")
+        if valid_user:
+            users.append(valid_user)
 
     songs_query = compose_and_filters({}, youtube_song_visibility_clause()) or {}
     songs_total = extensions.songs_col.count_documents(songs_query)
     songs_pages = max(1, ceil(songs_total / per_page)) if songs_total else 1
     songs_page = min(songs_page, songs_pages)
-    songs = list(
-        extensions.songs_col.find(songs_query).sort("created_at", -1).skip((songs_page - 1) * per_page).limit(per_page)
-    )
+    songs = []
+    for song in extensions.songs_col.find(songs_query).sort("created_at", -1).skip((songs_page - 1) * per_page).limit(per_page):
+        valid_song = validate_or_purge_document("songs", song, context="admin.dashboard.songs")
+        if valid_song:
+            songs.append(valid_song)
 
     comments_total = extensions.song_comments_col.count_documents({})
     comments_pages = max(1, ceil(comments_total / per_page)) if comments_total else 1
     comments_page = min(comments_page, comments_pages)
-    comments = list(
-        extensions.song_comments_col.find().sort("created_at", -1).skip((comments_page - 1) * per_page).limit(per_page)
-    )
+    comments = []
+    for comment in extensions.song_comments_col.find().sort("created_at", -1).skip((comments_page - 1) * per_page).limit(per_page):
+        valid_comment = validate_or_purge_document("song_comments", comment, context="admin.dashboard.comments")
+        if valid_comment:
+            comments.append(valid_comment)
 
     reports_total = extensions.song_reports_col.count_documents({"status": "open"})
     reports_pages = max(1, ceil(reports_total / per_page)) if reports_total else 1
     reports_page = min(reports_page, reports_pages)
-    reports = list(
-        extensions.song_reports_col.find({"status": "open"}).sort("created_at", -1).skip((reports_page - 1) * per_page).limit(per_page)
-    )
+    reports = [
+        row
+        for row in (
+            validate_or_purge_document("song_reports", item, context="admin.dashboard.reports")
+            for item in extensions.song_reports_col.find({"status": "open"}).sort("created_at", -1).skip((reports_page - 1) * per_page).limit(per_page)
+        )
+        if row
+    ]
 
     logs_total = extensions.admin_audit_col.count_documents({})
     logs_pages = max(1, ceil(logs_total / per_page)) if logs_total else 1
     logs_page = min(logs_page, logs_pages)
-    logs = list(extensions.admin_audit_col.find().sort("created_at", -1).skip((logs_page - 1) * per_page).limit(per_page))
+    logs = [
+        row
+        for row in (
+            validate_or_purge_document("admin_audit", item, context="admin.dashboard.logs")
+            for item in extensions.admin_audit_col.find().sort("created_at", -1).skip((logs_page - 1) * per_page).limit(per_page)
+        )
+        if row
+    ]
 
     me = extensions.users_col.find_one({"_id": get_session_user_oid()})
+    me = validate_or_purge_document("users", me, context="admin.dashboard.me") or {}
     password_check_status = extensions.system_status_col.find_one({"key": "password_leak_service"})
+    password_check_status = validate_or_purge_document(
+        "system_status",
+        password_check_status,
+        context="admin.dashboard.password_status",
+    )
     moderation_status = extensions.system_status_col.find_one({"key": "auto_moderation"})
+    moderation_status = validate_or_purge_document(
+        "system_status",
+        moderation_status,
+        context="admin.dashboard.moderation_status",
+    )
+    invalid_document_status = extensions.system_status_col.find_one({"key": "invalid_document_watchdog"})
+    invalid_document_status = validate_or_purge_document(
+        "system_status",
+        invalid_document_status,
+        context="admin.dashboard.invalid_document_status",
+    )
     password_alert_key = _build_alert_key("password_leak_service_down", password_check_status, primary_time_field="last_failed_at")
     moderation_alert_key = _build_alert_key("auto_moderation_alert", moderation_status)
+    invalid_document_alert_key = _build_alert_key("invalid_document_watchdog", invalid_document_status)
     dismissed_admin_alerts = {
         value.strip()
         for value in (me or {}).get("dismissed_admin_alerts", [])
@@ -300,6 +341,12 @@ def dashboard():
         and moderation_status.get("status") == "alert"
         and moderation_alert_key
         and moderation_alert_key not in dismissed_admin_alerts
+    )
+    show_invalid_document_alert = bool(
+        invalid_document_status
+        and invalid_document_status.get("status") == "alert"
+        and invalid_document_alert_key
+        and invalid_document_alert_key not in dismissed_admin_alerts
     )
     weak_recovery_accounts_count = extensions.users_col.count_documents(
         {
@@ -371,10 +418,13 @@ def dashboard():
         me=me,
         password_check_status=password_check_status,
         moderation_status=moderation_status,
+        invalid_document_status=invalid_document_status,
         password_alert_key=password_alert_key,
         moderation_alert_key=moderation_alert_key,
+        invalid_document_alert_key=invalid_document_alert_key,
         show_password_alert=show_password_alert,
         show_moderation_alert=show_moderation_alert,
+        show_invalid_document_alert=show_invalid_document_alert,
         weak_recovery_accounts_count=weak_recovery_accounts_count,
         youtube_integration_enabled=youtube_integration_enabled,
         youtube_toggle_url=youtube_toggle_url,
@@ -743,6 +793,7 @@ def resolve_report(report_id):
         return redirect(url_for("admin.dashboard"))
 
     report = extensions.song_reports_col.find_one({"_id": report_oid})
+    report = validate_or_purge_document("song_reports", report, context="admin.resolve_report", fatal=True)
     if not report:
         flash(tr("flash.admin.report_not_found"), "danger")
         return redirect(url_for("admin.dashboard"))

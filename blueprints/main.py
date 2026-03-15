@@ -1,15 +1,19 @@
+import os
 import re
 from math import ceil
-from flask import Blueprint, current_app, make_response, redirect, render_template, request, url_for
+from flask import Blueprint, abort, current_app, make_response, redirect, render_template, request, url_for
 
 from auth_helpers import (
+    InvalidStoredDocumentError,
     get_session_user_oid,
     parse_object_id,
     serialize_song,
     song_stream_url,
     user_choice_list,
+    validate_or_purge_document,
     visible_song_filter,
 )
+from i18n import get_lang
 import extensions
 from server_cache import cached_popular_song_ids
 
@@ -23,11 +27,17 @@ SORT_MAP = {
 
 
 def song_to_public(song, user_oid):
-    item = serialize_song(song, user_oid)
+    valid_song = validate_or_purge_document("songs", song, context="main.song_to_public")
+    if not valid_song:
+        return None
+    try:
+        item = serialize_song(valid_song, user_oid)
+    except InvalidStoredDocumentError:
+        return None
     item["url"] = song_stream_url(item["id"]) if item.get("is_audio_playable", True) else ""
     item["detail_url"] = url_for("songs.song_detail", song_id=item["id"])
     item["external_url"] = item.get("source_url", "")
-    created_at = song.get("created_at")
+    created_at = valid_song.get("created_at")
     if created_at:
         try:
             item["created_ts"] = float(created_at.timestamp())
@@ -79,7 +89,14 @@ def _top_artists_for_user(user_oid):
 
     artist_scores = {}
 
-    votes = list(extensions.song_votes_col.find({"user_id": user_oid, "vote": 1}, {"song_id": 1}).limit(200))
+    votes = [
+        row
+        for row in (
+            validate_or_purge_document("song_votes", item, context="main._top_artists_for_user.vote")
+            for item in extensions.song_votes_col.find({"user_id": user_oid, "vote": 1}, {"song_id": 1}).limit(200)
+        )
+        if row
+    ]
     vote_song_ids = [row.get("song_id") for row in votes if row.get("song_id")]
     if vote_song_ids:
         for song in extensions.songs_col.find({"_id": {"$in": vote_song_ids}}, {"artist": 1}):
@@ -87,11 +104,16 @@ def _top_artists_for_user(user_oid):
             if artist:
                 artist_scores[artist] = artist_scores.get(artist, 0) + 3
 
-    history = list(
-        extensions.listening_history_col.find({"user_id": user_oid}, {"song_id": 1, "play_count": 1})
-        .sort("updated_at", -1)
-        .limit(250)
-    )
+    history = [
+        row
+        for row in (
+            validate_or_purge_document("listening_history", item, context="main._top_artists_for_user.history")
+            for item in extensions.listening_history_col.find({"user_id": user_oid}, {"song_id": 1, "play_count": 1})
+            .sort("updated_at", -1)
+            .limit(250)
+        )
+        if row
+    ]
     history_song_ids = [row.get("song_id") for row in history if row.get("song_id")]
     history_map = {row.get("song_id"): int(row.get("play_count", 0) or 0) for row in history if row.get("song_id")}
     if history_song_ids:
@@ -151,9 +173,30 @@ def _append_rec_song(song, user_oid, picked, recs, blocked_song_ids, blocked_art
         return False
     if song_blocked_for_recommendations(song, blocked_song_ids, blocked_artists):
         return False
-    recs.append(song_to_public(song, user_oid))
+    item = song_to_public(song, user_oid)
+    if not item:
+        return False
+    recs.append(item)
     picked.add(sid)
     return True
+
+
+@bp.route("/license")
+def license_page():
+    preferred_lang = get_lang()
+    preferred_filename = "LICENSE.en" if preferred_lang == "en" else "LICENSE"
+    fallback_filename = "LICENSE"
+    license_path = os.path.join(current_app.root_path, preferred_filename)
+    if not os.path.isfile(license_path):
+        license_path = os.path.join(current_app.root_path, fallback_filename)
+    if not os.path.isfile(license_path):
+        abort(404)
+    try:
+        with open(license_path, "r", encoding="utf-8") as handle:
+            license_text = handle.read().strip()
+    except OSError:
+        abort(404)
+    return render_template("main/license.jinja", license_text=license_text, license_lang=preferred_lang)
 
 
 def build_recommendations(user_oid, exclude_song_ids=None, limit=20):
@@ -265,7 +308,7 @@ def index():
     cursor = extensions.songs_col.find(query).sort(SORT_MAP[sort])
     raw_songs = list(cursor.skip(skip).limit(per_page))
 
-    songs = [song_to_public(song, user_oid) for song in raw_songs]
+    songs = [item for item in (song_to_public(song, user_oid) for song in raw_songs) if item]
 
     exclude_ids = {song["id"] for song in songs}
     recommended_songs = build_recommendations(user_oid, exclude_ids, limit=20)
@@ -315,7 +358,7 @@ def live_songs():
 
     query = {"$and": query_parts} if len(query_parts) > 1 else query_parts[0]
     raw = list(extensions.songs_col.find(query).sort("created_at", -1).limit(50))
-    items = [song_to_public(song, user_oid) for song in raw]
+    items = [item for item in (song_to_public(song, user_oid) for song in raw) if item]
     items.sort(key=lambda s: s.get("created_ts", 0.0))
     next_since = since_ts
     for item in items:

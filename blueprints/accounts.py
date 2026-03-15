@@ -35,6 +35,7 @@ except Exception:
 
 import extensions
 from auth_helpers import (
+    InvalidStoredDocumentError,
     begin_authenticated_session,
     can_access_song,
     compose_and_filters,
@@ -66,6 +67,7 @@ from auth_helpers import (
     send_email_message,
     serialize_song,
     song_stream_url,
+    validate_or_purge_document,
     visible_song_filter,
     username_policy_ok,
     youtube_playlist_visibility_clause,
@@ -146,6 +148,9 @@ def _build_user_export_payload(user_oid):
         )
 
     for playlist in extensions.playlists_col.find({"$or": [{"user_id": user_oid}, {"collaborator_ids": user_oid}]}).sort("updated_at", -1):
+        playlist = validate_or_purge_document("playlists", playlist, context="accounts.export_account_data.playlist")
+        if not playlist:
+            continue
         payload["playlists"].append(
             {
                 "id": str(playlist.get("_id", "")),
@@ -161,6 +166,9 @@ def _build_user_export_payload(user_oid):
         )
 
     for row in extensions.listening_history_col.find({"user_id": user_oid}).sort("updated_at", -1):
+        row = validate_or_purge_document("listening_history", row, context="accounts.export_account_data.history")
+        if not row:
+            continue
         payload["history"].append(
             {
                 "song_id": str(row.get("song_id", "")),
@@ -172,6 +180,9 @@ def _build_user_export_payload(user_oid):
         )
 
     for comment in extensions.song_comments_col.find({"user_id": user_oid}).sort("created_at", -1):
+        comment = validate_or_purge_document("song_comments", comment, context="accounts.export_account_data.comment")
+        if not comment:
+            continue
         payload["comments"].append(
             {
                 "id": str(comment.get("_id", "")),
@@ -184,6 +195,9 @@ def _build_user_export_payload(user_oid):
         )
 
     for vote in extensions.song_votes_col.find({"user_id": user_oid}).sort("updated_at", -1):
+        vote = validate_or_purge_document("song_votes", vote, context="accounts.export_account_data.vote")
+        if not vote:
+            continue
         payload["votes"].append(
             {
                 "song_id": str(vote.get("song_id", "")),
@@ -196,7 +210,14 @@ def _build_user_export_payload(user_oid):
 
 
 def _build_creator_stats(user_oid):
-    song_rows = list(extensions.songs_col.find({"created_by": user_oid}, {"title": 1, "artist": 1}))
+    song_rows = [
+        row
+        for row in (
+            validate_or_purge_document("songs", item, context="accounts._build_creator_stats.song")
+            for item in extensions.songs_col.find({"created_by": user_oid}, {"title": 1, "artist": 1})
+        )
+        if row
+    ]
     if not song_rows:
         return {
             "song_count": 0,
@@ -1628,6 +1649,7 @@ def _external_refresh_token(provider: str, integration: dict):
 
 def _external_access_token(user_oid, provider: str):
     integration = extensions.external_integrations_col.find_one({"user_id": user_oid, "provider": provider})
+    integration = validate_or_purge_document("external_integrations", integration, context="accounts._external_access_token")
     if not integration:
         return None, None
 
@@ -1649,6 +1671,7 @@ def _external_access_token(user_oid, provider: str):
             {"$set": set_doc},
         )
         integration = extensions.external_integrations_col.find_one({"_id": integration["_id"]}) or integration
+        integration = validate_or_purge_document("external_integrations", integration, context="accounts._external_access_token.refreshed") or integration
 
     return integration.get("access_token", ""), integration
 
@@ -2727,6 +2750,7 @@ def external_provider_disconnect(provider):
 
 
 def _external_import_job_public_data(job):
+    job = validate_or_purge_document("external_import_jobs", job, context="accounts._external_import_job_public_data", fatal=True)
     total_tracks = int(job.get("progress_total_tracks", 0) or 0)
     processed_tracks = int(job.get("progress_processed_tracks", 0) or 0)
     added_count = int(job.get("progress_added_count", 0) or 0)
@@ -2770,6 +2794,9 @@ def _playlist_import_status_from_job(job_status: str) -> str:
 
 
 def _sync_playlist_from_import_job(job):
+    job = validate_or_purge_document("external_import_jobs", job, context="accounts._sync_playlist_from_import_job")
+    if not job:
+        return
     local_playlist_id = job.get("local_playlist_id")
     if not local_playlist_id:
         return
@@ -2824,6 +2851,7 @@ def _queue_external_import_job(user_oid, provider, external_playlist_doc, local_
         }
     ).inserted_id
     job = extensions.external_import_jobs_col.find_one({"_id": job_id})
+    job = validate_or_purge_document("external_import_jobs", job, context="accounts._queue_external_import_job")
     if job:
         _sync_playlist_from_import_job(job)
     return job_id
@@ -2967,6 +2995,7 @@ def _mark_stale_import_jobs_queued():
 
 def _run_external_import_job(job_id):
     job = extensions.external_import_jobs_col.find_one({"_id": job_id})
+    job = validate_or_purge_document("external_import_jobs", job, context="accounts._run_external_import_job.job", fatal=True)
     if not job:
         return
 
@@ -2977,6 +3006,7 @@ def _run_external_import_job(job_id):
             "external_playlist_id": str(job.get("external_playlist_id", "") or ""),
         }
     )
+    playlist_doc = validate_or_purge_document("external_playlists", playlist_doc, context="accounts._run_external_import_job.playlist", fatal=True)
     if not playlist_doc:
         _set_import_job_status(job_id, "failed", import_error="external_playlist_not_found")
         return
@@ -3150,6 +3180,7 @@ def external_provider_import_playlist(provider, external_playlist_id):
     playlist_doc = extensions.external_playlists_col.find_one(
         {"user_id": user_oid, "provider": provider, "external_playlist_id": str(external_playlist_id)},
     )
+    playlist_doc = validate_or_purge_document("external_playlists", playlist_doc, context="accounts.external_provider_import_playlist", fatal=True)
     if not playlist_doc:
         flash(tr("flash.accounts.integration_playlist_not_found"), "danger")
         return redirect(url_for("accounts.manage_account"))
@@ -3196,7 +3227,8 @@ def _load_owned_import_job(job_id, user_oid):
     job_oid = parse_object_id(job_id)
     if not job_oid:
         return None
-    return extensions.external_import_jobs_col.find_one({"_id": job_oid, "user_id": user_oid})
+    job = extensions.external_import_jobs_col.find_one({"_id": job_oid, "user_id": user_oid})
+    return validate_or_purge_document("external_import_jobs", job, context="accounts._load_owned_import_job")
 
 
 @bp.route("/account/integrations/import-job/<job_id>/pause", methods=["POST"])
@@ -3607,7 +3639,14 @@ def manage_account():
     blocked_artists = sorted([a for a in blocked_artists if a], key=lambda x: x.lower())
 
     youtube_enabled = is_youtube_integration_enabled(True)
-    integration_docs = list(extensions.external_integrations_col.find({"user_id": user_oid}))
+    integration_docs = [
+        row
+        for row in (
+            validate_or_purge_document("external_integrations", item, context="accounts.manage_account.integration")
+            for item in extensions.external_integrations_col.find({"user_id": user_oid})
+        )
+        if row
+    ]
     integration_by_provider = {str(doc.get("provider", "")).strip().lower(): doc for doc in integration_docs}
     provider_rows = []
     for provider in ["youtube"]:
@@ -3628,6 +3667,9 @@ def manage_account():
     external_playlists = []
     if youtube_enabled:
         for row in extensions.external_playlists_col.find({"user_id": user_oid, "provider": "youtube"}).sort("synced_at", -1).limit(120):
+            row = validate_or_purge_document("external_playlists", row, context="accounts.manage_account.external_playlist")
+            if not row:
+                continue
             external_playlists.append(
                 {
                     "provider": row.get("provider", ""),
@@ -3642,6 +3684,9 @@ def manage_account():
 
     external_import_jobs = []
     for row in extensions.external_import_jobs_col.find({"user_id": user_oid}).sort("updated_at", -1).limit(40):
+        row = validate_or_purge_document("external_import_jobs", row, context="accounts.manage_account.import_job")
+        if not row:
+            continue
         item = _external_import_job_public_data(row)
         item["pause_url"] = url_for("accounts.pause_external_import_job", job_id=item["id"])
         item["resume_url"] = url_for("accounts.resume_external_import_job", job_id=item["id"])
@@ -4182,9 +4227,13 @@ def listening_history():
     items = []
     for row in rows:
         song = extensions.songs_col.find_one({"_id": row.get("song_id")})
+        song = validate_or_purge_document("songs", song, context="accounts.listening_history")
         if not song or not can_access_song(song, user_oid):
             continue
-        item = serialize_song(song, user_oid)
+        try:
+            item = serialize_song(song, user_oid)
+        except InvalidStoredDocumentError:
+            continue
         item["url"] = song_stream_url(item["id"]) if item.get("is_audio_playable", True) else ""
         item["detail_url"] = url_for("songs.song_detail", song_id=item["id"])
         item["external_url"] = item.get("source_url", "")
@@ -4323,11 +4372,17 @@ def check_availability():
 
 
 def _profile_song_item(song, viewer_oid):
-    item = serialize_song(song, viewer_oid)
+    valid_song = validate_or_purge_document("songs", song, context="accounts._profile_song_item")
+    if not valid_song:
+        return None
+    try:
+        item = serialize_song(valid_song, viewer_oid)
+    except InvalidStoredDocumentError:
+        return None
     item["url"] = song_stream_url(item["id"]) if item.get("is_audio_playable", True) else ""
     item["detail_url"] = url_for("songs.song_detail", song_id=item["id"])
     item["external_url"] = item.get("source_url", "")
-    created_at = song.get("created_at")
+    created_at = valid_song.get("created_at")
     if created_at:
         try:
             item["created_ts"] = float(created_at.timestamp())
@@ -4374,8 +4429,12 @@ def _build_public_profile_cache_payload(target):
         "availability_reason": 1,
     }
     songs = [
-        _profile_song_item(song, None)
-        for song in extensions.songs_col.find(songs_query, songs_projection).sort("created_at", -1).limit(80)
+        item
+        for item in (
+            _profile_song_item(song, None)
+            for song in extensions.songs_col.find(songs_query, songs_projection).sort("created_at", -1).limit(80)
+        )
+        if item
     ]
 
     playlist_query = compose_and_filters(
@@ -4385,7 +4444,11 @@ def _build_public_profile_cache_payload(target):
     playlist_projection = {"name": 1, "song_ids": 1, "visibility": 1, "updated_at": 1, "created_at": 1}
     playlists = [
         _profile_playlist_item(playlist)
-        for playlist in extensions.playlists_col.find(playlist_query, playlist_projection).sort("updated_at", -1).limit(80)
+        for playlist in (
+            validate_or_purge_document("playlists", row, context="accounts._build_public_profile_cache_payload.playlists")
+            for row in extensions.playlists_col.find(playlist_query, playlist_projection).sort("updated_at", -1).limit(80)
+        )
+        if playlist
     ]
 
     return {
@@ -4428,6 +4491,7 @@ def public_profile(username):
         {"username_normalized": normalize_username(username)},
         {"username": 1, "created_at": 1, "is_admin": 1, "is_root_admin": 1},
     )
+    target = validate_or_purge_document("users", target, context="accounts.public_profile", fatal=True)
     if not target:
         abort(404)
     is_self = bool(viewer_oid and str(viewer_oid) == str(target["_id"]))
@@ -4456,8 +4520,12 @@ def public_profile(username):
             "availability_reason": 1,
         }
         songs = [
-            _profile_song_item(song, viewer_oid)
-            for song in extensions.songs_col.find(songs_query, songs_projection).sort("created_at", -1).limit(50)
+            item
+            for item in (
+                _profile_song_item(song, viewer_oid)
+                for song in extensions.songs_col.find(songs_query, songs_projection).sort("created_at", -1).limit(50)
+            )
+            if item
         ]
 
         playlist_query = compose_and_filters({"user_id": target["_id"]}, youtube_playlist_visibility_clause())
@@ -4472,7 +4540,11 @@ def public_profile(username):
         }
         playlists = [
             _profile_playlist_item(playlist)
-            for playlist in extensions.playlists_col.find(playlist_query, playlist_projection).sort("updated_at", -1).limit(50)
+            for playlist in (
+                validate_or_purge_document("playlists", row, context="accounts.public_profile.playlists")
+                for row in extensions.playlists_col.find(playlist_query, playlist_projection).sort("updated_at", -1).limit(50)
+            )
+            if playlist
         ]
         subscriber_count = count_creator_subscribers(target["_id"])
         comment_count = extensions.song_comments_col.count_documents({"user_id": target["_id"]})
@@ -4505,8 +4577,12 @@ def public_profile(username):
                 "availability_reason": 1,
             }
             extra_songs = [
-                _profile_song_item(song, viewer_oid)
-                for song in extensions.songs_col.find(extra_song_query, extra_song_projection).sort("created_at", -1).limit(50)
+                item
+                for item in (
+                    _profile_song_item(song, viewer_oid)
+                    for song in extensions.songs_col.find(extra_song_query, extra_song_projection).sort("created_at", -1).limit(50)
+                )
+                if item
             ]
             songs = _merge_profile_song_lists(songs, extra_songs, limit=50)
 
@@ -4517,7 +4593,11 @@ def public_profile(username):
             extra_playlist_projection = {"name": 1, "song_ids": 1, "visibility": 1, "updated_at": 1, "created_at": 1}
             extra_playlists = [
                 _profile_playlist_item(playlist)
-                for playlist in extensions.playlists_col.find(extra_playlist_query, extra_playlist_projection).sort("updated_at", -1).limit(50)
+                for playlist in (
+                    validate_or_purge_document("playlists", row, context="accounts.public_profile.extra_playlists")
+                    for row in extensions.playlists_col.find(extra_playlist_query, extra_playlist_projection).sort("updated_at", -1).limit(50)
+                )
+                if playlist
             ]
             playlists = _merge_profile_playlist_lists(playlists, extra_playlists, limit=50)
 
@@ -4552,6 +4632,7 @@ def public_profile(username):
 def subscribe_to_creator(username):
     viewer_oid = get_session_user_oid()
     target = extensions.users_col.find_one({"username_normalized": normalize_username(username)}, {"username": 1})
+    target = validate_or_purge_document("users", target, context="accounts.subscribe_to_creator", fatal=True)
     if not target:
         abort(404)
     if str(target["_id"]) == str(viewer_oid):
@@ -4599,6 +4680,7 @@ def subscribe_to_creator(username):
 def unsubscribe_from_creator(username):
     viewer_oid = get_session_user_oid()
     target = extensions.users_col.find_one({"username_normalized": normalize_username(username)}, {"username": 1})
+    target = validate_or_purge_document("users", target, context="accounts.unsubscribe_from_creator", fatal=True)
     if not target:
         abort(404)
     try:

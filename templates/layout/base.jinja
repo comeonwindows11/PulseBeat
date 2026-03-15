@@ -156,6 +156,13 @@
     {% block content %}{% endblock %}
   </main>
 
+  <footer class="site-footer">
+    <div class="site-footer__inner">
+      <span class="site-footer__brand">{{ app_name }}</span>
+      <a href="{{ url_for('main.license_page') }}" class="site-footer__link">{{ t('nav.license') }}</a>
+    </div>
+  </footer>
+
   <div id="confirm-modal" class="modal hidden" aria-hidden="true" role="dialog" aria-modal="true">
     <div class="modal-card">
       <h3>{{ t('modal.delete.title') }}</h3>

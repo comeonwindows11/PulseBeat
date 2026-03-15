@@ -18,6 +18,7 @@ from pymongo.errors import PyMongoError
 from werkzeug.utils import secure_filename
 
 from auth_helpers import (
+    InvalidStoredDocumentError,
     VISIBILITY_VALUES,
     admin_required,
     allowed_file,
@@ -43,6 +44,7 @@ from auth_helpers import (
     song_has_database_audio,
     song_owner_matches,
     compute_audio_fingerprint,
+    validate_or_purge_document,
     visible_song_filter,
 )
 import extensions
@@ -584,11 +586,17 @@ def _lyrics_auto_sync_from_source(song) -> bool:
 
 
 def song_public_data(song, user_oid):
-    item = serialize_song(song, user_oid)
+    valid_song = validate_or_purge_document("songs", song, context="songs.song_public_data")
+    if not valid_song:
+        return None
+    try:
+        item = serialize_song(valid_song, user_oid)
+    except InvalidStoredDocumentError:
+        return None
     item["url"] = url_for("songs.stream_song", song_id=item["id"]) if item.get("is_audio_playable", True) else ""
     item["detail_url"] = url_for("songs.song_detail", song_id=item["id"])
     item["external_url"] = item.get("source_url", "")
-    item["has_lyrics"] = bool(song.get("lyrics_text"))
+    item["has_lyrics"] = bool(valid_song.get("lyrics_text"))
     return item
 
 
@@ -659,6 +667,7 @@ def get_vote_stats(song_oid, user_oid):
     user_vote = 0
     if user_oid:
         row = extensions.song_votes_col.find_one({"song_id": song_oid, "user_id": user_oid})
+        row = validate_or_purge_document("song_votes", row, context="songs.get_vote_stats")
         if row:
             user_vote = int(row.get("vote", 0))
     return likes, dislikes, user_vote
@@ -667,9 +676,20 @@ def get_vote_stats(song_oid, user_oid):
 def build_comments(song_oid, user_oid, page=1, per_page=50):
     users = {
         str(u["_id"]): {"username": u.get("username", "user"), "profile_url": url_for("accounts.public_profile", username=u.get("username", "user"))}
-        for u in extensions.users_col.find({}, {"username": 1})
+        for u in (
+            validate_or_purge_document("users", row, context="songs.build_comments.user")
+            for row in extensions.users_col.find({}, {"username": 1})
+        )
+        if u
     }
-    raw = list(extensions.song_comments_col.find({"song_id": song_oid}).sort("created_at", 1))
+    raw = [
+        row
+        for row in (
+            validate_or_purge_document("song_comments", item, context="songs.build_comments.comment")
+            for item in extensions.song_comments_col.find({"song_id": song_oid}).sort("created_at", 1)
+        )
+        if row
+    ]
     by_parent = {}
     comment_ids = []
     for row in raw:
@@ -707,6 +727,14 @@ def build_comments(song_oid, user_oid, page=1, per_page=50):
                     {"comment_id": 1, "vote": 1},
                 )
             )
+            rows = [
+                row
+                for row in (
+                    validate_or_purge_document("comment_votes", item, context="songs.build_comments.user_vote")
+                    for item in rows
+                )
+                if row
+            ]
             user_votes_map = {str(r.get("comment_id")): int(r.get("vote", 0) or 0) for r in rows}
 
     def map_comment(row):
@@ -749,7 +777,14 @@ def _top_artists_for_user(user_oid, current_song_oid=None):
     artist_scores = {}
 
     if user_oid:
-        votes = list(extensions.song_votes_col.find({"user_id": user_oid, "vote": 1}, {"song_id": 1}).limit(200))
+        votes = [
+            row
+            for row in (
+                validate_or_purge_document("song_votes", item, context="songs._top_artists_for_user.vote")
+                for item in extensions.song_votes_col.find({"user_id": user_oid, "vote": 1}, {"song_id": 1}).limit(200)
+            )
+            if row
+        ]
         liked_song_ids = [row.get("song_id") for row in votes if row.get("song_id")]
         if liked_song_ids:
             for song in extensions.songs_col.find({"_id": {"$in": liked_song_ids}}, {"artist": 1}):
@@ -757,11 +792,16 @@ def _top_artists_for_user(user_oid, current_song_oid=None):
                 if artist:
                     artist_scores[artist] = artist_scores.get(artist, 0) + 3
 
-        history = list(
-            extensions.listening_history_col.find({"user_id": user_oid}, {"song_id": 1, "play_count": 1})
-            .sort("updated_at", -1)
-            .limit(250)
-        )
+        history = [
+            row
+            for row in (
+                validate_or_purge_document("listening_history", item, context="songs._top_artists_for_user.history")
+                for item in extensions.listening_history_col.find({"user_id": user_oid}, {"song_id": 1, "play_count": 1})
+                .sort("updated_at", -1)
+                .limit(250)
+            )
+            if row
+        ]
         history_song_ids = [row.get("song_id") for row in history if row.get("song_id")]
         history_counts = {row.get("song_id"): int(row.get("play_count", 0) or 0) for row in history if row.get("song_id")}
         if history_song_ids:
@@ -827,7 +867,10 @@ def _append_rec_song(song, user_oid, picked, recs, blocked_song_ids, blocked_art
         return False
     if song_blocked_for_recommendations(song, blocked_song_ids, blocked_artists):
         return False
-    recs.append(song_public_data(song, user_oid))
+    item = song_public_data(song, user_oid)
+    if not item:
+        return False
+    recs.append(item)
     picked.add(sid)
     return True
 
@@ -1366,7 +1409,7 @@ def my_songs():
         page = pages
     skip = (page - 1) * per_page
     raw = list(extensions.songs_col.find(query).sort("created_at", -1).skip(skip).limit(per_page))
-    songs = [song_public_data(song, user_oid) for song in raw]
+    songs = [item for item in (song_public_data(song, user_oid) for song in raw) if item]
     return render_template("songs/my.jinja", songs=songs, page=page, pages=pages)
 
 
@@ -1376,6 +1419,7 @@ def song_detail(song_id):
     if not song_oid:
         abort(404)
     song = extensions.songs_col.find_one({"_id": song_oid})
+    song = validate_or_purge_document("songs", song, context="songs.song_detail", fatal=True)
     if not song:
         abort(404)
     user_oid = get_session_user_oid()
@@ -1389,6 +1433,7 @@ def song_detail(song_id):
     created_by = song.get("created_by")
     if created_by:
         owner = extensions.users_col.find_one({"_id": created_by}, {"username": 1})
+        owner = validate_or_purge_document("users", owner, context="songs.song_detail.uploader")
         if owner and owner.get("username"):
             uploader = {
                 "username": owner.get("username", "user"),
@@ -1399,9 +1444,12 @@ def song_detail(song_id):
     comments, comments_pages = build_comments(song_oid, user_oid, comments_page, per_page)
     recommended_songs = build_basic_recommendations(user_oid, current_song_oid=song_oid, limit=20)
     total_plays = get_song_total_plays(song_oid)
+    song_item = song_public_data(song, user_oid)
+    if not song_item:
+        raise InvalidStoredDocumentError("songs", "song could not be serialized for detail page", document_id=song_oid)
     return render_template(
         "songs/detail.jinja",
-        song=song_public_data(song, user_oid),
+        song=song_item,
         uploader=uploader,
         likes=likes,
         dislikes=dislikes,
@@ -1448,6 +1496,7 @@ def song_lyrics(song_id):
         return jsonify({"ok": False, "auth_required": True}), 403
 
     song = extensions.songs_col.find_one({"_id": song_oid})
+    song = validate_or_purge_document("songs", song, context="songs.song_lyrics")
     if not song:
         return jsonify({"ok": False}), 404
 
@@ -1489,6 +1538,7 @@ def update_progress(song_id):
 
     now = datetime.now(UTC)
     existing = extensions.listening_history_col.find_one({"user_id": user_oid, "song_id": song_oid}, {"_id": 1})
+    existing = validate_or_purge_document("listening_history", existing, context="songs.update_progress.existing")
     update_doc = {
         "$set": {
             "last_position": max(0.0, position),
@@ -1547,6 +1597,7 @@ def vote_song(song_id):
 
     vote_val = int(vote_raw)
     existing = extensions.song_votes_col.find_one({"song_id": song_oid, "user_id": user_oid}, {"vote": 1})
+    existing = validate_or_purge_document("song_votes", existing, context="songs.vote_song.existing")
     existing_vote = int(existing.get("vote", 0)) if existing else 0
 
     if vote_val == 0 or (existing_vote != 0 and existing_vote == vote_val):
@@ -1580,6 +1631,7 @@ def song_stats(song_id):
     if not song_oid:
         return jsonify({"ok": False}), 404
     song = extensions.songs_col.find_one({"_id": song_oid})
+    song = validate_or_purge_document("songs", song, context="songs.song_stats", fatal=True)
     if not song or not can_access_song(song, user_oid):
         return jsonify({"ok": False}), 404
     likes, dislikes, user_vote = get_vote_stats(song_oid, user_oid)
@@ -1658,6 +1710,7 @@ def report_song(song_id):
         return redirect(url_for("songs.song_detail", song_id=song_id))
 
     song = extensions.songs_col.find_one({"_id": song_oid})
+    song = validate_or_purge_document("songs", song, context="songs.report_song", fatal=True)
     if not song or not can_access_song(song, user_oid):
         abort(404)
 
@@ -1688,7 +1741,9 @@ def report_comment(song_id, comment_id):
         return redirect(url_for("songs.song_detail", song_id=song_id))
 
     comment = extensions.song_comments_col.find_one({"_id": comment_oid, "song_id": song_oid})
+    comment = validate_or_purge_document("song_comments", comment, context="songs.report_comment.comment")
     song = extensions.songs_col.find_one({"_id": song_oid})
+    song = validate_or_purge_document("songs", song, context="songs.report_comment.song", fatal=True)
     if not song or not comment or not can_access_song(song, user_oid):
         abort(404)
 
@@ -1717,6 +1772,7 @@ def comments_fragment(song_id):
     if not song_oid:
         return jsonify({"ok": False}), 404
     song = extensions.songs_col.find_one({"_id": song_oid})
+    song = validate_or_purge_document("songs", song, context="songs.comments_fragment", fatal=True)
     if not song or not can_access_song(song, user_oid):
         return jsonify({"ok": False}), 404
     per_page = int(current_app.config.get("PAGE_SIZE", 50))
@@ -1740,6 +1796,7 @@ def add_comment(song_id):
         return redirect(url_for("songs.song_detail", song_id=song_id))
 
     song = extensions.songs_col.find_one({"_id": song_oid})
+    song = validate_or_purge_document("songs", song, context="songs.add_comment", fatal=True)
     if not song:
         abort(404)
     if not can_access_song(song, user_oid):
@@ -1763,6 +1820,7 @@ def add_comment(song_id):
     }
     if parent_oid:
         parent = extensions.song_comments_col.find_one({"_id": parent_oid, "song_id": song_oid})
+        parent = validate_or_purge_document("song_comments", parent, context="songs.add_comment.parent")
         if parent:
             doc["parent_comment_id"] = parent_oid
     extensions.song_comments_col.insert_one(doc)
@@ -1791,7 +1849,9 @@ def edit_comment(song_id, comment_id):
         return redirect(url_for("songs.song_detail", song_id=song_id, comments_page=comments_page))
 
     song = extensions.songs_col.find_one({"_id": song_oid})
+    song = validate_or_purge_document("songs", song, context="songs.edit_comment.song", fatal=True)
     comment = extensions.song_comments_col.find_one({"_id": comment_oid, "song_id": song_oid})
+    comment = validate_or_purge_document("song_comments", comment, context="songs.edit_comment.comment", fatal=True)
     if not song or not comment:
         abort(404)
     if not can_access_song(song, user_oid):
@@ -1845,12 +1905,15 @@ def vote_comment(song_id, comment_id):
         return redirect(url_for("songs.song_detail", song_id=song_id, comments_page=comments_page))
 
     song = extensions.songs_col.find_one({"_id": song_oid})
+    song = validate_or_purge_document("songs", song, context="songs.vote_comment.song", fatal=True)
     comment = extensions.song_comments_col.find_one({"_id": comment_oid, "song_id": song_oid})
+    comment = validate_or_purge_document("song_comments", comment, context="songs.vote_comment.comment", fatal=True)
     if not song or not comment or not can_access_song(song, user_oid):
         abort(404)
 
     vote_val = int(vote_raw)
     existing = extensions.comment_votes_col.find_one({"comment_id": comment_oid, "user_id": user_oid}, {"vote": 1})
+    existing = validate_or_purge_document("comment_votes", existing, context="songs.vote_comment.existing")
     existing_vote = int(existing.get("vote", 0)) if existing else 0
 
     if vote_val == 0 or (existing_vote != 0 and existing_vote == vote_val):
@@ -1876,6 +1939,7 @@ def vote_comment(song_id, comment_id):
         dislikes = extensions.comment_votes_col.count_documents({"comment_id": comment_oid, "vote": -1})
         user_vote = 0
         row = extensions.comment_votes_col.find_one({"comment_id": comment_oid, "user_id": user_oid}, {"vote": 1})
+        row = validate_or_purge_document("comment_votes", row, context="songs.vote_comment.result")
         if row:
             user_vote = int(row.get("vote", 0) or 0)
         return jsonify({"ok": True, "likes": likes, "dislikes": dislikes, "user_vote": user_vote, "comment_id": str(comment_oid)})
@@ -1898,10 +1962,12 @@ def delete_comment(song_id, comment_id):
         return redirect(url_for("songs.song_detail", song_id=song_id, comments_page=comments_page))
 
     song = extensions.songs_col.find_one({"_id": song_oid})
+    song = validate_or_purge_document("songs", song, context="songs.delete_comment.song", fatal=True)
     if not song:
         abort(404)
 
     comment = extensions.song_comments_col.find_one({"_id": comment_oid, "song_id": song_oid})
+    comment = validate_or_purge_document("song_comments", comment, context="songs.delete_comment.comment")
     if not comment:
         if wants_json_response():
             per_page = int(current_app.config.get("PAGE_SIZE", 50))
@@ -1943,6 +2009,7 @@ def playback_meta(song_id):
     if not song_oid:
         return jsonify({"ok": False}), 404
     song = extensions.songs_col.find_one({"_id": song_oid})
+    song = validate_or_purge_document("songs", song, context="songs.playback_meta")
     if not song:
         return jsonify({"ok": False}), 404
     user_oid = get_session_user_oid()
@@ -1982,6 +2049,7 @@ def set_song_availability(song_id):
     if not song_oid:
         return jsonify({"ok": False}), 404
     song = extensions.songs_col.find_one({"_id": song_oid})
+    song = validate_or_purge_document("songs", song, context="songs.set_song_availability")
     if not song:
         return jsonify({"ok": False}), 404
     user_oid = get_session_user_oid()

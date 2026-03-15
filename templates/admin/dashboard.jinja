@@ -39,6 +39,15 @@
         <p class="muted small">{{ moderation_status.updated_at }}</p>
       </div>
       {% endif %}
+
+      {% if show_invalid_document_alert %}
+      <div class="card alert-card admin-alert-card" data-admin-alert-key="{{ invalid_document_alert_key }}">
+        <button type="button" class="admin-alert-dismiss-btn" aria-label="{{ t('admin.dismiss_alert') }}" title="{{ t('admin.dismiss_alert') }}">×</button>
+        <h3>{{ t('admin.invalid_document_alert') }}</h3>
+        <p>{{ invalid_document_status.message }}</p>
+        <p class="muted small">{{ invalid_document_status.updated_at }}</p>
+      </div>
+      {% endif %}
     </section>
 
     <div

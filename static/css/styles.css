@@ -89,6 +89,50 @@ a {
   padding-bottom: 130px;
 }
 
+.site-footer {
+  margin: 0 18px 120px;
+  padding: 14px 16px;
+  border: 1px solid rgba(53, 80, 127, 0.7);
+  border-radius: 14px;
+  background: rgba(8, 15, 28, 0.72);
+}
+
+.site-footer-admin {
+  margin-bottom: 24px;
+}
+
+.site-footer__inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.site-footer__brand {
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+.site-footer__link {
+  color: #ffd8b4;
+  font-weight: 600;
+}
+
+.license-text {
+  margin: 0;
+  padding: 16px;
+  overflow: auto;
+  border: 1px solid rgba(53, 80, 127, 0.65);
+  border-radius: 14px;
+  background: rgba(8, 15, 28, 0.58);
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.6;
+  font-family: Consolas, "Courier New", monospace;
+}
+
 .nav-icon-btn {
   position: relative;
   display: inline-flex;
@@ -1680,6 +1724,19 @@ input[type="password"]::-ms-clear {
     margin-top: 0;
     border-radius: 18px;
     z-index: 120;
+  }
+
+  .site-footer {
+    margin: 0 14px 150px;
+  }
+
+  .site-footer-admin {
+    margin-bottom: 18px;
+  }
+
+  .site-footer__inner {
+    flex-direction: column;
+    align-items: flex-start;
   }
 }
 

@@ -1,0 +1,92 @@
+PulseBeat License
+Version 1.0
+
+Copyright (c) 2026 PulseBeat
+Creator / commercial contact:
+- computerguy020@gmail.com
+- comeonwindows@mail.com
+
+1. Purpose
+
+This license defines the rights of use, modification, and redistribution
+of the PulseBeat project, unless otherwise stated in writing by the creator.
+
+2. Uses allowed without additional permission
+
+Subject to compliance with the conditions below, you may:
+
+- use PulseBeat free of charge for personal or private purposes;
+- self-host PulseBeat for yourself, for testing, learning, or other
+  non-commercial use;
+- inspect, modify, and adapt the source code;
+- create forks and variants for personal, educational, or experimental use;
+- share modifications or fixes provided that this license and the original
+  notices are kept.
+
+3. General conditions
+
+Any use allowed under this license must:
+
+- keep the copyright notices and this license;
+- clearly indicate that a modified version has been changed compared to the
+  original PulseBeat project if you redistribute that version;
+- not suggest that a modified version is officially approved or endorsed by
+  the creator without explicit written permission.
+
+4. Commercial uses prohibited by default
+
+Unless prior written permission is granted by the creator, the following
+commercial uses are strictly prohibited:
+
+- selling, sublicensing, reselling, or redistributing PulseBeat as-is or with
+  only minor modifications;
+- operating PulseBeat as a commercial service, hosted service, SaaS offering,
+  client offering, or paid service where the core product remains
+  substantially PulseBeat;
+- integrating PulseBeat, in whole or in significant part, into a commercial
+  offer without prior written permission;
+- offering commercial hosting of PulseBeat in a nearly unchanged or only
+  lightly modified form.
+
+5. Significant adaptations
+
+The creator wants to encourage modification and experimentation.
+
+However, if you intend to use PulseBeat commercially, even after significant
+adaptations, you are strongly encouraged to contact the creator to clarify the
+applicable rights and avoid ambiguity.
+
+If there is doubt about whether a use is commercial or about whether the code
+has been significantly adapted, the stricter interpretation applies until
+written permission is obtained.
+
+6. Written agreement takes precedence
+
+Any written agreement made with the creator regarding commercial use,
+exceptions, special licensing, or partnership terms takes precedence over this
+license for the scope explicitly described in that agreement.
+
+7. No warranty
+
+PulseBeat is provided "as is", without warranty of any kind, express or
+implied, including without warranty of uninterrupted operation, absence of
+errors, absolute security, or fitness for a particular purpose.
+
+8. Limitation of liability
+
+To the extent permitted by applicable law, the creator shall not be liable for
+any direct, indirect, special, incidental, or consequential damages arising
+from the use, inability to use, or redistribution of PulseBeat.
+
+9. Termination
+
+Any right granted by this license ends automatically in the event of a
+material breach of its conditions.
+
+10. Contact
+
+For any request regarding commercial authorization, exceptions, or
+clarification:
+
+- computerguy020@gmail.com
+- comeonwindows@mail.com

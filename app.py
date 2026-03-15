@@ -11,6 +11,7 @@ from pymongo.errors import PyMongoError
 import extensions
 from server_cache import init_server_cache, prune_server_cache
 from auth_helpers import (
+    InvalidStoredDocumentError,
     apply_session_security_cookies,
     compose_and_filters,
     count_unread_notifications,
@@ -21,6 +22,7 @@ from auth_helpers import (
     normalize_email,
     normalize_username,
     safe_mongo_update_one,
+    validate_or_purge_document,
     validate_bound_session_request,
     youtube_playlist_visibility_clause,
 )
@@ -39,9 +41,24 @@ def register_error_handlers(app):
 
         return handler
 
-    handled_codes = [400, 401, 403, 404, 405, 408, 413, 418, 429, 500, 501, 502, 503, 504]
+    handled_codes = [400, 401, 403, 404, 405, 408, 413, 418, 422, 429, 500, 501, 502, 503, 504]
     for code in handled_codes:
         app.register_error_handler(code, make_handler(code))
+
+    @app.errorhandler(InvalidStoredDocumentError)
+    def handle_invalid_document_error(error):
+        app.logger.warning(
+            "Invalid stored document reached request boundary (collection=%s, document_id=%s, reason=%s)",
+            getattr(error, "collection_name", "unknown"),
+            getattr(error, "document_id", ""),
+            getattr(error, "reason", "invalid_document"),
+        )
+        requested_with = (request.headers.get("X-Requested-With") or "").strip().lower()
+        accept = (request.headers.get("Accept") or "").lower()
+        wants_json = request.is_json or requested_with == "xmlhttprequest" or "application/json" in accept
+        if wants_json:
+            return jsonify({"ok": False, "message": t("errors.422.msg")}), 422
+        return render_template("errors/base_error.jinja", error=error, error_code=422), 422
 
     @app.errorhandler(PyMongoError)
     def handle_mongo_error(error):
@@ -96,16 +113,26 @@ def _serialize_dino_entry(entry):
 
 def get_dino_leaderboard_snapshot():
     projection = {"best_score": 1, "display_name": 1, "actor_type": 1, "guest_code": 1, "updated_at": 1}
-    players = list(
-        extensions.dino_leaderboard_col.find({"is_robot": False}, projection)
-        .sort([("best_score", -1), ("updated_at", 1), ("_id", 1)])
-        .limit(3)
-    )
-    robots = list(
-        extensions.dino_leaderboard_col.find({"is_robot": True}, projection)
-        .sort([("best_score", -1), ("updated_at", 1), ("_id", 1)])
-        .limit(3)
-    )
+    players = [
+        row
+        for row in (
+            validate_or_purge_document("dino_leaderboard", item, context="app.get_dino_leaderboard_snapshot.players")
+            for item in extensions.dino_leaderboard_col.find({"is_robot": False}, projection)
+            .sort([("best_score", -1), ("updated_at", 1), ("_id", 1)])
+            .limit(3)
+        )
+        if row
+    ]
+    robots = [
+        row
+        for row in (
+            validate_or_purge_document("dino_leaderboard", item, context="app.get_dino_leaderboard_snapshot.robots")
+            for item in extensions.dino_leaderboard_col.find({"is_robot": True}, projection)
+            .sort([("best_score", -1), ("updated_at", 1), ("_id", 1)])
+            .limit(3)
+        )
+        if row
+    ]
     return {
         "players": [_serialize_dino_entry(row) for row in players],
         "robots": [_serialize_dino_entry(row) for row in robots],
@@ -138,6 +165,14 @@ def _dedupe_listening_history():
                 [("updated_at", -1), ("created_at", -1), ("_id", -1)]
             )
         )
+        docs = [
+            item
+            for item in (
+                validate_or_purge_document("listening_history", doc, context="app._dedupe_listening_history")
+                for doc in docs
+            )
+            if item
+        ]
         if not docs:
             continue
         keep = docs[0]
@@ -481,6 +516,7 @@ def create_app():
             {"owner_key": identity["owner_key"], "is_robot": is_robot},
             {"best_score": 1},
         )
+        existing = validate_or_purge_document("dino_leaderboard", existing, context="app.dino_leaderboard_api.existing")
         existing_score = int((existing or {}).get("best_score", 0) or 0)
 
         update_doc = {
@@ -544,6 +580,7 @@ def create_app():
                 "username": 1,
             },
         )
+        user = validate_or_purge_document("users", user, context="app.enforce_initial_setup_and_password_change")
         session_version = int(session.get("session_token_version", -1))
         user_version = int((user or {}).get("session_token_version", 0) or 0)
         if not user or session_version != user_version:
@@ -669,7 +706,14 @@ def create_app():
             user_oid = get_session_user_oid()
             nav_query = compose_and_filters({"user_id": user_oid}, youtube_playlist_visibility_clause()) or {"user_id": user_oid}
             raw = list(extensions.playlists_col.find(nav_query).sort("created_at", -1).limit(6))
-            nav_playlists = [{"id": str(p["_id"]), "name": p.get("name") or t("defaults.unnamed")} for p in raw]
+            nav_playlists = [
+                {"id": str(p["_id"]), "name": p.get("name") or t("defaults.unnamed")}
+                for p in (
+                    validate_or_purge_document("playlists", item, context="app.inject_global_data.nav_playlist")
+                    for item in raw
+                )
+                if p
+            ]
             unread_notification_count = count_unread_notifications(user_oid)
             header_notifications = get_user_notifications(user_oid, limit=20)
         return {

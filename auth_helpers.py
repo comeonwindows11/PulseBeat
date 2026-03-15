@@ -102,11 +102,841 @@ MAX_TRACKED_DEVICES = 10
 MAX_TRACKED_ACTIVE_SESSIONS = 10
 
 
+class InvalidStoredDocumentError(Exception):
+    def __init__(self, collection_name: str, reason: str, document_id=None):
+        self.collection_name = str(collection_name or "unknown")
+        self.reason = str(reason or "invalid_document")
+        self.document_id = document_id
+        super().__init__(f"Invalid stored document in {self.collection_name}: {self.reason}")
+
+
 def parse_object_id(value: str):
     try:
         return ObjectId(value)
     except Exception:
         return None
+
+
+def _collection_for_invalid_document_watchdog(collection_name: str):
+    mapping = {
+        "users": getattr(extensions, "users_col", None),
+        "songs": getattr(extensions, "songs_col", None),
+        "playlists": getattr(extensions, "playlists_col", None),
+        "external_integrations": getattr(extensions, "external_integrations_col", None),
+        "external_playlists": getattr(extensions, "external_playlists_col", None),
+        "external_import_jobs": getattr(extensions, "external_import_jobs_col", None),
+        "data_exports": getattr(extensions, "data_exports_col", None),
+        "song_votes": getattr(extensions, "song_votes_col", None),
+        "song_comments": getattr(extensions, "song_comments_col", None),
+        "comment_votes": getattr(extensions, "comment_votes_col", None),
+        "song_reports": getattr(extensions, "song_reports_col", None),
+        "listening_history": getattr(extensions, "listening_history_col", None),
+        "admin_audit": getattr(extensions, "admin_audit_col", None),
+        "system_status": getattr(extensions, "system_status_col", None),
+        "app_settings": getattr(extensions, "app_settings_col", None),
+        "user_notifications": getattr(extensions, "user_notifications_col", None),
+        "creator_subscriptions": getattr(extensions, "creator_subscriptions_col", None),
+        "dino_leaderboard": getattr(extensions, "dino_leaderboard_col", None),
+    }
+    return mapping.get(str(collection_name or "").strip(), None)
+
+
+def _document_type_error(field_name: str, expected: str):
+    return f"field '{field_name}' must be {expected}"
+
+
+def _validate_user_document_shape(user):
+    if not isinstance(user, dict):
+        return False, "document is not an object"
+    if not user.get("_id"):
+        return False, "missing _id"
+    if "username" in user and user.get("username") is not None and not isinstance(user.get("username"), str):
+        return False, _document_type_error("username", "a string")
+    if "email" in user and user.get("email") is not None and not isinstance(user.get("email"), str):
+        return False, _document_type_error("email", "a string")
+    if "trusted_devices" in user and user.get("trusted_devices") is not None and not isinstance(user.get("trusted_devices"), list):
+        return False, _document_type_error("trusted_devices", "a list")
+    if "active_sessions" in user and user.get("active_sessions") is not None and not isinstance(user.get("active_sessions"), list):
+        return False, _document_type_error("active_sessions", "a list")
+    if "dismissed_admin_alerts" in user and user.get("dismissed_admin_alerts") is not None and not isinstance(user.get("dismissed_admin_alerts"), list):
+        return False, _document_type_error("dismissed_admin_alerts", "a list")
+    return True, ""
+
+
+def _validate_song_document_shape(song):
+    if not isinstance(song, dict):
+        return False, "document is not an object"
+    if not song.get("_id"):
+        return False, "missing _id"
+    if "title" in song and song.get("title") is not None and not isinstance(song.get("title"), str):
+        return False, _document_type_error("title", "a string")
+    if "artist" in song and song.get("artist") is not None and not isinstance(song.get("artist"), str):
+        return False, _document_type_error("artist", "a string")
+    if "genre" in song and song.get("genre") is not None and not isinstance(song.get("genre"), str):
+        return False, _document_type_error("genre", "a string")
+    if "visibility" in song and song.get("visibility") is not None and not isinstance(song.get("visibility"), str):
+        return False, _document_type_error("visibility", "a string")
+    if "shared_with" in song and song.get("shared_with") is not None and not isinstance(song.get("shared_with"), list):
+        return False, _document_type_error("shared_with", "a list")
+    if "source_type" in song and song.get("source_type") is not None and not isinstance(song.get("source_type"), str):
+        return False, _document_type_error("source_type", "a string")
+    if "source_url" in song and song.get("source_url") is not None and not isinstance(song.get("source_url"), str):
+        return False, _document_type_error("source_url", "a string")
+    if "external_provider" in song and song.get("external_provider") is not None and not isinstance(song.get("external_provider"), str):
+        return False, _document_type_error("external_provider", "a string")
+    return True, ""
+
+
+def _validate_playlist_document_shape(playlist):
+    if not isinstance(playlist, dict):
+        return False, "document is not an object"
+    if not playlist.get("_id"):
+        return False, "missing _id"
+    if "name" in playlist and playlist.get("name") is not None and not isinstance(playlist.get("name"), str):
+        return False, _document_type_error("name", "a string")
+    if "song_ids" in playlist and playlist.get("song_ids") is not None and not isinstance(playlist.get("song_ids"), list):
+        return False, _document_type_error("song_ids", "a list")
+    if "collaborator_ids" in playlist and playlist.get("collaborator_ids") is not None and not isinstance(playlist.get("collaborator_ids"), list):
+        return False, _document_type_error("collaborator_ids", "a list")
+    if "visibility" in playlist and playlist.get("visibility") is not None and not isinstance(playlist.get("visibility"), str):
+        return False, _document_type_error("visibility", "a string")
+    return True, ""
+
+
+def _validate_comment_document_shape(comment):
+    if not isinstance(comment, dict):
+        return False, "document is not an object"
+    if not comment.get("_id"):
+        return False, "missing _id"
+    if "content" in comment and comment.get("content") is not None and not isinstance(comment.get("content"), str):
+        return False, _document_type_error("content", "a string")
+    return True, ""
+
+
+def _validate_vote_document_shape(vote, target_key: str):
+    if not isinstance(vote, dict):
+        return False, "document is not an object"
+    if not vote.get("_id"):
+        return False, "missing _id"
+    if not vote.get(target_key):
+        return False, f"missing {target_key}"
+    if not vote.get("user_id"):
+        return False, "missing user_id"
+    vote_value = vote.get("vote")
+    if not isinstance(vote_value, int) or vote_value not in {-1, 1}:
+        return False, _document_type_error("vote", "an integer equal to -1 or 1")
+    return True, ""
+
+
+def _validate_listening_history_document_shape(row):
+    if not isinstance(row, dict):
+        return False, "document is not an object"
+    if not row.get("_id"):
+        return False, "missing _id"
+    if not row.get("user_id"):
+        return False, "missing user_id"
+    if not row.get("song_id"):
+        return False, "missing song_id"
+    if "play_count" in row and row.get("play_count") is not None and not isinstance(row.get("play_count"), int):
+        return False, _document_type_error("play_count", "an integer")
+    return True, ""
+
+
+def _validate_song_report_document_shape(report):
+    if not isinstance(report, dict):
+        return False, "document is not an object"
+    if not report.get("_id"):
+        return False, "missing _id"
+    if report.get("reporter_id") is None:
+        return False, "missing reporter_id"
+    target_type = report.get("target_type")
+    if not isinstance(target_type, str) or target_type.strip().lower() not in {"song", "comment"}:
+        return False, _document_type_error("target_type", "a string equal to 'song' or 'comment'")
+    status = report.get("status")
+    if status is not None and (not isinstance(status, str) or status.strip().lower() not in {"open", "resolved", "dismissed"}):
+        return False, _document_type_error("status", "a string equal to open, resolved or dismissed")
+    return True, ""
+
+
+def _validate_admin_audit_document_shape(row):
+    if not isinstance(row, dict):
+        return False, "document is not an object"
+    if not row.get("_id"):
+        return False, "missing _id"
+    if not isinstance(row.get("action"), str) or not row.get("action", "").strip():
+        return False, _document_type_error("action", "a non-empty string")
+    if not isinstance(row.get("target_type"), str) or not row.get("target_type", "").strip():
+        return False, _document_type_error("target_type", "a non-empty string")
+    if "details" in row and row.get("details") is not None and not isinstance(row.get("details"), dict):
+        return False, _document_type_error("details", "an object")
+    return True, ""
+
+
+def _validate_creator_subscription_document_shape(row):
+    if not isinstance(row, dict):
+        return False, "document is not an object"
+    if not row.get("_id"):
+        return False, "missing _id"
+    if not row.get("creator_id"):
+        return False, "missing creator_id"
+    if not row.get("subscriber_id"):
+        return False, "missing subscriber_id"
+    if "notifications_enabled" in row and row.get("notifications_enabled") is not None and not isinstance(row.get("notifications_enabled"), bool):
+        return False, _document_type_error("notifications_enabled", "a boolean")
+    return True, ""
+
+
+def _validate_user_notification_document_shape(row):
+    if not isinstance(row, dict):
+        return False, "document is not an object"
+    if not row.get("_id"):
+        return False, "missing _id"
+    if not row.get("recipient_user_id"):
+        return False, "missing recipient_user_id"
+    if "notification_type" in row and row.get("notification_type") is not None and not isinstance(row.get("notification_type"), str):
+        return False, _document_type_error("notification_type", "a string")
+    if "content_type" in row and row.get("content_type") is not None and not isinstance(row.get("content_type"), str):
+        return False, _document_type_error("content_type", "a string")
+    if "content_title" in row and row.get("content_title") is not None and not isinstance(row.get("content_title"), str):
+        return False, _document_type_error("content_title", "a string")
+    if "is_read" in row and row.get("is_read") is not None and not isinstance(row.get("is_read"), bool):
+        return False, _document_type_error("is_read", "a boolean")
+    return True, ""
+
+
+def _validate_external_import_job_document_shape(row):
+    if not isinstance(row, dict):
+        return False, "document is not an object"
+    if not row.get("_id"):
+        return False, "missing _id"
+    if not row.get("user_id"):
+        return False, "missing user_id"
+    if "status" in row and row.get("status") is not None and not isinstance(row.get("status"), str):
+        return False, _document_type_error("status", "a string")
+    return True, ""
+
+
+def _validate_external_playlist_document_shape(row):
+    if not isinstance(row, dict):
+        return False, "document is not an object"
+    if not row.get("_id"):
+        return False, "missing _id"
+    if "name" in row and row.get("name") is not None and not isinstance(row.get("name"), str):
+        return False, _document_type_error("name", "a string")
+    return True, ""
+
+
+def _validate_external_integration_document_shape(row):
+    if not isinstance(row, dict):
+        return False, "document is not an object"
+    if not row.get("_id"):
+        return False, "missing _id"
+    if not row.get("user_id"):
+        return False, "missing user_id"
+    if "provider" in row and row.get("provider") is not None and not isinstance(row.get("provider"), str):
+        return False, _document_type_error("provider", "a string")
+    return True, ""
+
+
+def _validate_data_export_document_shape(row):
+    if not isinstance(row, dict):
+        return False, "document is not an object"
+    if not row.get("_id"):
+        return False, "missing _id"
+    if not row.get("user_id"):
+        return False, "missing user_id"
+    if "status" in row and row.get("status") is not None and not isinstance(row.get("status"), str):
+        return False, _document_type_error("status", "a string")
+    return True, ""
+
+
+def _validate_system_status_document_shape(row):
+    if not isinstance(row, dict):
+        return False, "document is not an object"
+    if not row.get("_id"):
+        return False, "missing _id"
+    if not isinstance(row.get("key"), str) or not row.get("key", "").strip():
+        return False, _document_type_error("key", "a non-empty string")
+    if "status" in row and row.get("status") is not None and not isinstance(row.get("status"), str):
+        return False, _document_type_error("status", "a string")
+    if "message" in row and row.get("message") is not None and not isinstance(row.get("message"), str):
+        return False, _document_type_error("message", "a string")
+    return True, ""
+
+
+def _validate_app_settings_document_shape(row):
+    if not isinstance(row, dict):
+        return False, "document is not an object"
+    if "_id" not in row:
+        return False, "missing _id"
+    return True, ""
+
+
+def _validate_dino_leaderboard_document_shape(row):
+    if not isinstance(row, dict):
+        return False, "document is not an object"
+    if not row.get("_id"):
+        return False, "missing _id"
+    if not isinstance(row.get("owner_key"), str) or not row.get("owner_key", "").strip():
+        return False, _document_type_error("owner_key", "a non-empty string")
+    if "best_score" in row and row.get("best_score") is not None and not isinstance(row.get("best_score"), int):
+        return False, _document_type_error("best_score", "an integer")
+    if "is_robot" in row and row.get("is_robot") is not None and not isinstance(row.get("is_robot"), bool):
+        return False, _document_type_error("is_robot", "a boolean")
+    return True, ""
+
+
+def validate_document_shape(collection_name: str, document):
+    collection_key = str(collection_name or "").strip()
+    if collection_key == "users":
+        return _validate_user_document_shape(document)
+    if collection_key == "songs":
+        return _validate_song_document_shape(document)
+    if collection_key == "playlists":
+        return _validate_playlist_document_shape(document)
+    if collection_key == "song_comments":
+        return _validate_comment_document_shape(document)
+    if collection_key == "song_votes":
+        return _validate_vote_document_shape(document, "song_id")
+    if collection_key == "comment_votes":
+        return _validate_vote_document_shape(document, "comment_id")
+    if collection_key == "listening_history":
+        return _validate_listening_history_document_shape(document)
+    if collection_key == "song_reports":
+        return _validate_song_report_document_shape(document)
+    if collection_key == "admin_audit":
+        return _validate_admin_audit_document_shape(document)
+    if collection_key == "creator_subscriptions":
+        return _validate_creator_subscription_document_shape(document)
+    if collection_key == "user_notifications":
+        return _validate_user_notification_document_shape(document)
+    if collection_key == "external_import_jobs":
+        return _validate_external_import_job_document_shape(document)
+    if collection_key == "external_playlists":
+        return _validate_external_playlist_document_shape(document)
+    if collection_key == "external_integrations":
+        return _validate_external_integration_document_shape(document)
+    if collection_key == "data_exports":
+        return _validate_data_export_document_shape(document)
+    if collection_key == "system_status":
+        return _validate_system_status_document_shape(document)
+    if collection_key == "app_settings":
+        return _validate_app_settings_document_shape(document)
+    if collection_key == "dino_leaderboard":
+        return _validate_dino_leaderboard_document_shape(document)
+    if not isinstance(document, dict):
+        return False, "document is not an object"
+    if not document.get("_id"):
+        return False, "missing _id"
+    return True, ""
+
+
+def _persist_repaired_document(collection_name: str, document_id, update_fields: dict):
+    if not document_id or not isinstance(update_fields, dict) or not update_fields:
+        return False
+    collection = _collection_for_invalid_document_watchdog(collection_name)
+    if collection is None:
+        return False
+    try:
+        safe_mongo_update_one(
+            collection,
+            {"_id": document_id},
+            {"$set": update_fields},
+        )
+        return True
+    except Exception:
+        current_app.logger.warning(
+            "Unable to persist repaired document fields for %s (%s)",
+            collection_name,
+            document_id,
+            exc_info=True,
+        )
+        return False
+
+
+def _recover_user_document(user):
+    if not isinstance(user, dict) or not user.get("_id"):
+        return None, {}
+    repaired = dict(user)
+    updates = {}
+    for field_name in ("trusted_devices", "active_sessions", "dismissed_admin_alerts", "pending_device_approvals"):
+        if field_name in repaired and repaired.get(field_name) is not None and not isinstance(repaired.get(field_name), list):
+            repaired[field_name] = []
+            updates[field_name] = []
+    return repaired, updates
+
+
+def _recover_song_document(song):
+    if not isinstance(song, dict) or not song.get("_id"):
+        return None, {}
+    repaired = dict(song)
+    updates = {}
+
+    if not isinstance(repaired.get("title"), str) or not (repaired.get("title") or "").strip():
+        repaired["title"] = "Untitled"
+        updates["title"] = "Untitled"
+    else:
+        repaired["title"] = repaired.get("title", "").strip()
+        if repaired["title"] != song.get("title"):
+            updates["title"] = repaired["title"]
+
+    if not isinstance(repaired.get("artist"), str) or not (repaired.get("artist") or "").strip():
+        repaired["artist"] = "Unknown artist"
+        updates["artist"] = "Unknown artist"
+    else:
+        repaired["artist"] = repaired.get("artist", "").strip()
+        if repaired["artist"] != song.get("artist"):
+            updates["artist"] = repaired["artist"]
+
+    if not isinstance(repaired.get("genre"), str):
+        repaired["genre"] = ""
+        updates["genre"] = ""
+    if not isinstance(repaired.get("source_type"), str):
+        repaired["source_type"] = ""
+        updates["source_type"] = ""
+    if not isinstance(repaired.get("source_url"), str):
+        repaired["source_url"] = ""
+        updates["source_url"] = ""
+    if not isinstance(repaired.get("external_provider"), str):
+        repaired["external_provider"] = ""
+        updates["external_provider"] = ""
+    if not isinstance(repaired.get("availability_reason"), str):
+        repaired["availability_reason"] = ""
+        updates["availability_reason"] = ""
+    if repaired.get("shared_with") is not None and not isinstance(repaired.get("shared_with"), list):
+        repaired["shared_with"] = []
+        updates["shared_with"] = []
+
+    visibility = repaired.get("visibility")
+    if not isinstance(visibility, str) or visibility.strip().lower() not in VISIBILITY_VALUES:
+        repaired["visibility"] = "public"
+        updates["visibility"] = "public"
+    else:
+        normalized_visibility = visibility.strip().lower()
+        if normalized_visibility != visibility:
+            repaired["visibility"] = normalized_visibility
+            updates["visibility"] = normalized_visibility
+
+    return repaired, updates
+
+
+def _recover_playlist_document(playlist):
+    if not isinstance(playlist, dict) or not playlist.get("_id"):
+        return None, {}
+    repaired = dict(playlist)
+    updates = {}
+
+    if not isinstance(repaired.get("name"), str) or not (repaired.get("name") or "").strip():
+        repaired["name"] = "Playlist"
+        updates["name"] = "Playlist"
+    else:
+        trimmed_name = repaired.get("name", "").strip()
+        if trimmed_name != repaired.get("name"):
+            repaired["name"] = trimmed_name
+            updates["name"] = trimmed_name
+
+    if repaired.get("song_ids") is not None and not isinstance(repaired.get("song_ids"), list):
+        repaired["song_ids"] = []
+        updates["song_ids"] = []
+    if repaired.get("collaborator_ids") is not None and not isinstance(repaired.get("collaborator_ids"), list):
+        repaired["collaborator_ids"] = []
+        updates["collaborator_ids"] = []
+
+    visibility = repaired.get("visibility")
+    allowed_values = {"public", "private", "unlisted"}
+    if not isinstance(visibility, str) or visibility.strip().lower() not in allowed_values:
+        repaired["visibility"] = "private"
+        updates["visibility"] = "private"
+    else:
+        normalized_visibility = visibility.strip().lower()
+        if normalized_visibility != visibility:
+            repaired["visibility"] = normalized_visibility
+            updates["visibility"] = normalized_visibility
+
+    return repaired, updates
+
+
+def _recover_comment_document(comment):
+    if not isinstance(comment, dict) or not comment.get("_id"):
+        return None, {}
+    repaired = dict(comment)
+    updates = {}
+    content = repaired.get("content")
+    if not isinstance(content, str):
+        if isinstance(content, (int, float, bool)):
+            repaired["content"] = str(content)
+        else:
+            repaired["content"] = "[message unavailable]"
+        updates["content"] = repaired["content"]
+    return repaired, updates
+
+
+def _recover_vote_document(vote, target_key: str):
+    if not isinstance(vote, dict) or not vote.get("_id") or not vote.get(target_key) or not vote.get("user_id"):
+        return None, {}
+    repaired = dict(vote)
+    updates = {}
+    raw_vote = repaired.get("vote")
+    if isinstance(raw_vote, bool):
+        repaired["vote"] = 1 if raw_vote else -1
+        updates["vote"] = repaired["vote"]
+    elif isinstance(raw_vote, (int, float)):
+        repaired["vote"] = 1 if float(raw_vote) >= 0 else -1
+        updates["vote"] = repaired["vote"]
+    else:
+        return None, {}
+    return repaired, updates
+
+
+def _recover_listening_history_document(row):
+    if not isinstance(row, dict) or not row.get("_id") or not row.get("user_id") or not row.get("song_id"):
+        return None, {}
+    repaired = dict(row)
+    updates = {}
+    if not isinstance(repaired.get("play_count"), int):
+        try:
+            repaired["play_count"] = max(0, int(repaired.get("play_count", 0) or 0))
+        except Exception:
+            repaired["play_count"] = 0
+        updates["play_count"] = repaired["play_count"]
+    for field_name in ("last_position", "last_duration"):
+        value = repaired.get(field_name, 0)
+        if not isinstance(value, (int, float)):
+            try:
+                repaired[field_name] = max(0.0, float(value or 0))
+            except Exception:
+                repaired[field_name] = 0.0
+            updates[field_name] = repaired[field_name]
+    return repaired, updates
+
+
+def _recover_song_report_document(report):
+    if not isinstance(report, dict) or not report.get("_id") or report.get("reporter_id") is None:
+        return None, {}
+    repaired = dict(report)
+    updates = {}
+    target_type = repaired.get("target_type")
+    if not isinstance(target_type, str) or target_type.strip().lower() not in {"song", "comment"}:
+        if repaired.get("target_comment_id"):
+            repaired["target_type"] = "comment"
+        elif repaired.get("target_song_id") or repaired.get("song_id"):
+            repaired["target_type"] = "song"
+        else:
+            return None, {}
+        updates["target_type"] = repaired["target_type"]
+    status = repaired.get("status")
+    if not isinstance(status, str) or status.strip().lower() not in {"open", "resolved", "dismissed"}:
+        repaired["status"] = "open"
+        updates["status"] = "open"
+    if "reason" in repaired and repaired.get("reason") is not None and not isinstance(repaired.get("reason"), str):
+        repaired["reason"] = str(repaired.get("reason") or "")
+        updates["reason"] = repaired["reason"]
+    return repaired, updates
+
+
+def _recover_admin_audit_document(row):
+    if not isinstance(row, dict) or not row.get("_id"):
+        return None, {}
+    repaired = dict(row)
+    updates = {}
+    if not isinstance(repaired.get("action"), str) or not repaired.get("action", "").strip():
+        repaired["action"] = "unknown_action"
+        updates["action"] = "unknown_action"
+    if not isinstance(repaired.get("target_type"), str) or not repaired.get("target_type", "").strip():
+        repaired["target_type"] = "unknown_target"
+        updates["target_type"] = "unknown_target"
+    if "details" in repaired and repaired.get("details") is not None and not isinstance(repaired.get("details"), dict):
+        repaired["details"] = {"raw": str(repaired.get("details"))}
+        updates["details"] = repaired["details"]
+    return repaired, updates
+
+
+def _recover_creator_subscription_document(row):
+    if not isinstance(row, dict) or not row.get("_id") or not row.get("creator_id") or not row.get("subscriber_id"):
+        return None, {}
+    repaired = dict(row)
+    updates = {}
+    if not isinstance(repaired.get("notifications_enabled"), bool):
+        repaired["notifications_enabled"] = bool(repaired.get("notifications_enabled"))
+        updates["notifications_enabled"] = repaired["notifications_enabled"]
+    return repaired, updates
+
+
+def _recover_user_notification_document(row):
+    if not isinstance(row, dict) or not row.get("_id") or not row.get("recipient_user_id"):
+        return None, {}
+    repaired = dict(row)
+    updates = {}
+    if not isinstance(repaired.get("notification_type"), str):
+        repaired["notification_type"] = "generic"
+        updates["notification_type"] = "generic"
+    if not isinstance(repaired.get("content_type"), str):
+        repaired["content_type"] = ""
+        updates["content_type"] = ""
+    if not isinstance(repaired.get("content_title"), str):
+        repaired["content_title"] = tr("defaults.untitled")
+        updates["content_title"] = repaired["content_title"]
+    if not isinstance(repaired.get("creator_username_snapshot"), str):
+        repaired["creator_username_snapshot"] = ""
+        updates["creator_username_snapshot"] = ""
+    if not isinstance(repaired.get("is_read"), bool):
+        repaired["is_read"] = bool(repaired.get("is_read"))
+        updates["is_read"] = repaired["is_read"]
+    return repaired, updates
+
+
+def _recover_external_import_job_document(row):
+    if not isinstance(row, dict) or not row.get("_id") or not row.get("user_id"):
+        return None, {}
+    repaired = dict(row)
+    updates = {}
+    if not isinstance(repaired.get("status"), str):
+        repaired["status"] = "queued"
+        updates["status"] = "queued"
+    if "error_message" in repaired and repaired.get("error_message") is not None and not isinstance(repaired.get("error_message"), str):
+        repaired["error_message"] = str(repaired.get("error_message") or "")
+        updates["error_message"] = repaired["error_message"]
+    return repaired, updates
+
+
+def _recover_external_playlist_document(row):
+    if not isinstance(row, dict) or not row.get("_id"):
+        return None, {}
+    repaired = dict(row)
+    updates = {}
+    if not isinstance(repaired.get("name"), str):
+        repaired["name"] = tr("defaults.unnamed")
+        updates["name"] = repaired["name"]
+    return repaired, updates
+
+
+def _recover_external_integration_document(row):
+    if not isinstance(row, dict) or not row.get("_id") or not row.get("user_id"):
+        return None, {}
+    repaired = dict(row)
+    updates = {}
+    if not isinstance(repaired.get("provider"), str):
+        repaired["provider"] = ""
+        updates["provider"] = ""
+    return repaired, updates
+
+
+def _recover_data_export_document(row):
+    if not isinstance(row, dict) or not row.get("_id") or not row.get("user_id"):
+        return None, {}
+    repaired = dict(row)
+    updates = {}
+    if not isinstance(repaired.get("status"), str):
+        repaired["status"] = "unknown"
+        updates["status"] = "unknown"
+    return repaired, updates
+
+
+def _recover_system_status_document(row):
+    if not isinstance(row, dict) or "_id" not in row:
+        return None, {}
+    repaired = dict(row)
+    updates = {}
+    if not isinstance(repaired.get("key"), str) or not repaired.get("key", "").strip():
+        return None, {}
+    if "status" in repaired and repaired.get("status") is not None and not isinstance(repaired.get("status"), str):
+        repaired["status"] = "unknown"
+        updates["status"] = "unknown"
+    if "message" in repaired and repaired.get("message") is not None and not isinstance(repaired.get("message"), str):
+        repaired["message"] = str(repaired.get("message") or "")
+        updates["message"] = repaired["message"]
+    return repaired, updates
+
+
+def _recover_dino_leaderboard_document(row):
+    if not isinstance(row, dict) or not row.get("_id") or not isinstance(row.get("owner_key"), str) or not row.get("owner_key", "").strip():
+        return None, {}
+    repaired = dict(row)
+    updates = {}
+    if not isinstance(repaired.get("best_score"), int):
+        try:
+            repaired["best_score"] = max(0, int(repaired.get("best_score", 0) or 0))
+        except Exception:
+            repaired["best_score"] = 0
+        updates["best_score"] = repaired["best_score"]
+    if not isinstance(repaired.get("is_robot"), bool):
+        repaired["is_robot"] = bool(repaired.get("is_robot"))
+        updates["is_robot"] = repaired["is_robot"]
+    if not isinstance(repaired.get("actor_type"), str):
+        repaired["actor_type"] = "guest"
+        updates["actor_type"] = "guest"
+    if not isinstance(repaired.get("display_name"), str):
+        repaired["display_name"] = ""
+        updates["display_name"] = ""
+    if not isinstance(repaired.get("guest_code"), str):
+        repaired["guest_code"] = ""
+        updates["guest_code"] = ""
+    return repaired, updates
+
+
+def attempt_recover_invalid_document(collection_name: str, document, context: str = ""):
+    collection_key = str(collection_name or "").strip()
+    repaired = None
+    updates = {}
+    if collection_key == "users":
+        repaired, updates = _recover_user_document(document)
+    elif collection_key == "songs":
+        repaired, updates = _recover_song_document(document)
+    elif collection_key == "playlists":
+        repaired, updates = _recover_playlist_document(document)
+    elif collection_key == "song_comments":
+        repaired, updates = _recover_comment_document(document)
+    elif collection_key == "song_votes":
+        repaired, updates = _recover_vote_document(document, "song_id")
+    elif collection_key == "comment_votes":
+        repaired, updates = _recover_vote_document(document, "comment_id")
+    elif collection_key == "listening_history":
+        repaired, updates = _recover_listening_history_document(document)
+    elif collection_key == "song_reports":
+        repaired, updates = _recover_song_report_document(document)
+    elif collection_key == "admin_audit":
+        repaired, updates = _recover_admin_audit_document(document)
+    elif collection_key == "creator_subscriptions":
+        repaired, updates = _recover_creator_subscription_document(document)
+    elif collection_key == "user_notifications":
+        repaired, updates = _recover_user_notification_document(document)
+    elif collection_key == "external_import_jobs":
+        repaired, updates = _recover_external_import_job_document(document)
+    elif collection_key == "external_playlists":
+        repaired, updates = _recover_external_playlist_document(document)
+    elif collection_key == "external_integrations":
+        repaired, updates = _recover_external_integration_document(document)
+    elif collection_key == "data_exports":
+        repaired, updates = _recover_data_export_document(document)
+    elif collection_key == "system_status":
+        repaired, updates = _recover_system_status_document(document)
+    elif collection_key == "dino_leaderboard":
+        repaired, updates = _recover_dino_leaderboard_document(document)
+
+    if not repaired:
+        return None
+
+    is_valid, _reason = validate_document_shape(collection_name, repaired)
+    if not is_valid:
+        return None
+
+    if updates:
+        _persist_repaired_document(collection_name, repaired.get("_id"), updates)
+        current_app.logger.warning(
+            "Recovered invalid document in %s (%s) during %s with updates: %s",
+            collection_name,
+            repaired.get("_id"),
+            context or "server operation",
+            ", ".join(sorted(updates.keys())),
+        )
+    return repaired
+
+
+def report_invalid_document(collection_name: str, document, reason: str, context: str = ""):
+    collection_name = str(collection_name or "unknown").strip() or "unknown"
+    reason_text = str(reason or "invalid_document").strip() or "invalid_document"
+    context_text = str(context or "").strip()
+    document_id = ""
+    if isinstance(document, dict) and document.get("_id"):
+        document_id = str(document.get("_id"))
+
+    alert_message = tr(
+        "admin.invalid_document_alert_message",
+        collection=collection_name,
+        document_id=document_id or "?",
+        reason=reason_text,
+        context=context_text or tr("admin.invalid_document_context_default"),
+    )
+
+    collection = _collection_for_invalid_document_watchdog(collection_name)
+    deleted = False
+    if collection is not None and document_id:
+        try:
+            result = collection.delete_one({"_id": document.get("_id")})
+            deleted = bool(getattr(result, "deleted_count", 0))
+        except Exception:
+            current_app.logger.warning(
+                "Failed to delete invalid document from %s (%s)",
+                collection_name,
+                document_id,
+                exc_info=True,
+            )
+
+    now = datetime.utcnow()
+    if extensions.system_status_col is not None:
+        try:
+            extensions.system_status_col.update_one(
+                {"key": "invalid_document_watchdog"},
+                {
+                    "$set": {
+                        "key": "invalid_document_watchdog",
+                        "status": "alert",
+                        "message": alert_message,
+                        "updated_at": now,
+                        "collection": collection_name,
+                        "document_id": document_id,
+                        "reason": reason_text,
+                        "context": context_text,
+                        "deleted": deleted,
+                    }
+                },
+                upsert=True,
+            )
+        except Exception:
+            current_app.logger.warning("Unable to persist invalid document watchdog status", exc_info=True)
+
+    if getattr(extensions, "admin_audit_col", None) is not None:
+        try:
+            extensions.admin_audit_col.insert_one(
+                {
+                    "admin_user_id": None,
+                    "action": "auto_delete_invalid_document",
+                    "target_type": collection_name,
+                    "target_id": document_id or None,
+                    "details": {
+                        "reason": reason_text,
+                        "context": context_text,
+                        "deleted": deleted,
+                    },
+                    "created_at": now,
+                }
+            )
+        except Exception:
+            current_app.logger.warning("Unable to write audit log for invalid document watchdog", exc_info=True)
+
+    try:
+        notify_admins(
+            "email.admin_alert_subject",
+            "email.admin_alert_body",
+            message=alert_message,
+        )
+    except Exception:
+        current_app.logger.warning("Unable to notify admins about invalid document watchdog event", exc_info=True)
+
+    current_app.logger.warning(
+        "Invalid document watchdog triggered for %s (document=%s, deleted=%s, context=%s): %s",
+        collection_name,
+        document_id or "?",
+        deleted,
+        context_text or "-",
+        reason_text,
+    )
+    return InvalidStoredDocumentError(collection_name, reason_text, document_id=document_id or None)
+
+
+def validate_or_purge_document(collection_name: str, document, context: str = "", fatal: bool = False):
+    if document is None:
+        return None
+    is_valid, reason = validate_document_shape(collection_name, document)
+    if is_valid:
+        return document
+    recovered = attempt_recover_invalid_document(collection_name, document, context=context)
+    if recovered is not None:
+        return recovered
+    error = report_invalid_document(collection_name, document, reason, context=context)
+    if fatal:
+        raise error
+    return None
 
 
 def get_session_user_oid():
@@ -542,6 +1372,7 @@ def get_app_settings():
         return settings
 
     doc = settings_col.find_one({"_id": APP_SETTINGS_DOC_ID}) or {}
+    doc = validate_or_purge_document("app_settings", doc, context="auth.get_app_settings") or {}
     for key, default_value in FEATURE_DEFAULTS_FULL.items():
         if key not in doc:
             continue
@@ -980,6 +1811,7 @@ def set_password_check_status(ok: bool, message: str | None = None):
         )
     else:
         doc = extensions.system_status_col.find_one({"key": "password_leak_service"}) or {}
+        doc = validate_or_purge_document("system_status", doc, context="auth.set_password_check_status") or {}
         last_notified_at = doc.get("last_notified_at")
         should_notify = not last_notified_at or (now - last_notified_at) > timedelta(minutes=30)
 
@@ -1066,7 +1898,8 @@ def count_creator_subscribers(creator_oid):
 def get_creator_subscription(creator_oid, subscriber_oid):
     if not creator_oid or not subscriber_oid or extensions.creator_subscriptions_col is None:
         return None
-    return extensions.creator_subscriptions_col.find_one({"creator_id": creator_oid, "subscriber_id": subscriber_oid})
+    row = extensions.creator_subscriptions_col.find_one({"creator_id": creator_oid, "subscriber_id": subscriber_oid})
+    return validate_or_purge_document("creator_subscriptions", row, context="auth.get_creator_subscription")
 
 
 def list_creator_subscribers(creator_oid):
@@ -1079,13 +1912,25 @@ def list_creator_subscribers(creator_oid):
             {"subscriber_id": 1, "notifications_enabled": 1, "created_at": 1},
         ).sort("created_at", -1)
     )
+    rows = [
+        row
+        for row in (
+            validate_or_purge_document("creator_subscriptions", item, context="auth.list_creator_subscribers.subscription")
+            for item in rows
+        )
+        if row
+    ]
     user_ids = [row.get("subscriber_id") for row in rows if row.get("subscriber_id")]
     if not user_ids:
         return []
 
     user_map = {
         row.get("_id"): row
-        for row in extensions.users_col.find({"_id": {"$in": user_ids}}, {"username": 1})
+        for row in (
+            validate_or_purge_document("users", item, context="auth.list_creator_subscribers.user")
+            for item in extensions.users_col.find({"_id": {"$in": user_ids}}, {"username": 1})
+        )
+        if row
     }
     items = []
     for row in rows:
@@ -1156,6 +2001,7 @@ def create_creator_publication_notifications(creator_oid, content_type: str, con
         return 0
 
     creator = extensions.users_col.find_one({"_id": creator_oid}, {"username": 1})
+    creator = validate_or_purge_document("users", creator, context="auth.create_creator_publication_notifications.creator")
     if not creator:
         return 0
 
@@ -1166,6 +2012,14 @@ def create_creator_publication_notifications(creator_oid, content_type: str, con
             {"subscriber_id": 1},
         )
     )
+    subscribers = [
+        row
+        for row in (
+            validate_or_purge_document("creator_subscriptions", item, context="auth.create_creator_publication_notifications.subscription")
+            for item in subscribers
+        )
+        if row
+    ]
     docs = []
     now = datetime.utcnow()
     for row in subscribers:
@@ -1226,13 +2080,25 @@ def get_user_notifications(user_oid, limit=20):
     rows = list(
         extensions.user_notifications_col.find({"recipient_user_id": user_oid}).sort("created_at", -1).limit(max(1, int(limit or 20)))
     )
+    rows = [
+        row
+        for row in (
+            validate_or_purge_document("user_notifications", item, context="auth.get_user_notifications.notification")
+            for item in rows
+        )
+        if row
+    ]
     if not rows:
         return []
 
     creator_ids = [row.get("creator_id") for row in rows if row.get("creator_id")]
     creator_map = {
         row.get("_id"): row
-        for row in extensions.users_col.find({"_id": {"$in": creator_ids}}, {"username": 1})
+        for row in (
+            validate_or_purge_document("users", item, context="auth.get_user_notifications.creator")
+            for item in extensions.users_col.find({"_id": {"$in": creator_ids}}, {"username": 1})
+        )
+        if row
     } if creator_ids else {}
 
     items = []
@@ -1274,6 +2140,7 @@ def current_user():
     if not user_oid:
         return None
     user = extensions.users_col.find_one({"_id": user_oid})
+    user = validate_or_purge_document("users", user, context="current_user")
     if not user:
         session.clear()
         return None
@@ -1304,6 +2171,7 @@ def login_required(fn):
             return redirect(url_for("accounts.login"))
 
         user = extensions.users_col.find_one({"_id": user_oid})
+        user = validate_or_purge_document("users", user, context=f"login_required:{request.endpoint or ''}")
         if not user:
             session.clear()
             flash(tr("flash.auth.required"), "warning")
@@ -1331,6 +2199,7 @@ def admin_required(fn):
             flash(tr("flash.auth.required"), "warning")
             return redirect(url_for("accounts.login"))
         user = extensions.users_col.find_one({"_id": user_oid})
+        user = validate_or_purge_document("users", user, context=f"admin_required:{request.endpoint or ''}")
         if not user or not user.get("is_admin", False):
             flash(tr("flash.admin.forbidden"), "danger")
             return redirect(url_for("main.index"))
@@ -1491,6 +2360,9 @@ def user_in_shared(song, user_oid):
 
 
 def can_access_song(song, user_oid):
+    song = validate_or_purge_document("songs", song, context="can_access_song")
+    if not song:
+        return False
     if is_youtube_song(song) and not is_youtube_integration_enabled(True):
         return False
     visibility = normalize_visibility(song)
@@ -1522,6 +2394,7 @@ def visible_song_filter(user_oid):
 
 
 def serialize_song(song, user_oid):
+    song = validate_or_purge_document("songs", song, context="serialize_song", fatal=True)
     source_type = (song.get("source_type") or "").strip().lower()
     source_url = (song.get("source_url") or song.get("url") or "").strip()
     external_provider = (song.get("external_provider") or "").strip().lower()
@@ -1575,15 +2448,19 @@ def user_choice_list(exclude_user_oid=None):
     query = {}
     if exclude_user_oid:
         query = {"_id": {"$ne": exclude_user_oid}}
-    users = list(extensions.users_col.find(query).sort("username", 1))
-    return [
-        {
-            "id": str(user["_id"]),
-            "username": user.get("username", "user"),
-            "email": user.get("email", ""),
-        }
-        for user in users
-    ]
+    items = []
+    for user in extensions.users_col.find(query).sort("username", 1):
+        valid_user = validate_or_purge_document("users", user, context="user_choice_list")
+        if not valid_user:
+            continue
+        items.append(
+            {
+                "id": str(valid_user["_id"]),
+                "username": valid_user.get("username", "user"),
+                "email": valid_user.get("email", ""),
+            }
+        )
+    return items
 
 
 def save_uploaded_file(file_storage):

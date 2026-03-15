@@ -26,6 +26,12 @@
     {% endwith %}
     {% block content %}{% endblock %}
   </main>
+  <footer class="site-footer site-footer-admin">
+    <div class="site-footer__inner">
+      <span class="site-footer__brand">{{ app_name }}</span>
+      <a href="{{ url_for('main.license_page') }}" class="site-footer__link">{{ t('nav.license') }}</a>
+    </div>
+  </footer>
   <script>
     window.CSRF_TOKEN = {{ csrf_token|tojson }};
     window.ADMIN_I18N = {

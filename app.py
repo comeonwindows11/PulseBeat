@@ -165,14 +165,6 @@ def _dedupe_listening_history():
                 [("updated_at", -1), ("created_at", -1), ("_id", -1)]
             )
         )
-        docs = [
-            item
-            for item in (
-                validate_or_purge_document("listening_history", doc, context="app._dedupe_listening_history")
-                for doc in docs
-            )
-            if item
-        ]
         if not docs:
             continue
         keep = docs[0]

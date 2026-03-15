@@ -1396,19 +1396,30 @@ L'objectif est double :
 
 PulseBeat **ne supprime pas immédiatement** un document invalide.
 
-La stratégie est volontairement progressive :
+La stratégie est volontairement progressive et **non destructive par défaut** :
 
 1. **validation structurelle minimale**
 2. **tentative de récupération locale et persistée**
-3. **contournement propre si l'élément peut être ignoré**
-4. **suppression seulement en dernier recours**
+3. **si la lecture n'est pas fatale, conservation du document tant que l'opération continue**
+4. **suppression seulement en dernier recours sur un chemin fatal**
 5. **erreur HTTP `422` si l'opération ne peut pas continuer proprement**
 
 Autrement dit :
 
 - si la donnée peut être réparée sans ambiguïté, PulseBeat la répare
-- si la donnée peut être ignorée sans casser la page, PulseBeat l'ignore
-- si la donnée reste inutilisable et dangereuse pour la logique, PulseBeat la supprime et bloque l'opération concernée
+- si la donnée peut être ignorée sans casser la page, PulseBeat l'ignore ou la laisse passer telle quelle
+- si la donnée reste inutilisable et casse une opération centrale, PulseBeat la supprime alors seulement et bloque l'opération concernée
+
+### Plus de purge préventive au démarrage
+
+Le watchdog ne fait plus de nettoyage destructif au démarrage de l'application.
+
+En particulier :
+
+- les routines de bootstrap, d'indexation ou de déduplication ne déclenchent plus de suppression automatique simplement parce qu'un document projeté ou partiel ne contient pas tous les champs métier habituels
+- les documents MongoDB partiels récupérés via projection ne sont plus traités comme "corrompus" uniquement parce qu'un champ non projeté n'est pas présent dans l'objet Python
+
+Cela évite les faux positifs du type `missing user_id` sur des lectures partielles pourtant normales.
 
 ### Ce que PulseBeat considère comme récupérable
 
@@ -1491,20 +1502,21 @@ Exemples :
 Dans ces cas :
 
 - PulseBeat tente d'abord la récupération
-- si la récupération échoue, l'élément est retiré du rendu
+- si la récupération échoue, l'élément est retiré du rendu ou laissé intact tant qu'il ne casse pas la suite
 - le reste de la page continue normalement
 
 ### Suppression en dernier recours
 
-Si le document est toujours invalide après tentative de récupération, PulseBeat considère qu'il n'est plus sûr à conserver tel quel.
+Si le document est toujours invalide après tentative de récupération, PulseBeat ne le supprime plus immédiatement.
 
-La suppression automatique devient alors le **dernier recours**.
+La suppression automatique devient le **dernier recours**, uniquement quand la donnée casse réellement une opération centrale.
 
 Elle est utilisée surtout quand :
 
 - le document n'a plus de structure de base fiable
 - le document principal d'une opération reste inutilisable après normalisation
 - laisser le document en place risquerait de reproduire la même panne à chaque requête
+- la requête a atteint un chemin fatal où PulseBeat ne peut plus continuer proprement avec ce document
 
 Quand une suppression automatique a lieu :
 
@@ -1516,7 +1528,7 @@ Quand une suppression automatique a lieu :
 
 ### Quand PulseBeat renvoie une erreur 422
 
-Si le document corrompu est **central** à l'opération en cours et qu'il n'a pas pu être réparé proprement, PulseBeat refuse de continuer et renvoie une erreur HTTP `422`.
+Si le document corrompu est **central** à l'opération en cours, qu'il n'a pas pu être réparé proprement et qu'il casse la logique attendue, PulseBeat refuse de continuer et renvoie une erreur HTTP `422`.
 
 Concrètement, cela couvre les cas où :
 
@@ -1600,7 +1612,7 @@ La couverture a aussi été élargie aux documents qui servent de support à l'a
 - le document `app_settings` chargé globalement pour les feature flags
 - les playlists du header chargées sur toutes les pages pour un utilisateur connecté
 - certaines lectures de sécurité côté admin/root admin
-- les lots d'historique d'écoute parcourus pendant les routines internes de déduplication
+- les lots d'historique d'écoute parcourus pendant les routines internes de déduplication, sans suppression préventive au bootstrap
 
 L'intérêt de cette extension est d'éviter qu'un document corrompu dans une collection annexe ou technique ne casse une page entière simplement parce qu'il est consulté partout ou très souvent.
 

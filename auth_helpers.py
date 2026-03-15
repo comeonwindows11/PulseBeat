@@ -218,12 +218,12 @@ def _validate_vote_document_shape(vote, target_key: str):
         return False, "document is not an object"
     if not vote.get("_id"):
         return False, "missing _id"
-    if not vote.get(target_key):
+    if target_key in vote and not vote.get(target_key):
         return False, f"missing {target_key}"
-    if not vote.get("user_id"):
+    if "user_id" in vote and not vote.get("user_id"):
         return False, "missing user_id"
     vote_value = vote.get("vote")
-    if not isinstance(vote_value, int) or vote_value not in {-1, 1}:
+    if "vote" in vote and (not isinstance(vote_value, int) or vote_value not in {-1, 1}):
         return False, _document_type_error("vote", "an integer equal to -1 or 1")
     return True, ""
 
@@ -233,9 +233,9 @@ def _validate_listening_history_document_shape(row):
         return False, "document is not an object"
     if not row.get("_id"):
         return False, "missing _id"
-    if not row.get("user_id"):
+    if "user_id" in row and not row.get("user_id"):
         return False, "missing user_id"
-    if not row.get("song_id"):
+    if "song_id" in row and not row.get("song_id"):
         return False, "missing song_id"
     if "play_count" in row and row.get("play_count") is not None and not isinstance(row.get("play_count"), int):
         return False, _document_type_error("play_count", "an integer")
@@ -247,10 +247,10 @@ def _validate_song_report_document_shape(report):
         return False, "document is not an object"
     if not report.get("_id"):
         return False, "missing _id"
-    if report.get("reporter_id") is None:
+    if "reporter_id" in report and report.get("reporter_id") is None:
         return False, "missing reporter_id"
     target_type = report.get("target_type")
-    if not isinstance(target_type, str) or target_type.strip().lower() not in {"song", "comment"}:
+    if "target_type" in report and (not isinstance(target_type, str) or target_type.strip().lower() not in {"song", "comment"}):
         return False, _document_type_error("target_type", "a string equal to 'song' or 'comment'")
     status = report.get("status")
     if status is not None and (not isinstance(status, str) or status.strip().lower() not in {"open", "resolved", "dismissed"}):
@@ -277,9 +277,9 @@ def _validate_creator_subscription_document_shape(row):
         return False, "document is not an object"
     if not row.get("_id"):
         return False, "missing _id"
-    if not row.get("creator_id"):
+    if "creator_id" in row and not row.get("creator_id"):
         return False, "missing creator_id"
-    if not row.get("subscriber_id"):
+    if "subscriber_id" in row and not row.get("subscriber_id"):
         return False, "missing subscriber_id"
     if "notifications_enabled" in row and row.get("notifications_enabled") is not None and not isinstance(row.get("notifications_enabled"), bool):
         return False, _document_type_error("notifications_enabled", "a boolean")
@@ -291,7 +291,7 @@ def _validate_user_notification_document_shape(row):
         return False, "document is not an object"
     if not row.get("_id"):
         return False, "missing _id"
-    if not row.get("recipient_user_id"):
+    if "recipient_user_id" in row and not row.get("recipient_user_id"):
         return False, "missing recipient_user_id"
     if "notification_type" in row and row.get("notification_type") is not None and not isinstance(row.get("notification_type"), str):
         return False, _document_type_error("notification_type", "a string")
@@ -309,7 +309,7 @@ def _validate_external_import_job_document_shape(row):
         return False, "document is not an object"
     if not row.get("_id"):
         return False, "missing _id"
-    if not row.get("user_id"):
+    if "user_id" in row and not row.get("user_id"):
         return False, "missing user_id"
     if "status" in row and row.get("status") is not None and not isinstance(row.get("status"), str):
         return False, _document_type_error("status", "a string")
@@ -331,7 +331,7 @@ def _validate_external_integration_document_shape(row):
         return False, "document is not an object"
     if not row.get("_id"):
         return False, "missing _id"
-    if not row.get("user_id"):
+    if "user_id" in row and not row.get("user_id"):
         return False, "missing user_id"
     if "provider" in row and row.get("provider") is not None and not isinstance(row.get("provider"), str):
         return False, _document_type_error("provider", "a string")
@@ -343,7 +343,7 @@ def _validate_data_export_document_shape(row):
         return False, "document is not an object"
     if not row.get("_id"):
         return False, "missing _id"
-    if not row.get("user_id"):
+    if "user_id" in row and not row.get("user_id"):
         return False, "missing user_id"
     if "status" in row and row.get("status") is not None and not isinstance(row.get("status"), str):
         return False, _document_type_error("status", "a string")
@@ -377,7 +377,7 @@ def _validate_dino_leaderboard_document_shape(row):
         return False, "document is not an object"
     if not row.get("_id"):
         return False, "missing _id"
-    if not isinstance(row.get("owner_key"), str) or not row.get("owner_key", "").strip():
+    if "owner_key" in row and (not isinstance(row.get("owner_key"), str) or not row.get("owner_key", "").strip()):
         return False, _document_type_error("owner_key", "a non-empty string")
     if "best_score" in row and row.get("best_score") is not None and not isinstance(row.get("best_score"), int):
         return False, _document_type_error("best_score", "an integer")
@@ -572,11 +572,13 @@ def _recover_comment_document(comment):
 
 
 def _recover_vote_document(vote, target_key: str):
-    if not isinstance(vote, dict) or not vote.get("_id") or not vote.get(target_key) or not vote.get("user_id"):
+    if not isinstance(vote, dict) or not vote.get("_id"):
         return None, {}
     repaired = dict(vote)
     updates = {}
     raw_vote = repaired.get("vote")
+    if "vote" not in repaired:
+        return repaired, updates
     if isinstance(raw_vote, bool):
         repaired["vote"] = 1 if raw_vote else -1
         updates["vote"] = repaired["vote"]
@@ -589,11 +591,11 @@ def _recover_vote_document(vote, target_key: str):
 
 
 def _recover_listening_history_document(row):
-    if not isinstance(row, dict) or not row.get("_id") or not row.get("user_id") or not row.get("song_id"):
+    if not isinstance(row, dict) or not row.get("_id"):
         return None, {}
     repaired = dict(row)
     updates = {}
-    if not isinstance(repaired.get("play_count"), int):
+    if "play_count" in repaired and not isinstance(repaired.get("play_count"), int):
         try:
             repaired["play_count"] = max(0, int(repaired.get("play_count", 0) or 0))
         except Exception:
@@ -611,12 +613,12 @@ def _recover_listening_history_document(row):
 
 
 def _recover_song_report_document(report):
-    if not isinstance(report, dict) or not report.get("_id") or report.get("reporter_id") is None:
+    if not isinstance(report, dict) or not report.get("_id"):
         return None, {}
     repaired = dict(report)
     updates = {}
     target_type = repaired.get("target_type")
-    if not isinstance(target_type, str) or target_type.strip().lower() not in {"song", "comment"}:
+    if "target_type" in repaired and (not isinstance(target_type, str) or target_type.strip().lower() not in {"song", "comment"}):
         if repaired.get("target_comment_id"):
             repaired["target_type"] = "comment"
         elif repaired.get("target_song_id") or repaired.get("song_id"):
@@ -625,7 +627,7 @@ def _recover_song_report_document(report):
             return None, {}
         updates["target_type"] = repaired["target_type"]
     status = repaired.get("status")
-    if not isinstance(status, str) or status.strip().lower() not in {"open", "resolved", "dismissed"}:
+    if "status" in repaired and (not isinstance(status, str) or status.strip().lower() not in {"open", "resolved", "dismissed"}):
         repaired["status"] = "open"
         updates["status"] = "open"
     if "reason" in repaired and repaired.get("reason") is not None and not isinstance(repaired.get("reason"), str):
@@ -652,45 +654,45 @@ def _recover_admin_audit_document(row):
 
 
 def _recover_creator_subscription_document(row):
-    if not isinstance(row, dict) or not row.get("_id") or not row.get("creator_id") or not row.get("subscriber_id"):
+    if not isinstance(row, dict) or not row.get("_id"):
         return None, {}
     repaired = dict(row)
     updates = {}
-    if not isinstance(repaired.get("notifications_enabled"), bool):
+    if "notifications_enabled" in repaired and not isinstance(repaired.get("notifications_enabled"), bool):
         repaired["notifications_enabled"] = bool(repaired.get("notifications_enabled"))
         updates["notifications_enabled"] = repaired["notifications_enabled"]
     return repaired, updates
 
 
 def _recover_user_notification_document(row):
-    if not isinstance(row, dict) or not row.get("_id") or not row.get("recipient_user_id"):
+    if not isinstance(row, dict) or not row.get("_id"):
         return None, {}
     repaired = dict(row)
     updates = {}
-    if not isinstance(repaired.get("notification_type"), str):
+    if "notification_type" in repaired and not isinstance(repaired.get("notification_type"), str):
         repaired["notification_type"] = "generic"
         updates["notification_type"] = "generic"
-    if not isinstance(repaired.get("content_type"), str):
+    if "content_type" in repaired and not isinstance(repaired.get("content_type"), str):
         repaired["content_type"] = ""
         updates["content_type"] = ""
-    if not isinstance(repaired.get("content_title"), str):
+    if "content_title" in repaired and not isinstance(repaired.get("content_title"), str):
         repaired["content_title"] = tr("defaults.untitled")
         updates["content_title"] = repaired["content_title"]
-    if not isinstance(repaired.get("creator_username_snapshot"), str):
+    if "creator_username_snapshot" in repaired and not isinstance(repaired.get("creator_username_snapshot"), str):
         repaired["creator_username_snapshot"] = ""
         updates["creator_username_snapshot"] = ""
-    if not isinstance(repaired.get("is_read"), bool):
+    if "is_read" in repaired and not isinstance(repaired.get("is_read"), bool):
         repaired["is_read"] = bool(repaired.get("is_read"))
         updates["is_read"] = repaired["is_read"]
     return repaired, updates
 
 
 def _recover_external_import_job_document(row):
-    if not isinstance(row, dict) or not row.get("_id") or not row.get("user_id"):
+    if not isinstance(row, dict) or not row.get("_id"):
         return None, {}
     repaired = dict(row)
     updates = {}
-    if not isinstance(repaired.get("status"), str):
+    if "status" in repaired and not isinstance(repaired.get("status"), str):
         repaired["status"] = "queued"
         updates["status"] = "queued"
     if "error_message" in repaired and repaired.get("error_message") is not None and not isinstance(repaired.get("error_message"), str):
@@ -711,22 +713,22 @@ def _recover_external_playlist_document(row):
 
 
 def _recover_external_integration_document(row):
-    if not isinstance(row, dict) or not row.get("_id") or not row.get("user_id"):
+    if not isinstance(row, dict) or not row.get("_id"):
         return None, {}
     repaired = dict(row)
     updates = {}
-    if not isinstance(repaired.get("provider"), str):
+    if "provider" in repaired and not isinstance(repaired.get("provider"), str):
         repaired["provider"] = ""
         updates["provider"] = ""
     return repaired, updates
 
 
 def _recover_data_export_document(row):
-    if not isinstance(row, dict) or not row.get("_id") or not row.get("user_id"):
+    if not isinstance(row, dict) or not row.get("_id"):
         return None, {}
     repaired = dict(row)
     updates = {}
-    if not isinstance(repaired.get("status"), str):
+    if "status" in repaired and not isinstance(repaired.get("status"), str):
         repaired["status"] = "unknown"
         updates["status"] = "unknown"
     return repaired, updates
@@ -749,26 +751,26 @@ def _recover_system_status_document(row):
 
 
 def _recover_dino_leaderboard_document(row):
-    if not isinstance(row, dict) or not row.get("_id") or not isinstance(row.get("owner_key"), str) or not row.get("owner_key", "").strip():
+    if not isinstance(row, dict) or not row.get("_id"):
         return None, {}
     repaired = dict(row)
     updates = {}
-    if not isinstance(repaired.get("best_score"), int):
+    if "best_score" in repaired and not isinstance(repaired.get("best_score"), int):
         try:
             repaired["best_score"] = max(0, int(repaired.get("best_score", 0) or 0))
         except Exception:
             repaired["best_score"] = 0
         updates["best_score"] = repaired["best_score"]
-    if not isinstance(repaired.get("is_robot"), bool):
+    if "is_robot" in repaired and not isinstance(repaired.get("is_robot"), bool):
         repaired["is_robot"] = bool(repaired.get("is_robot"))
         updates["is_robot"] = repaired["is_robot"]
-    if not isinstance(repaired.get("actor_type"), str):
+    if "actor_type" in repaired and not isinstance(repaired.get("actor_type"), str):
         repaired["actor_type"] = "guest"
         updates["actor_type"] = "guest"
-    if not isinstance(repaired.get("display_name"), str):
+    if "display_name" in repaired and not isinstance(repaired.get("display_name"), str):
         repaired["display_name"] = ""
         updates["display_name"] = ""
-    if not isinstance(repaired.get("guest_code"), str):
+    if "guest_code" in repaired and not isinstance(repaired.get("guest_code"), str):
         repaired["guest_code"] = ""
         updates["guest_code"] = ""
     return repaired, updates
@@ -933,6 +935,21 @@ def validate_or_purge_document(collection_name: str, document, context: str = ""
     recovered = attempt_recover_invalid_document(collection_name, document, context=context)
     if recovered is not None:
         return recovered
+    if not fatal:
+        if not isinstance(document, dict) or not document.get("_id"):
+            current_app.logger.warning(
+                "Skipping structurally invalid document from %s during %s without deleting it",
+                collection_name,
+                context or "server operation",
+            )
+            return None
+        current_app.logger.warning(
+            "Keeping potentially invalid document from %s during %s because no fatal failure occurred yet: %s",
+            collection_name,
+            context or "server operation",
+            reason,
+        )
+        return document
     error = report_invalid_document(collection_name, document, reason, context=context)
     if fatal:
         raise error

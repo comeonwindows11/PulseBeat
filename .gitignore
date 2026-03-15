@@ -35,3 +35,14 @@ static/uploads/*
 
 # Server-side cache
 instance/server_cache/
+instance/server_cache/audio/
+instance/server_cache/audio/youtube/
+
+instance/server_cache/versions/
+instance/server_cache/versions/popular_public_profiles/
+instance/server_cache/versions/popular_public_songs/
+instance/server_cache/versions/public_profile/
+
+instance/server_cache/json/
+instance/server_cache/json/popular_public_songs/
+instance/server_cache/json/public_profile/

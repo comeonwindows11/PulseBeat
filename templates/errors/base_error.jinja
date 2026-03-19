@@ -9,12 +9,14 @@
     <p>{{ t('errors.dino_intro') }}</p>
     <canvas id="dino-game" width="720" height="180" class="dino-canvas"></canvas>
     <p class="muted small">{{ t('errors.dino_help') }}</p>
+    {% if error_code != 507 %}
     <div class="row-actions">
       <a class="btn" href="{{ url_for('main.index') }}">{{ t('errors.back_home') }}</a>
       {% if not current_user %}
         <a class="btn secondary" href="{{ url_for('accounts.login') }}">{{ t('nav.login') }}</a>
       {% endif %}
     </div>
+    {% endif %}
   </div>
 </section>
 

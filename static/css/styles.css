@@ -1808,7 +1808,8 @@ input[type="password"]::-ms-clear {
 .player-shell[data-view-mode="mini"] #play-mode-btn,
 .player-shell[data-view-mode="mini"] #player-like-btn,
 .player-shell[data-view-mode="mini"] #player-dislike-btn,
-.player-shell[data-view-mode="mini"] #player-more-btn {
+.player-shell[data-view-mode="mini"] #player-more-btn,
+.player-shell[data-view-mode="mini"] .player-reaction-auth-hint {
   display: none;
 }
 
@@ -1897,7 +1898,35 @@ body.player-fullscreen-open {
 
 @media (max-width: 768px) {
   .player-shell[data-view-mode="mini"] .player-bar {
-    grid-template-columns: 1fr auto;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+    padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+  }
+
+  .player-shell[data-view-mode="mini"] .song-meta {
+    min-width: 0;
+  }
+
+  .player-shell[data-view-mode="mini"] .controls {
+    width: 100%;
+    justify-content: space-between;
+    gap: 6px;
+    flex-wrap: nowrap;
+  }
+
+  .player-shell[data-view-mode="mini"] .controls button {
+    width: 38px;
+    height: 38px;
+    flex: 0 0 auto;
+  }
+
+  .player-shell[data-view-mode="mini"] .controls button.primary-control {
+    width: 46px;
+    height: 46px;
+  }
+
+  .player-shell[data-view-mode="mini"] .player-view-status {
+    display: none;
   }
 
   .player-shell[data-view-mode="fullscreen"] .player-bar {

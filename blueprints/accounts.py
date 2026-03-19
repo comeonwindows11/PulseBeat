@@ -63,6 +63,7 @@ from auth_helpers import (
     list_creator_subscribers,
     mark_notifications_read,
     remember_trusted_device,
+    raise_http_error_for_mongo_failure,
     safe_mongo_update_one,
     send_email_message,
     serialize_song,
@@ -396,7 +397,8 @@ def _complete_login(user):
         begin_authenticated_session(user)
         session.permanent = remember_me
         session.pop("pending_remember_me", None)
-    except PyMongoError:
+    except PyMongoError as exc:
+        raise_http_error_for_mongo_failure(exc)
         current_app.logger.warning("Unable to finalize authenticated session", exc_info=True)
         session.clear()
         flash(tr("flash.accounts.session_security_retry"), "warning")
@@ -709,7 +711,8 @@ def _enforce_device_gate(user):
         if _queue_device_approval(user, context):
             return False, tr("flash.accounts.device_approval_email_sent"), "info"
         return False, tr("flash.accounts.device_approval_email_failed"), "danger"
-    except PyMongoError:
+    except PyMongoError as exc:
+        raise_http_error_for_mongo_failure(exc)
         current_app.logger.warning("Unable to evaluate trusted device gate", exc_info=True)
         return False, tr("flash.accounts.session_security_retry"), "warning"
 
@@ -1878,7 +1881,8 @@ def setup_admin():
             else:
                 flash(tr("flash.accounts.email_exists"), "danger")
             return redirect(url_for("accounts.setup_admin"))
-        except PyMongoError:
+        except PyMongoError as exc:
+            raise_http_error_for_mongo_failure(exc)
             current_app.logger.warning("Unable to create root admin account", exc_info=True)
             flash(tr("errors.503.msg"), "warning")
             return redirect(url_for("accounts.setup_admin"))
@@ -1967,7 +1971,8 @@ def register():
             else:
                 flash(tr("flash.accounts.email_exists"), "danger")
             return redirect(url_for("accounts.register"))
-        except PyMongoError:
+        except PyMongoError as exc:
+            raise_http_error_for_mongo_failure(exc)
             current_app.logger.warning("Unable to create local account", exc_info=True)
             flash(tr("errors.503.msg"), "warning")
             return redirect(url_for("accounts.register"))
@@ -2325,7 +2330,8 @@ def unlock_account(token):
 
     try:
         begin_authenticated_session(refreshed)
-    except PyMongoError:
+    except PyMongoError as exc:
+        raise_http_error_for_mongo_failure(exc)
         current_app.logger.warning("Unable to restore session after account unlock", exc_info=True)
         session.clear()
         flash(tr("flash.accounts.session_security_retry"), "warning")
@@ -2354,7 +2360,8 @@ def approve_device(token):
             {"_id": user.get("_id")},
             {"$pull": {"pending_device_approvals": {"token_hash": str(pending_entry.get("token_hash", "") or "")}}},
         )
-    except PyMongoError:
+    except PyMongoError as exc:
+        raise_http_error_for_mongo_failure(exc)
         current_app.logger.warning("Unable to approve trusted device", exc_info=True)
         flash(tr("flash.accounts.session_security_retry"), "warning")
         return redirect(url_for("accounts.login"))
@@ -3210,7 +3217,8 @@ def external_provider_import_playlist(provider, external_playlist_id):
 
     try:
         _queue_external_import_job(user_oid, provider, playlist_doc, local_playlist_id)
-    except PyMongoError:
+    except PyMongoError as exc:
+        raise_http_error_for_mongo_failure(exc)
         current_app.logger.warning("Unable to queue external playlist import", exc_info=True)
         extensions.playlists_col.update_one(
             {"_id": local_playlist_id},
@@ -3762,7 +3770,8 @@ def mark_all_notifications_read():
     try:
         mark_notifications_read(user_oid)
         return jsonify({"ok": True, "items": get_user_notifications(user_oid, limit=20), "unread_count": 0})
-    except PyMongoError:
+    except PyMongoError as exc:
+        raise_http_error_for_mongo_failure(exc)
         current_app.logger.warning("Unable to mark notifications as read", exc_info=True)
         return jsonify({"ok": False, "message": tr("errors.503.msg")}), 503
 
@@ -3803,7 +3812,8 @@ def update_username():
     except DuplicateKeyError:
         flash(tr("flash.accounts.username_exists"), "danger")
         return redirect(url_for("accounts.manage_account"))
-    except PyMongoError:
+    except PyMongoError as exc:
+        raise_http_error_for_mongo_failure(exc)
         current_app.logger.warning("Unable to update username", exc_info=True)
         flash(tr("flash.accounts.username_update_failed"), "warning")
         return redirect(url_for("accounts.manage_account"))
@@ -3869,7 +3879,8 @@ def update_primary_email():
     except DuplicateKeyError:
         flash(tr("flash.accounts.email_exists"), "danger")
         return redirect(url_for("accounts.manage_account"))
-    except PyMongoError:
+    except PyMongoError as exc:
+        raise_http_error_for_mongo_failure(exc)
         current_app.logger.warning("Unable to queue primary email change", exc_info=True)
         flash(tr("errors.503.msg"), "warning")
         return redirect(url_for("accounts.manage_account"))
@@ -3924,7 +3935,8 @@ def confirm_primary_email_change(token):
     except DuplicateKeyError:
         flash(tr("flash.accounts.email_exists"), "danger")
         return redirect(url_for("accounts.manage_account" if get_session_user_oid() == user.get("_id") else "accounts.login"))
-    except PyMongoError:
+    except PyMongoError as exc:
+        raise_http_error_for_mongo_failure(exc)
         current_app.logger.warning("Unable to confirm primary email change", exc_info=True)
         flash(tr("errors.503.msg"), "warning")
         return redirect(url_for("accounts.manage_account" if get_session_user_oid() == user.get("_id") else "accounts.login"))
@@ -3986,7 +3998,8 @@ def update_backup_email():
                     }
                 },
             )
-        except PyMongoError:
+        except PyMongoError as exc:
+            raise_http_error_for_mongo_failure(exc)
             current_app.logger.warning("Unable to clear backup email", exc_info=True)
             flash(tr("errors.503.msg"), "warning")
             return redirect(url_for("accounts.manage_account"))
@@ -4021,7 +4034,8 @@ def update_backup_email():
     except DuplicateKeyError:
         flash(tr("flash.accounts.email_exists"), "danger")
         return redirect(url_for("accounts.manage_account"))
-    except PyMongoError:
+    except PyMongoError as exc:
+        raise_http_error_for_mongo_failure(exc)
         current_app.logger.warning("Unable to queue backup email change", exc_info=True)
         flash(tr("errors.503.msg"), "warning")
         return redirect(url_for("accounts.manage_account"))
@@ -4076,7 +4090,8 @@ def confirm_backup_email(token):
     except DuplicateKeyError:
         flash(tr("flash.accounts.email_exists"), "danger")
         return redirect(url_for("accounts.manage_account" if get_session_user_oid() == user.get("_id") else "accounts.login"))
-    except PyMongoError:
+    except PyMongoError as exc:
+        raise_http_error_for_mongo_failure(exc)
         current_app.logger.warning("Unable to confirm backup email", exc_info=True)
         flash(tr("errors.503.msg"), "warning")
         return redirect(url_for("accounts.manage_account" if get_session_user_oid() == user.get("_id") else "accounts.login"))
@@ -4297,14 +4312,16 @@ def change_password():
             },
         )
         _bump_session_version(user_oid)
-    except PyMongoError:
+    except PyMongoError as exc:
+        raise_http_error_for_mongo_failure(exc)
         current_app.logger.warning("Unable to change password securely", exc_info=True)
         flash(tr("flash.accounts.session_security_retry"), "warning")
         return redirect(url_for("accounts.manage_account"))
     refreshed = extensions.users_col.find_one({"_id": user_oid}) or {}
     try:
         begin_authenticated_session(refreshed)
-    except PyMongoError:
+    except PyMongoError as exc:
+        raise_http_error_for_mongo_failure(exc)
         current_app.logger.warning("Unable to recreate session after password change", exc_info=True)
         session.clear()
         flash(tr("flash.accounts.session_security_retry"), "warning")
@@ -4662,7 +4679,8 @@ def subscribe_to_creator(username):
             {"creator_id": target["_id"], "subscriber_id": viewer_oid},
             {"$set": {"notifications_enabled": notifications_enabled, "updated_at": now}},
         )
-    except PyMongoError:
+    except PyMongoError as exc:
+        raise_http_error_for_mongo_failure(exc)
         current_app.logger.warning("Unable to subscribe to creator", exc_info=True)
         flash(tr("flash.accounts.subscription_failed"), "warning")
         return redirect(url_for("accounts.public_profile", username=target.get("username", username)))
@@ -4685,7 +4703,8 @@ def unsubscribe_from_creator(username):
         abort(404)
     try:
         extensions.creator_subscriptions_col.delete_one({"creator_id": target["_id"], "subscriber_id": viewer_oid})
-    except PyMongoError:
+    except PyMongoError as exc:
+        raise_http_error_for_mongo_failure(exc)
         current_app.logger.warning("Unable to unsubscribe from creator", exc_info=True)
         flash(tr("flash.accounts.subscription_failed"), "warning")
         return redirect(url_for("accounts.public_profile", username=target.get("username", username)))
@@ -4714,3 +4733,7 @@ def users_suggest():
             for u in rows
         ]
     }
+
+
+
+

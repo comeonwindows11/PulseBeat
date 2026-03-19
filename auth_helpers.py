@@ -4,6 +4,7 @@ import re
 import secrets
 import smtplib
 import time
+import errno
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 from functools import wraps
@@ -13,6 +14,7 @@ import requests
 from bson import ObjectId
 from flask import current_app, flash, g, jsonify, redirect, render_template, request, session, url_for
 from pymongo.errors import AutoReconnect, BulkWriteError, DuplicateKeyError, NetworkTimeout, OperationFailure, WriteError
+from werkzeug.exceptions import Conflict, HTTPException
 from werkzeug.utils import secure_filename
 
 import extensions
@@ -110,11 +112,91 @@ class InvalidStoredDocumentError(Exception):
         super().__init__(f"Invalid stored document in {self.collection_name}: {self.reason}")
 
 
+class ConflictRequestError(Conflict):
+    description = "Conflict"
+
+
+class InsufficientStorageError(HTTPException):
+    code = 507
+    description = "Insufficient Storage"
+
+
 def parse_object_id(value: str):
     try:
         return ObjectId(value)
     except Exception:
         return None
+
+
+def _flatten_pymongo_error_message(exc) -> str:
+    parts = [str(exc or "")]
+    details = getattr(exc, "details", None)
+    if isinstance(details, dict):
+        errmsg = details.get("errmsg")
+        if errmsg:
+            parts.append(str(errmsg))
+        write_errors = details.get("writeErrors") or []
+        if isinstance(write_errors, list):
+            for item in write_errors[:3]:
+                if isinstance(item, dict) and item.get("errmsg"):
+                    parts.append(str(item.get("errmsg")))
+    return " | ".join(part for part in parts if str(part).strip())
+
+
+def is_mongo_conflict_error(exc) -> bool:
+    if isinstance(exc, DuplicateKeyError):
+        return True
+    lowered = _flatten_pymongo_error_message(exc).lower()
+    return "e11000" in lowered or "duplicate key error" in lowered
+
+
+def is_storage_related_mongo_error(exc) -> bool:
+    lowered = _flatten_pymongo_error_message(exc).lower()
+    needles = (
+        "quota",
+        "storage",
+        "disk full",
+        "no space left",
+        "insufficient storage",
+        "exceeded storage",
+        "space quota",
+        "maximum storage",
+        "data size limit",
+        "cannot allocate space",
+        "not enough disk space",
+    )
+    return any(needle in lowered for needle in needles)
+
+
+def is_local_storage_os_error(exc) -> bool:
+    error_no = getattr(exc, "errno", None)
+    if error_no == errno.ENOSPC:
+        return True
+    lowered = str(exc or "").lower()
+    return "no space left on device" in lowered or "not enough space on the disk" in lowered
+
+
+def mark_storage_full_latch(source: str, detail: str = ""):
+    app = current_app._get_current_object()
+    state = dict(app.config.get("STORAGE_FULL_STATE") or {})
+    details = list(state.get("details") or [])
+    normalized_source = "database" if str(source or "").strip().lower() == "database" else "server"
+    state[normalized_source] = True
+    if detail:
+        trimmed = str(detail).strip()[:400]
+        if trimmed and trimmed not in details:
+            details.append(trimmed)
+    state["details"] = details
+    app.config["STORAGE_FULL_STATE"] = state
+    app.config["STORAGE_FULL_LATCHED"] = True
+
+
+def raise_http_error_for_mongo_failure(exc):
+    if is_storage_related_mongo_error(exc):
+        mark_storage_full_latch("database", _flatten_pymongo_error_message(exc))
+        raise InsufficientStorageError()
+    if is_mongo_conflict_error(exc):
+        raise ConflictRequestError()
 
 
 def _collection_for_invalid_document_watchdog(collection_name: str):

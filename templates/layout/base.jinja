@@ -7,6 +7,8 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
 </head>
 <body>
+  {% set hide_error_chrome = error_code is defined and error_code == 507 %}
+  {% set hide_global_player = hide_error_chrome %}
   <noscript>
     <style>
       html, body {
@@ -53,6 +55,7 @@
       </div>
     </div>
   </noscript>
+  {% if not hide_error_chrome %}
   <header class="topbar">
     <a href="{% if current_user and current_user.require_password_change %}{{ url_for('accounts.manage_account') }}{% elif current_user %}{{ url_for('main.index') }}{% else %}{{ url_for('accounts.login') }}{% endif %}" class="logo">{{ app_name }}</a>
     <button id="menu-toggle" class="menu-toggle" type="button" aria-label="{{ t('lang.switch') }}" aria-expanded="false">
@@ -141,6 +144,7 @@
       {% endif %}
     </nav>
   </header>
+  {% endif %}
 
   <main class="page-container">
     {% with messages = get_flashed_messages(with_categories=true) %}
@@ -156,12 +160,14 @@
     {% block content %}{% endblock %}
   </main>
 
+  {% if not hide_error_chrome %}
   <footer class="site-footer">
     <div class="site-footer__inner">
       <span class="site-footer__brand">{{ app_name }}</span>
       <a href="{{ url_for('main.license_page') }}" class="site-footer__link">{{ t('nav.license') }}</a>
     </div>
   </footer>
+  {% endif %}
 
   <div id="confirm-modal" class="modal hidden" aria-hidden="true" role="dialog" aria-modal="true">
     <div class="modal-card">
@@ -223,6 +229,7 @@
     </div>
   </div>
 
+  {% if not hide_global_player %}
   <div class="player-shell player-shell-hidden" aria-hidden="true">
     <div id="youtube-player-host" class="youtube-player-host" aria-hidden="true"></div>
     <audio id="global-audio" preload="metadata"></audio>
@@ -433,6 +440,7 @@
       </div>
     </div>
   </div>
+  {% endif %}
 
   <script>
     window.CSRF_TOKEN = {{ csrf_token|tojson }};
@@ -531,6 +539,8 @@
     };
   </script>
   <script src="{{ url_for('static', filename=client_js_asset('app')) }}"></script>
+  {% if not hide_global_player %}
   <script src="{{ url_for('static', filename=client_js_asset('player')) }}"></script>
+  {% endif %}
 </body>
 </html>

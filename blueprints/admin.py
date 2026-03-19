@@ -29,6 +29,7 @@ from auth_helpers import (
     password_pwned_status,
     safe_mongo_update_one,
     send_email_message,
+    raise_http_error_for_mongo_failure,
     username_policy_ok,
     user_choice_list,
     validate_or_purge_document,
@@ -598,6 +599,7 @@ def execute_platform_reset(token):
         session.clear()
         return jsonify({"ok": True, "message": tr("admin.reset_complete_body")})
     except PyMongoError as exc:
+        raise_http_error_for_mongo_failure(exc)
         current_app.logger.exception("Database reset failed", exc_info=exc)
     except OSError as exc:
         current_app.logger.exception("File cleanup failed during platform reset", exc_info=exc)
@@ -682,7 +684,8 @@ def create_admin():
         else:
             flash(tr("flash.accounts.email_exists"), "danger")
         return redirect(url_for("admin.dashboard"))
-    except PyMongoError:
+    except PyMongoError as exc:
+        raise_http_error_for_mongo_failure(exc)
         current_app.logger.warning("Unable to create admin account", exc_info=True)
         flash(tr("errors.503.msg"), "warning")
         return redirect(url_for("admin.dashboard"))
@@ -886,3 +889,7 @@ def restore_dashboard_alert():
     )
     create_audit_log(admin_oid, "restore_dashboard_alert", "dashboard_alert", details={"alert_key": alert_key})
     return jsonify({"ok": True})
+
+
+
+

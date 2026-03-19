@@ -36,6 +36,7 @@ from auth_helpers import (
     is_database_audio_storage_enabled,
     login_required,
     parse_object_id,
+    raise_http_error_for_mongo_failure,
     register_auto_moderation_violation,
     safe_mongo_update_one,
     save_uploaded_file,
@@ -1567,7 +1568,8 @@ def update_progress(song_id):
             upsert=True,
             max_retries=3,
         )
-    except PyMongoError:
+    except PyMongoError as exc:
+        raise_http_error_for_mongo_failure(exc)
         current_app.logger.exception("Failed to update listening history safely")
         return jsonify({"ok": False}), 503
     if started and is_youtube_song(song):
@@ -1611,7 +1613,8 @@ def vote_song(song_id):
                 upsert=True,
                 max_retries=3,
             )
-        except PyMongoError:
+        except PyMongoError as exc:
+            raise_http_error_for_mongo_failure(exc)
             current_app.logger.exception("Failed to save song vote safely")
             if wants_json_response():
                 return jsonify({"ok": False, "message": tr("errors.503.msg")}), 503
@@ -1927,7 +1930,8 @@ def vote_comment(song_id, comment_id):
                 upsert=True,
                 max_retries=3,
             )
-        except PyMongoError:
+        except PyMongoError as exc:
+            raise_http_error_for_mongo_failure(exc)
             current_app.logger.exception("Failed to save comment vote safely")
             if wants_json_response():
                 return jsonify({"ok": False, "message": tr("errors.503.msg")}), 503
@@ -2081,7 +2085,8 @@ def set_song_availability(song_id):
             upsert=False,
             max_retries=3,
         )
-    except PyMongoError:
+    except PyMongoError as exc:
+        raise_http_error_for_mongo_failure(exc)
         current_app.logger.exception("Failed to update song availability safely")
         return jsonify({"ok": False, "message": tr("errors.503.msg")}), 503
     refreshed_song = dict(song)
@@ -2232,6 +2237,10 @@ def admin_delete_song(song_id):
         create_audit_log(admin_user_oid, "delete_song", "song", song_oid, {"title": song.get("title", "")})
     flash(tr("flash.songs.deleted"), "success")
     return redirect(url_for("admin.dashboard"))
+
+
+
+
 
 
 

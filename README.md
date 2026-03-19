@@ -24,6 +24,7 @@ Plateforme de streaming musical hybride en `Flask` + `Jinja`, inspirée de YouTu
 - Invalidation des sessions suspectes si un cookie semble rejoué depuis un autre environnement
 - Écran de blocage de session suspecte renforcé avec bandeau d'avertissement visuel, animation d'alerte et tentative de son d'avertissement au chargement
 - Watchdog d'intégrité MongoDB : tentative d'auto-récupération des documents invalides, suppression en dernier recours, alerte admins et fallback `422`
+- Détection de stockage saturé avec erreur `507`, verrouillage global de la plateforme jusqu'au redémarrage, et blocage du setup tant qu'un espace minimal n'est pas disponible
 - Ajout de chansons par URL ou upload (avec détection automatique des balises ID3)
 - Stockage optionnel des chansons publiques dans MongoDB GridFS avec cache local reconstructible côté serveur
 - Enrichissement automatique artiste/genre après upload via recherche en ligne
@@ -1603,6 +1604,171 @@ En résumé :
 
 - `503` = problème d'accès ou d'écriture MongoDB
 - `422` = donnée présente, mais invalide ou corrompue pour l'opération demandée
+
+## Gestion du stockage saturé et erreur 507
+
+PulseBeat inclut maintenant une protection dédiée contre les situations où le stockage n'est plus suffisant pour continuer à fonctionner proprement.
+
+Le but n'est pas seulement d'afficher une erreur, mais surtout d'éviter qu'une instance continue à écrire dans un environnement déjà saturé, ce qui pourrait provoquer :
+
+- des uploads incomplets
+- des reconstructions audio cassées
+- des écritures MongoDB partielles ou refusées
+- des comportements incohérents selon la route appelée
+
+### Quand PulseBeat déclenche un 507
+
+PulseBeat peut déclencher une erreur HTTP `507 Insufficient Storage` dans deux grandes familles de cas :
+
+- le **serveur web** n'a plus assez d'espace libre local
+- la **base MongoDB** remonte un signal crédible indiquant un quota ou un stockage saturé
+
+Concrètement, PulseBeat surveille :
+
+- l'espace libre du serveur local sur les chemins critiques :
+  - dossier `instance`
+  - dossier d'uploads audio
+  - dossier de cache serveur
+- les erreurs MongoDB contenant des indices de quota plein / stockage plein / espace insuffisant
+- au setup, un contrôle best effort de l'état de stockage MongoDB via `dbStats` quand cette information est disponible
+
+### Comportement côté serveur web
+
+Pour le stockage local, PulseBeat effectue une vérification proactive avant les requêtes importantes.
+
+Si l'espace libre descend sous le seuil minimal configuré :
+
+- PulseBeat marque l'instance comme `storage full`
+- la réponse courante devient une erreur `507`
+- toutes les requêtes suivantes restent bloquées jusqu'au redémarrage du serveur
+
+Cette vérification sert surtout à éviter qu'une instance continue à accepter :
+
+- de nouveaux fichiers audio
+- des reconstructions de cache
+- des opérations de maintenance disque
+
+alors que le disque est déjà trop proche de la saturation.
+
+### Comportement côté MongoDB
+
+Pour MongoDB, PulseBeat utilise une stratégie hybride :
+
+- **proactive** au setup quand `dbStats` fournit assez d'information
+- **réactive** pendant l'exécution normale quand MongoDB renvoie une erreur compatible avec un quota plein ou un stockage saturé
+
+Cette distinction est importante parce que, selon l'hébergeur ou le plan utilisé (par exemple certains contextes MongoDB Atlas), les métriques de capacité ne sont pas toujours suffisamment détaillées pour faire un pré-contrôle parfait.
+
+Donc :
+
+- si PulseBeat peut estimer proprement l'espace libre MongoDB, il l'utilise
+- sinon, il laisse l'application démarrer
+- mais au premier vrai signal de stockage saturé renvoyé par MongoDB, il bascule immédiatement en mode `507`
+
+### Verrouillage global jusqu'au redémarrage
+
+Une fois qu'un `507` a été détecté, PulseBeat **verrouille toute la plateforme jusqu'au prochain redémarrage du serveur**.
+
+Ce verrou est volontairement conservateur.
+
+Il évite le scénario où :
+
+- une première route échoue pour stockage plein
+- une deuxième route semble encore marcher
+- puis une troisième casse plus gravement parce que l'instance continue malgré un état déjà dangereux
+
+Quand ce verrou est actif :
+
+- les routes applicatives sont bloquées
+- PulseBeat renvoie `507` au lieu de continuer à traiter normalement
+- le verrou ne se retire pas tout seul pendant l'exécution
+- il faut libérer de l'espace **puis redémarrer le serveur**
+
+L'idée est de forcer un retour à un état propre plutôt que d'essayer de “survivre à moitié” dans une instance déjà dégradée.
+
+### Effet sur le setup initial
+
+Le setup admin initial n'est pas exempté.
+
+Si PulseBeat détecte qu'il n'y a pas assez d'espace disponible pendant cette phase :
+
+- le setup est bloqué
+- aucun compte root admin ne doit être créé dans un environnement déjà saturé
+- l'utilisateur doit d'abord libérer de l'espace
+- puis redémarrer l'application
+
+Cela évite de faire démarrer une plateforme neuve sur une base déjà instable.
+
+### Rendu de la page 507
+
+La page `507` est traitée comme un véritable écran de blocage.
+
+Contrairement aux autres pages d'erreur :
+
+- le header n'est plus affiché
+- le footer / lien de licence n'est plus affiché
+- le lecteur de musique n'est plus rendu
+- `player.js` n'est pas chargé
+- les raccourcis `Accueil` et `Connexion` de la page d'erreur ne sont pas affichés
+
+Autrement dit, pour `507`, PulseBeat ne laisse visible que le contenu principal de la page d'erreur.
+
+Le but est d'éviter toute confusion : ce n'est pas une erreur “navigable”, c'est un état de blocage global de l'instance.
+
+### Différence entre 507, 503, 422 et 409
+
+Ces codes ont maintenant des rôles distincts :
+
+- `507` = manque d'espace ou quota saturé côté serveur web, MongoDB, ou les deux
+- `503` = panne temporaire de service ou erreur d'accès MongoDB sans signal clair de stockage saturé
+- `422` = donnée présente mais invalide/corrompue pour l'opération demandée
+- `409` = conflit logique entre la requête et l'état actuel des données
+
+Exemple :
+
+- playlist modifiée entre deux actions concurrentes : `409`
+- document principal invalide malgré tentative de récupération : `422`
+- MongoDB indisponible ou timeout sans preuve de quota plein : `503`
+- disque serveur plein ou quota MongoDB dépassé : `507`
+
+### Variables d'environnement associées
+
+PulseBeat expose plusieurs variables pour régler le seuil de protection :
+
+- `SERVER_STORAGE_MIN_FREE_BYTES`
+  - espace libre minimal exigé côté serveur web
+- `DATABASE_STORAGE_MIN_FREE_BYTES`
+  - espace libre minimal exigé côté base quand cette information peut être estimée proprement
+- `DATABASE_STORAGE_CAPACITY_BYTES`
+  - capacité totale forcée côté base si l'hébergeur ne fournit pas une métrique exploitable via `dbStats`
+
+En pratique :
+
+- si tu veux une protection simple, règle surtout `SERVER_STORAGE_MIN_FREE_BYTES`
+- si tu héberges MongoDB toi-même ou si tu connais la capacité réelle de ton cluster, `DATABASE_STORAGE_CAPACITY_BYTES` peut rendre le contrôle MongoDB plus fiable
+- si ton fournisseur MongoDB n'expose pas assez d'information, PulseBeat reste protégé grâce au fallback réactif sur les vraies erreurs MongoDB
+
+### Philosophie de conception
+
+Le `507` dans PulseBeat est volontairement strict.
+
+Le projet préfère :
+
+- bloquer franchement l'instance
+- demander un redémarrage après nettoyage
+
+plutôt que :
+
+- continuer à moitié
+- perdre des fichiers
+- ou laisser des opérations critiques réussir une fois sur deux selon la route appelée
+
+Cette approche est particulièrement utile avec :
+
+- des serveurs modestes
+- des caches audio locaux
+- des uploads utilisateur
+- des clusters MongoDB à quota limité comme certains plans gratuits Atlas
 
 ### Ce qui a été étendu dans la dernière passe
 

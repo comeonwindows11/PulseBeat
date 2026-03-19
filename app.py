@@ -1,17 +1,21 @@
 import hashlib
+import errno
 import os
 import secrets
+import shutil
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
 
 from flask import Flask, abort, flash, jsonify, redirect, render_template, request, session, url_for
 from dotenv import load_dotenv
-from pymongo.errors import PyMongoError
+from pymongo.errors import DuplicateKeyError, PyMongoError
 
 import extensions
 from server_cache import init_server_cache, prune_server_cache
 from auth_helpers import (
+    ConflictRequestError,
     InvalidStoredDocumentError,
+    InsufficientStorageError,
     apply_session_security_cookies,
     compose_and_filters,
     count_unread_notifications,
@@ -19,8 +23,12 @@ from auth_helpers import (
     ensure_request_device_id,
     get_user_notifications,
     get_session_user_oid,
+    is_local_storage_os_error,
+    is_storage_related_mongo_error,
+    mark_storage_full_latch,
     normalize_email,
     normalize_username,
+    raise_http_error_for_mongo_failure,
     safe_mongo_update_one,
     validate_or_purge_document,
     validate_bound_session_request,
@@ -34,16 +42,104 @@ from blueprints.songs import bp as songs_bp
 from i18n import get_lang, t
 
 
+def _request_wants_json():
+    requested_with = (request.headers.get("X-Requested-With") or "").strip().lower()
+    accept = (request.headers.get("Accept") or "").lower()
+    return request.is_json or requested_with == "xmlhttprequest" or "application/json" in accept
+
+
+def _render_error_response(code, error=None):
+    if _request_wants_json():
+        return jsonify({"ok": False, "message": t(f"errors.{code}.msg")}), code
+    return render_template("errors/base_error.jinja", error=error, error_code=code), code
+
+
+def _resolve_storage_probe_path(path: str):
+    candidate = os.path.abspath(path or os.getcwd())
+    while candidate and not os.path.exists(candidate):
+        parent = os.path.dirname(candidate)
+        if not parent or parent == candidate:
+            break
+        candidate = parent
+    return candidate if os.path.exists(candidate) else os.getcwd()
+
+
+def _check_server_storage_health(app):
+    threshold = max(0, int(app.config.get("SERVER_STORAGE_MIN_FREE_BYTES", 0) or 0))
+    if threshold <= 0:
+        return True, ""
+
+    probe_targets = {
+        _resolve_storage_probe_path(app.instance_path),
+        _resolve_storage_probe_path(app.config.get("UPLOAD_DIR", "")),
+        _resolve_storage_probe_path(app.config.get("SERVER_CACHE_DIR", "")),
+    }
+    low_paths = []
+    for target in probe_targets:
+        try:
+            usage = shutil.disk_usage(target)
+        except OSError as exc:
+            if getattr(exc, "errno", None) == errno.ENOSPC or is_local_storage_os_error(exc):
+                return False, str(exc)
+            continue
+        if usage.free < threshold:
+            low_paths.append(f"{target} ({usage.free} bytes free)")
+    if low_paths:
+        return False, "; ".join(low_paths)
+    return True, ""
+
+
+def _check_database_storage_health(app):
+    threshold = max(0, int(app.config.get("DATABASE_STORAGE_MIN_FREE_BYTES", 0) or 0))
+    capacity_override = max(0, int(app.config.get("DATABASE_STORAGE_CAPACITY_BYTES", 0) or 0))
+    if threshold <= 0 and capacity_override <= 0:
+        return True, ""
+
+    try:
+        stats = extensions.db.command("dbStats")
+    except PyMongoError as exc:
+        if is_storage_related_mongo_error(exc):
+            return False, str(exc)
+        return True, ""
+
+    free_bytes = None
+    fs_total = int(stats.get("fsTotalSize") or 0)
+    fs_used = int(stats.get("fsUsedSize") or 0)
+    if fs_total > 0 and fs_used >= 0:
+        free_bytes = max(0, fs_total - fs_used)
+    elif capacity_override > 0:
+        used_bytes = int(stats.get("storageSize") or 0) + int(stats.get("indexSize") or 0)
+        free_bytes = max(0, capacity_override - used_bytes)
+
+    if free_bytes is None:
+        return True, ""
+    if free_bytes < threshold:
+        return False, f"MongoDB reports only {free_bytes} bytes of free storage."
+    return True, ""
+
+
 def register_error_handlers(app):
     def make_handler(code):
         def handler(error):
-            return render_template("errors/base_error.jinja", error=error, error_code=code), code
+            return _render_error_response(code, error)
 
         return handler
 
-    handled_codes = [400, 401, 403, 404, 405, 408, 413, 418, 422, 429, 500, 501, 502, 503, 504]
+    handled_codes = [400, 401, 403, 404, 405, 408, 409, 413, 418, 422, 429, 500, 501, 502, 503, 504]
     for code in handled_codes:
         app.register_error_handler(code, make_handler(code))
+
+    @app.errorhandler(ConflictRequestError)
+    def handle_conflict_error(error):
+        return _render_error_response(409, error)
+
+    @app.errorhandler(DuplicateKeyError)
+    def handle_duplicate_key_error(error):
+        return _render_error_response(409, error)
+
+    @app.errorhandler(InsufficientStorageError)
+    def handle_storage_error(error):
+        return _render_error_response(507, error)
 
     @app.errorhandler(InvalidStoredDocumentError)
     def handle_invalid_document_error(error):
@@ -53,22 +149,23 @@ def register_error_handlers(app):
             getattr(error, "document_id", ""),
             getattr(error, "reason", "invalid_document"),
         )
-        requested_with = (request.headers.get("X-Requested-With") or "").strip().lower()
-        accept = (request.headers.get("Accept") or "").lower()
-        wants_json = request.is_json or requested_with == "xmlhttprequest" or "application/json" in accept
-        if wants_json:
-            return jsonify({"ok": False, "message": t("errors.422.msg")}), 422
-        return render_template("errors/base_error.jinja", error=error, error_code=422), 422
+        return _render_error_response(422, error)
 
     @app.errorhandler(PyMongoError)
     def handle_mongo_error(error):
         app.logger.exception("MongoDB operation failed", exc_info=error)
-        requested_with = (request.headers.get("X-Requested-With") or "").strip().lower()
-        accept = (request.headers.get("Accept") or "").lower()
-        wants_json = request.is_json or requested_with == "xmlhttprequest" or "application/json" in accept
-        if wants_json:
-            return jsonify({"ok": False, "message": t("errors.503.msg")}), 503
-        return render_template("errors/base_error.jinja", error=error, error_code=503), 503
+        if is_storage_related_mongo_error(error):
+            mark_storage_full_latch("database", str(error))
+            return _render_error_response(507, error)
+        return _render_error_response(503, error)
+
+    @app.errorhandler(OSError)
+    def handle_os_error(error):
+        if is_local_storage_os_error(error):
+            mark_storage_full_latch("server", str(error))
+            return _render_error_response(507, error)
+        app.logger.exception("Unhandled OS error", exc_info=error)
+        return _render_error_response(500, error)
 
 
 def root_admin_exists():
@@ -303,6 +400,11 @@ def create_app():
     app.config["YOUTUBE_AUDIO_CACHE_ENABLED"] = os.getenv("YOUTUBE_AUDIO_CACHE_ENABLED", "1") == "1"
     app.config["YOUTUBE_AUDIO_CACHE_MAX_BYTES"] = int(os.getenv("YOUTUBE_AUDIO_CACHE_MAX_BYTES", str(512 * 1024 * 1024)))
     app.config["YOUTUBE_AUDIO_CACHE_MAX_FILES"] = int(os.getenv("YOUTUBE_AUDIO_CACHE_MAX_FILES", "80"))
+    app.config["SERVER_STORAGE_MIN_FREE_BYTES"] = int(os.getenv("SERVER_STORAGE_MIN_FREE_BYTES", str(64 * 1024 * 1024)))
+    app.config["DATABASE_STORAGE_MIN_FREE_BYTES"] = int(os.getenv("DATABASE_STORAGE_MIN_FREE_BYTES", str(64 * 1024 * 1024)))
+    app.config["DATABASE_STORAGE_CAPACITY_BYTES"] = int(os.getenv("DATABASE_STORAGE_CAPACITY_BYTES", "0"))
+    app.config["STORAGE_FULL_LATCHED"] = False
+    app.config["STORAGE_FULL_STATE"] = {"server": False, "database": False, "details": []}
 
     extensions.init_mongo(app)
     init_server_cache(app)
@@ -540,11 +642,33 @@ def create_app():
                 upsert=True,
                 max_retries=3,
             )
-        except PyMongoError:
+        except PyMongoError as exc:
+            raise_http_error_for_mongo_failure(exc)
             app.logger.exception("Failed to store dino leaderboard entry")
             return jsonify({"ok": False, "message": t("errors.503.msg")}), 503
 
         return jsonify({"ok": True, "improved": score > existing_score, **get_dino_leaderboard_snapshot()})
+
+    @app.before_request
+    def enforce_storage_capacity_guard():
+        endpoint = request.endpoint or ""
+        if endpoint == "static" or endpoint.startswith("static"):
+            return None
+
+        if app.config.get("STORAGE_FULL_LATCHED"):
+            return _render_error_response(507, InsufficientStorageError())
+
+        server_ok, server_detail = _check_server_storage_health(app)
+        if not server_ok:
+            mark_storage_full_latch("server", server_detail)
+            return _render_error_response(507, InsufficientStorageError())
+
+        if endpoint == "accounts.setup_admin":
+            database_ok, database_detail = _check_database_storage_health(app)
+            if not database_ok:
+                mark_storage_full_latch("database", database_detail)
+                return _render_error_response(507, InsufficientStorageError())
+        return None
 
     @app.before_request
     def enforce_initial_setup_and_password_change():
@@ -690,6 +814,19 @@ def create_app():
         if not csrf_token:
             csrf_token = secrets.token_urlsafe(32)
             session["csrf_token"] = csrf_token
+        if app.config.get("STORAGE_FULL_LATCHED"):
+            return {
+                "app_name": app.config["APP_NAME"],
+                "current_user": None,
+                "nav_playlists": [],
+                "header_notifications": [],
+                "header_notifications_unread": 0,
+                "current_lang": get_lang(),
+                "t": t,
+                "setup_required": False,
+                "csrf_token": csrf_token,
+                "client_js_asset": client_js_asset,
+            }
         user = current_user()
         nav_playlists = []
         header_notifications = []

@@ -17,6 +17,7 @@ from auth_helpers import (
     is_youtube_linked_playlist,
     login_required,
     parse_object_id,
+    raise_http_error_for_mongo_failure,
     register_auto_moderation_violation,
     safe_mongo_update_one,
     serialize_song,
@@ -760,12 +761,17 @@ def reorder_playlist_songs(playlist_id):
             )
             if result.matched_count == 0:
                 return jsonify({"ok": False, "message": tr("flash.playlists.reorder_conflict")}), 409
-    except PyMongoError:
+    except PyMongoError as exc:
+        raise_http_error_for_mongo_failure(exc)
         current_app.logger.warning("Unable to reorder playlist songs", exc_info=True)
         return jsonify({"ok": False, "message": tr("flash.playlists.reorder_failed")}), 503
 
     invalidate_playlist_related_caches(playlist)
     return jsonify({"ok": True, "message": tr("flash.playlists.reordered")})
+
+
+
+
 
 
 

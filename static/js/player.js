@@ -89,6 +89,8 @@
   const TAB_AUDIO_DECISION_KEY = "pulsebeat_tab_audio_decision_v1";
   const TAB_HEARTBEAT_MS = 5000;
   const TAB_STALE_MS = 20000;
+  const MOBILE_PLAYER_BREAKPOINT_QUERY = "(max-width: 768px)";
+  const mobilePlayerMediaQuery = window.matchMedia ? window.matchMedia(MOBILE_PLAYER_BREAKPOINT_QUERY) : null;
 
   if (!audio) return;
 
@@ -134,7 +136,7 @@
     startedSongId: null,
     playlistModalOpen: false,
     queueEditorOpen: false,
-    viewMode: "normal",
+    viewMode: mobilePlayerMediaQuery && mobilePlayerMediaQuery.matches ? "mini" : "normal",
     crossfadeEnabled: true,
     normalizeVolumeEnabled: true,
     normalizationGain: 1,
@@ -694,8 +696,22 @@
     }
   }
 
+  function isMobilePlayerLayout() {
+    if (mobilePlayerMediaQuery) return !!mobilePlayerMediaQuery.matches;
+    return window.innerWidth <= 768;
+  }
+
+  function allowedViewModes() {
+    return isMobilePlayerLayout() ? ["mini", "fullscreen"] : ["normal", "fullscreen"];
+  }
+
+  function defaultViewMode() {
+    return isMobilePlayerLayout() ? "mini" : "normal";
+  }
+
   function normalizeViewMode(mode) {
-    return ["mini", "normal", "fullscreen"].includes(mode) ? mode : "normal";
+    const allowedModes = allowedViewModes();
+    return allowedModes.includes(mode) ? mode : defaultViewMode();
   }
 
   function viewModeLabel(mode) {
@@ -705,9 +721,11 @@
   }
 
   function nextViewMode() {
-    if (state.viewMode === "normal") return "mini";
-    if (state.viewMode === "mini") return "fullscreen";
-    return "normal";
+    const allowedModes = allowedViewModes();
+    const currentMode = normalizeViewMode(state.viewMode);
+    const currentIndex = allowedModes.indexOf(currentMode);
+    if (currentIndex < 0) return defaultViewMode();
+    return allowedModes[(currentIndex + 1) % allowedModes.length] || defaultViewMode();
   }
 
   function syncPlayerOffset() {
@@ -741,13 +759,15 @@
   }
 
   function cycleViewMode() {
-    if (state.viewMode === "normal") {
-      setViewMode("mini", true);
-    } else if (state.viewMode === "mini") {
-      setViewMode("fullscreen", true);
-    } else {
-      setViewMode("normal", true);
-    }
+    setViewMode(nextViewMode(), true);
+  }
+
+  function syncViewModeToViewport() {
+    const normalized = normalizeViewMode(state.viewMode);
+    const changed = normalized !== state.viewMode;
+    state.viewMode = normalized;
+    updateViewModeUI();
+    if (changed) saveState();
   }
 
   function clearLyricsUI() {
@@ -2991,6 +3011,17 @@
   if (modeBtn) modeBtn.addEventListener("click", cycleMode);
   if (playerViewBtn) playerViewBtn.addEventListener("click", cycleViewMode);
 
+  if (mobilePlayerMediaQuery) {
+    const onPlayerViewportChange = () => syncViewModeToViewport();
+    if (typeof mobilePlayerMediaQuery.addEventListener === "function") {
+      mobilePlayerMediaQuery.addEventListener("change", onPlayerViewportChange);
+    } else if (typeof mobilePlayerMediaQuery.addListener === "function") {
+      mobilePlayerMediaQuery.addListener(onPlayerViewportChange);
+    }
+  } else {
+    window.addEventListener("resize", syncViewModeToViewport);
+  }
+
   window.addEventListener("resize", syncPlayerOffset);
 
   audio.addEventListener("canplay", () => {
@@ -3204,6 +3235,7 @@
     updateViewModeUI();
     syncAudioOptionControls();
     renderQueueEditor();
+    syncViewModeToViewport();
   }
 
   initTabGuard();
@@ -3214,5 +3246,6 @@
     updateViewModeUI();
     syncAudioOptionControls();
     renderQueueEditor();
+    syncViewModeToViewport();
   });
 })();

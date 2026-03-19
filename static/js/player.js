@@ -63,6 +63,7 @@
   const dislikeBtn = document.getElementById("player-dislike-btn");
   const likeCountEl = document.getElementById("player-like-count");
   const dislikeCountEl = document.getElementById("player-dislike-count");
+  const playerShareBtn = document.getElementById("player-share-btn");
   const playerMoreBtn = document.getElementById("player-more-btn");
   const playerContextMenu = document.getElementById("player-context-menu");
   const playerMenuBlockSong = document.getElementById("player-menu-block-song");
@@ -473,6 +474,7 @@
     song.external_provider = metaItem.external_provider || song.external_provider || "";
     song.youtube_video_id = metaItem.youtube_video_id || song.youtube_video_id || extractYouTubeVideoId(song.source_url || "");
     song.external_url = metaItem.external_url || song.external_url || song.source_url || "";
+    if (metaItem.visibility) song.visibility = metaItem.visibility;
     if (metaItem.stream_url) song.url = metaItem.stream_url;
     if (!song.url && !song.is_audio_playable) song.url = "";
     return song;
@@ -1114,6 +1116,45 @@
     const top = Math.max(8, Math.min(y, maxTop));
     playerContextMenu.style.left = `${left}px`;
     playerContextMenu.style.top = `${top}px`;
+  }
+
+  function shareCurrentSongFromPlayer() {
+    const song = currentSongOrNull();
+    if (!song || !song.id || !canShareSong(song)) {
+      return;
+    }
+    const detailHref = String(song.detail_url || `/songs/${encodeURIComponent(song.id)}`).trim();
+    const shareUrl = new URL(detailHref, window.location.origin).toString();
+    const shareTitle = [song.title || i18n.playerUntitled || "Untitled", song.artist || i18n.playerUnknown || "Unknown"]
+      .map((part) => String(part || "").trim())
+      .filter(Boolean)
+      .join(" - ") || document.title || "PulseBeat";
+    const payload = {
+      url: shareUrl,
+      title: shareTitle,
+      text: shareTitle,
+    };
+
+    if (window.PulseBeatShare && typeof window.PulseBeatShare.open === "function") {
+      window.PulseBeatShare.open(payload);
+      return;
+    }
+
+    const fallbackTrigger = document.createElement("button");
+    fallbackTrigger.type = "button";
+    fallbackTrigger.className = "open-share-modal hidden";
+    fallbackTrigger.setAttribute("data-share-url", payload.url);
+    fallbackTrigger.setAttribute("data-share-title", payload.title);
+    fallbackTrigger.setAttribute("data-share-text", payload.text);
+    document.body.appendChild(fallbackTrigger);
+    fallbackTrigger.click();
+    fallbackTrigger.remove();
+  }
+
+  function canShareSong(song) {
+    if (!song) return false;
+    const visibility = String(song.visibility || "").trim().toLowerCase();
+    return visibility === "public" || visibility === "unlisted";
   }
 
   function hideActionToast() {
@@ -1772,6 +1813,13 @@
       refreshPlayerVoteState(song);
     } else {
       resetPlayerVoteState();
+    }
+
+    if (playerShareBtn) {
+      const allowShare = canShareSong(song);
+      playerShareBtn.classList.toggle("hidden", !allowShare);
+      playerShareBtn.setAttribute("aria-hidden", allowShare ? "false" : "true");
+      playerShareBtn.tabIndex = allowShare ? 0 : -1;
     }
 
     updateModeUI();
@@ -2832,6 +2880,13 @@
       if (!song) return;
       const rect = playerMoreBtn.getBoundingClientRect();
       showPlayerContextMenu(rect.right - 220, rect.bottom + 8);
+    });
+  }
+
+  if (playerShareBtn) {
+    playerShareBtn.addEventListener("click", () => {
+      if (!isAuthenticated) return;
+      shareCurrentSongFromPlayer();
     });
   }
 

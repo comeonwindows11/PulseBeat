@@ -99,7 +99,7 @@
                 type="button"
                 class="play-one"
                 data-context="auto"
-                data-song='{{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url, "detail_url": song.detail_url, "source_type": song.source_type, "source_url": song.source_url, "external_provider": song.external_provider, "youtube_video_id": song.youtube_video_id, "playback_mode": song.playback_mode, "is_available": song.is_available, "is_audio_playable": song.is_audio_playable}|tojson|safe }}'
+                data-song='{{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url, "detail_url": song.detail_url, "source_type": song.source_type, "source_url": song.source_url, "external_provider": song.external_provider, "youtube_video_id": song.youtube_video_id, "playback_mode": song.playback_mode, "is_available": song.is_available, "is_audio_playable": song.is_audio_playable, "visibility": song.visibility}|tojson|safe }}'
               >{{ t('main.play') }}</button>
               <a class="btn secondary" href="{{ song.detail_url }}">{{ t('song.details') }}</a>
             </div>
@@ -114,12 +114,12 @@
 <script>
   window.PAGE_SONG_OBJECTS = [
   {% for song in songs %}
-    {{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url, "detail_url": song.detail_url, "source_type": song.source_type, "source_url": song.source_url, "external_provider": song.external_provider, "youtube_video_id": song.youtube_video_id, "playback_mode": song.playback_mode, "is_available": song.is_available, "is_audio_playable": song.is_audio_playable}|tojson|safe }}{% if not loop.last %},{% endif %}
+    {{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url, "detail_url": song.detail_url, "source_type": song.source_type, "source_url": song.source_url, "external_provider": song.external_provider, "youtube_video_id": song.youtube_video_id, "playback_mode": song.playback_mode, "is_available": song.is_available, "is_audio_playable": song.is_audio_playable, "visibility": song.visibility}|tojson|safe }}{% if not loop.last %},{% endif %}
   {% endfor %}
   ];
   window.PAGE_RECOMMENDED_SONGS = [
   {% for song in recommended_songs %}
-    {{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url, "detail_url": song.detail_url, "source_type": song.source_type, "source_url": song.source_url, "external_provider": song.external_provider, "youtube_video_id": song.youtube_video_id, "playback_mode": song.playback_mode, "is_available": song.is_available, "is_audio_playable": song.is_audio_playable}|tojson|safe }}{% if not loop.last %},{% endif %}
+    {{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url, "detail_url": song.detail_url, "source_type": song.source_type, "source_url": song.source_url, "external_provider": song.external_provider, "youtube_video_id": song.youtube_video_id, "playback_mode": song.playback_mode, "is_available": song.is_available, "is_audio_playable": song.is_audio_playable, "visibility": song.visibility}|tojson|safe }}{% if not loop.last %},{% endif %}
   {% endfor %}
   ];
 </script>

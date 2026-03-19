@@ -2039,6 +2039,7 @@ def playback_meta(song_id):
                 "source_url": item.get("source_url", ""),
                 "external_provider": item.get("external_provider", ""),
                 "youtube_video_id": item.get("youtube_video_id", ""),
+                "visibility": item.get("visibility", "public"),
                 "stream_url": stream_url,
                 "external_url": item.get("source_url", ""),
                 "detail_url": url_for("songs.song_detail", song_id=str(song_oid)),

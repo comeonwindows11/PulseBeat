@@ -393,6 +393,33 @@
     if (shareEmailLink) shareEmailLink.href = `mailto:?subject=${encodedMailSubject}&body=${encodedMailBody}`;
   }
 
+  function openShareModal(payload) {
+    if (!shareModal) return false;
+    const shareUrl = String((payload && payload.url) || "").trim();
+    const shareTitle = String((payload && payload.title) || document.title || "PulseBeat").trim();
+    const shareText = String((payload && payload.text) || shareTitle).trim();
+    if (!shareUrl) return false;
+
+    updateShareModalLinks({ url: shareUrl, title: shareTitle, text: shareText });
+    if (shareNativeBtn) {
+      shareNativeBtn.classList.toggle("hidden", !(navigator.share && typeof navigator.share === "function"));
+    }
+    showModal(shareModal);
+    setTimeout(() => {
+      if (shareLinkInput) {
+        shareLinkInput.focus();
+        shareLinkInput.select();
+      }
+    }, 30);
+    return true;
+  }
+
+  window.PulseBeatShare = {
+    open(payload) {
+      return openShareModal(payload);
+    }
+  };
+
   async function copyShareLink() {
     const value = String((shareLinkInput && shareLinkInput.value) || sharePayload.url || "").trim();
     if (!value) return false;
@@ -443,18 +470,7 @@
     const shareTitle = btn.getAttribute("data-share-title") || document.title || "PulseBeat";
     const shareText = btn.getAttribute("data-share-text") || shareTitle;
     if (!shareUrl) return;
-
-    updateShareModalLinks({ url: shareUrl, title: shareTitle, text: shareText });
-    if (shareNativeBtn) {
-      shareNativeBtn.classList.toggle("hidden", !(navigator.share && typeof navigator.share === "function"));
-    }
-    showModal(shareModal);
-    setTimeout(() => {
-      if (shareLinkInput) {
-        shareLinkInput.focus();
-        shareLinkInput.select();
-      }
-    }, 30);
+    openShareModal({ url: shareUrl, title: shareTitle, text: shareText });
   });
 
   if (shareCopyBtn) {

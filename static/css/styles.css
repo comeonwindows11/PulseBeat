@@ -1804,6 +1804,7 @@ input[type="password"]::-ms-clear {
 }
 
 .player-shell[data-view-mode="mini"] .progress-wrap,
+.player-shell[data-view-mode="mini"] #player-share-btn,
 .player-shell[data-view-mode="mini"] #add-to-playlist-btn,
 .player-shell[data-view-mode="mini"] #play-mode-btn,
 .player-shell[data-view-mode="mini"] #player-like-btn,

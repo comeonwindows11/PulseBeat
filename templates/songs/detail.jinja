@@ -10,7 +10,7 @@
     <span class="badge">{{ t('main.visibility.' ~ song.visibility) }}</span>
     {% if not song.is_available %}<span class="badge">{{ t('song.unavailable') }}</span>{% endif %}
     <div class="row-actions top-gap" id="song-votes-root" data-song-id="{{ song.id }}" data-song-stats-url="{{ url_for('songs.song_stats', song_id=song.id) }}" data-can-vote="{{ 1 if current_user else 0 }}">
-      <button type="button" class="play-one" data-context="auto" data-song='{{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url, "detail_url": song.detail_url, "source_type": song.source_type, "source_url": song.source_url, "external_provider": song.external_provider, "youtube_video_id": song.youtube_video_id, "playback_mode": song.playback_mode, "is_available": song.is_available, "is_audio_playable": song.is_audio_playable}|tojson|safe }}'>{{ t('main.play') }}</button>
+      <button type="button" class="play-one" data-context="auto" data-song='{{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url, "detail_url": song.detail_url, "source_type": song.source_type, "source_url": song.source_url, "external_provider": song.external_provider, "youtube_video_id": song.youtube_video_id, "playback_mode": song.playback_mode, "is_available": song.is_available, "is_audio_playable": song.is_audio_playable, "visibility": song.visibility}|tojson|safe }}'>{{ t('main.play') }}</button>
       <form method="post" action="{{ url_for('songs.vote_song', song_id=song.id) }}" class="song-vote-form" data-song-vote-form>
         <input type="hidden" name="vote" value="1">
         <button type="submit" class="vote-btn {% if user_vote == 1 %}btn{% else %}btn secondary{% endif %}" aria-label="{{ t('song.like') }}" data-vote="1" {% if not current_user %}disabled title="{{ t('song.login_to_react') }}"{% endif %}>
@@ -26,7 +26,7 @@
         </button>
       </form>
       {% if current_user %}
-      {% if song.visibility in ['public', 'unlisted'] %}
+      {% if song.visibility|default('public')|trim|lower in ['public', 'unlisted'] %}
       <button
         type="button"
         class="btn secondary open-share-modal"
@@ -95,7 +95,7 @@
               <a href="{{ rs.detail_url }}"><strong>{{ rs.title }}</strong></a>
               <p>{{ rs.artist }}{% if rs.genre %} - {{ rs.genre }}{% endif %}</p>
             </div>
-            <button type="button" class="play-one" data-context="auto" data-song='{{ {"id": rs.id, "title": rs.title, "artist": rs.artist, "url": rs.url, "detail_url": rs.detail_url, "source_type": rs.source_type, "source_url": rs.source_url, "external_provider": rs.external_provider, "youtube_video_id": rs.youtube_video_id, "playback_mode": rs.playback_mode, "is_available": rs.is_available, "is_audio_playable": rs.is_audio_playable}|tojson|safe }}'>{{ t('main.play') }}</button>
+            <button type="button" class="play-one" data-context="auto" data-song='{{ {"id": rs.id, "title": rs.title, "artist": rs.artist, "url": rs.url, "detail_url": rs.detail_url, "source_type": rs.source_type, "source_url": rs.source_url, "external_provider": rs.external_provider, "youtube_video_id": rs.youtube_video_id, "playback_mode": rs.playback_mode, "is_available": rs.is_available, "is_audio_playable": rs.is_audio_playable, "visibility": rs.visibility}|tojson|safe }}'>{{ t('main.play') }}</button>
           </li>
         {% endfor %}
       </ul>
@@ -106,16 +106,14 @@
 </section>
 
 <script>
-  window.PAGE_SONG_OBJECTS = [{{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url, "detail_url": song.detail_url, "source_type": song.source_type, "source_url": song.source_url, "external_provider": song.external_provider, "youtube_video_id": song.youtube_video_id, "playback_mode": song.playback_mode, "is_available": song.is_available, "is_audio_playable": song.is_audio_playable}|tojson|safe }}];
+  window.PAGE_SONG_OBJECTS = [{{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url, "detail_url": song.detail_url, "source_type": song.source_type, "source_url": song.source_url, "external_provider": song.external_provider, "youtube_video_id": song.youtube_video_id, "playback_mode": song.playback_mode, "is_available": song.is_available, "is_audio_playable": song.is_audio_playable, "visibility": song.visibility}|tojson|safe }}];
   window.PAGE_RECOMMENDED_SONGS = [
     {% for rs in recommended_songs %}
-      {{ {"id": rs.id, "title": rs.title, "artist": rs.artist, "url": rs.url, "detail_url": rs.detail_url, "source_type": rs.source_type, "source_url": rs.source_url, "external_provider": rs.external_provider, "youtube_video_id": rs.youtube_video_id, "playback_mode": rs.playback_mode, "is_available": rs.is_available, "is_audio_playable": rs.is_audio_playable}|tojson|safe }}{% if not loop.last %},{% endif %}
+      {{ {"id": rs.id, "title": rs.title, "artist": rs.artist, "url": rs.url, "detail_url": rs.detail_url, "source_type": rs.source_type, "source_url": rs.source_url, "external_provider": rs.external_provider, "youtube_video_id": rs.youtube_video_id, "playback_mode": rs.playback_mode, "is_available": rs.is_available, "is_audio_playable": rs.is_audio_playable, "visibility": rs.visibility}|tojson|safe }}{% if not loop.last %},{% endif %}
     {% endfor %}
   ];
 </script>
 {% endblock %}
-
-
 
 
 

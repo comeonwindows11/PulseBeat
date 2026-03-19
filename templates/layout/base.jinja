@@ -280,6 +280,13 @@
         </button>
         {% endif %}
         {% if current_user %}
+        <button id="player-share-btn" type="button" aria-label="{{ t('share.open') }}" title="{{ t('share.open') }}">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M18 16a3 3 0 0 0-2.39 1.2L8.91 13.7a3.17 3.17 0 0 0 0-3.4l6.7-3.5A3 3 0 1 0 15 5a2.9 2.9 0 0 0 .09.7l-6.7 3.5a3 3 0 1 0 0 5.6l6.7 3.5A2.9 2.9 0 0 0 15 19a3 3 0 1 0 3-3z"></path>
+          </svg>
+        </button>
+        {% endif %}
+        {% if current_user %}
         <button id="add-to-playlist-btn" type="button" aria-label="{{ t('player.add_to_playlist') }}">
           <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M3 10h10v2H3v-2zm0-4h14v2H3V6zm0 8h10v2H3v-2zm16-1v-3h-2v3h-3v2h3v3h2v-3h3v-2h-3z"></path>

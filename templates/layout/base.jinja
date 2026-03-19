@@ -6,9 +6,11 @@
   <title>{% block title %}{{ app_name }}{% endblock %}</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
 </head>
-<body>
-  {% set hide_error_chrome = error_code is defined and error_code == 507 %}
-  {% set hide_global_player = hide_error_chrome %}
+{% set hide_error_chrome = error_code is defined and error_code == 507 %}
+{% set hide_global_chrome = hide_global_chrome if hide_global_chrome is defined else hide_error_chrome %}
+{% set hide_global_player = hide_global_player if hide_global_player is defined else hide_error_chrome %}
+{% set is_recap_experience = page_body_class is defined and page_body_class == "recap-experience-page" %}
+<body{% if page_body_class is defined and page_body_class %} class="{{ page_body_class }}"{% endif %}>
   <noscript>
     <style>
       html, body {
@@ -55,7 +57,7 @@
       </div>
     </div>
   </noscript>
-  {% if not hide_error_chrome %}
+  {% if not hide_global_chrome %}
   <header class="topbar">
     <a href="{% if current_user and current_user.require_password_change %}{{ url_for('accounts.manage_account') }}{% elif current_user %}{{ url_for('main.index') }}{% else %}{{ url_for('accounts.login') }}{% endif %}" class="logo">{{ app_name }}</a>
     <button id="menu-toggle" class="menu-toggle" type="button" aria-label="{{ t('lang.switch') }}" aria-expanded="false">
@@ -109,6 +111,15 @@
                 <li class="notification-item{% if not item.is_read %} unread{% endif %}">
                   <p class="small muted">{{ item.created_at.strftime('%Y-%m-%d %H:%M') if item.created_at else '' }}</p>
                   <p class="notification-item-body">
+                    {% if item.notification_type == "yearly_recap" %}
+                    <strong>{{ app_name }}</strong>
+                    {{ t('notifications.recap_ready') }}
+                    {% if item.content_url %}
+                    <a href="{{ item.content_url }}">{{ item.content_title }}</a>
+                    {% else %}
+                    <strong>{{ item.content_title }}</strong>
+                    {% endif %}
+                    {% else %}
                     {% if item.creator_url %}
                     <a href="{{ item.creator_url }}">{{ item.creator_username }}</a>
                     {% else %}
@@ -123,6 +134,7 @@
                     <a href="{{ item.content_url }}">{{ item.content_title }}</a>
                     {% else %}
                     <strong>{{ item.content_title }}</strong>
+                    {% endif %}
                     {% endif %}
                   </p>
                 </li>
@@ -144,11 +156,12 @@
       {% endif %}
     </nav>
   </header>
+  <div id="nav-backdrop" class="nav-backdrop hidden" aria-hidden="true"></div>
   {% endif %}
 
   <main class="page-container">
     {% with messages = get_flashed_messages(with_categories=true) %}
-      {% if messages %}
+      {% if messages and not is_recap_experience %}
         <div class="flash-list server-flash-list">
           {% for category, message in messages %}
             <div class="flash {{ category }}">{{ message }}</div>
@@ -160,7 +173,7 @@
     {% block content %}{% endblock %}
   </main>
 
-  {% if not hide_error_chrome %}
+  {% if not hide_global_chrome %}
   <footer class="site-footer">
     <div class="site-footer__inner">
       <span class="site-footer__brand">{{ app_name }}</span>
@@ -236,6 +249,7 @@
     <div id="player-error-banner" class="player-error-banner hidden" role="status" aria-live="polite">
       <span id="player-error-text"></span>
     </div>
+    <div class="player-gesture-handle" aria-hidden="true"><span></span></div>
     <div class="player-bar">
       <div class="song-meta">
         <a id="player-title-link" href="#" class="player-title-link">

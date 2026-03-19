@@ -539,6 +539,16 @@ def create_app():
     )
     extensions.user_notifications_col.create_index([("recipient_user_id", 1), ("created_at", -1)], name="idx_user_notifications_recipient_created")
     extensions.user_notifications_col.create_index([("recipient_user_id", 1), ("is_read", 1), ("created_at", -1)], name="idx_user_notifications_recipient_read")
+    extensions.listening_events_col.create_index([("user_id", 1), ("created_at", -1)], name="idx_listening_events_user_created")
+    extensions.listening_events_col.create_index([("user_id", 1), ("song_id", 1), ("created_at", -1)], name="idx_listening_events_user_song_created")
+    _ensure_unique_index_with_dedupe(
+        extensions.user_recaps_col,
+        [("user_id", 1), ("period_key", 1)],
+        "uniq_user_recap_period",
+        logger=app.logger,
+    )
+    extensions.user_recaps_col.create_index([("user_id", 1), ("updated_at", -1)], name="idx_user_recaps_user_updated")
+    extensions.user_recaps_col.create_index([("user_id", 1), ("recap_type", 1), ("year", -1)], name="idx_user_recaps_user_type_year")
     _ensure_unique_index_with_dedupe(
         extensions.dino_leaderboard_col,
         [("owner_key", 1), ("is_robot", 1)],

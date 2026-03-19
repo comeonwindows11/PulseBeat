@@ -22,6 +22,8 @@ app_settings_col = None
 creator_subscriptions_col = None
 user_notifications_col = None
 dino_leaderboard_col = None
+listening_events_col = None
+user_recaps_col = None
 
 
 def init_mongo(app):
@@ -29,6 +31,7 @@ def init_mongo(app):
     global data_exports_col, song_votes_col, song_comments_col, comment_votes_col
     global listening_history_col, song_reports_col, admin_audit_col, system_status_col, app_settings_col
     global creator_subscriptions_col, user_notifications_col, dino_leaderboard_col
+    global listening_events_col, user_recaps_col
 
     mongo_client = MongoClient(app.config["MONGO_URI"])
     db = mongo_client[app.config["MONGO_DB_NAME"]]
@@ -51,3 +54,5 @@ def init_mongo(app):
     creator_subscriptions_col = db["creator_subscriptions"]
     user_notifications_col = db["user_notifications"]
     dino_leaderboard_col = db["dino_leaderboard"]
+    listening_events_col = db["listening_events"]
+    user_recaps_col = db["user_recaps"]

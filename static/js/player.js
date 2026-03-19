@@ -173,6 +173,7 @@
     blocked: false,
     heartbeatTimer: null,
   };
+  let playerGestureState = null;
 
   function jsonHeaders(withJsonContent = true) {
     const headers = {
@@ -770,6 +771,39 @@
     state.viewMode = normalized;
     updateViewModeUI();
     if (changed) saveState();
+  }
+
+  function initPlayerTouchGestures() {
+    if (!playerShell) return;
+
+    playerShell.addEventListener("pointerdown", (event) => {
+      if (!isMobilePlayerLayout()) return;
+      if (!event.target || !event.target.closest) return;
+      if (!event.target.closest(".player-gesture-handle, .song-meta")) return;
+      playerGestureState = {
+        startX: event.clientX,
+        startY: event.clientY,
+        startMode: state.viewMode,
+      };
+    }, { passive: true });
+
+    playerShell.addEventListener("pointerup", (event) => {
+      if (!playerGestureState || !isMobilePlayerLayout()) {
+        playerGestureState = null;
+        return;
+      }
+      const dx = event.clientX - playerGestureState.startX;
+      const dy = event.clientY - playerGestureState.startY;
+      const startMode = playerGestureState.startMode;
+      playerGestureState = null;
+      if (Math.abs(dy) < 52 || Math.abs(dy) < Math.abs(dx)) return;
+
+      if (startMode === "mini" && dy < -52) {
+        setViewMode("fullscreen", true);
+      } else if (startMode === "fullscreen" && dy > 52) {
+        setViewMode("mini", true);
+      }
+    }, { passive: true });
   }
 
   function clearLyricsUI() {
@@ -3211,6 +3245,7 @@
   );
 
   bindMediaSessionHandlers();
+  initPlayerTouchGestures();
 
   window.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {

@@ -1,0 +1,288 @@
+{% extends "layout/base.jinja" %}
+{% block title %}{{ recap.title }} - {{ app_name }}{% endblock %}
+
+{% block content %}
+<section
+  class="recap-experience"
+  data-recap-root
+  data-recap-exit-url="{{ recap_exit_url }}"
+  data-recap-home-url="{{ url_for('main.index') }}"
+  data-recap-autoplay-ms="6800"
+>
+  <div class="recap-experience__backdrop">
+    <span class="recap-experience__orb recap-experience__orb--one"></span>
+    <span class="recap-experience__orb recap-experience__orb--two"></span>
+    <span class="recap-experience__orb recap-experience__orb--three"></span>
+    <span class="recap-experience__grid"></span>
+  </div>
+
+  {% if recap.soundtrack %}
+  <audio
+    id="recap-soundtrack-audio"
+    class="recap-soundtrack-audio"
+    preload="metadata"
+    loop
+    src="{{ recap.soundtrack.stream_url }}"
+  ></audio>
+  {% endif %}
+
+  <div class="recap-story recap-story--premium">
+    <div class="recap-story__chrome">
+      <div class="recap-story__meta">
+        <span class="recap-story__brand">{{ app_name }}</span>
+        <div class="recap-story__progress" data-recap-progress>
+          <span class="active"></span>
+          <span></span>
+          <span></span>
+          <span></span>
+          <span></span>
+          <span></span>
+          <span></span>
+        </div>
+      </div>
+
+      <div class="recap-story__actions">
+        <button type="button" class="recap-control-btn" data-recap-toggle-autoplay aria-pressed="true">
+          <span data-when-playing>{{ t('recap.pause') }}</span>
+          <span data-when-paused class="hidden">{{ t('recap.resume') }}</span>
+        </button>
+        {% if recap.soundtrack %}
+        <div class="recap-soundtrack-chip">
+          <div class="recap-soundtrack-chip__meta">
+            <strong>{{ recap.soundtrack.title }}</strong>
+            <span>{{ recap.soundtrack.artist }}</span>
+          </div>
+          <div class="recap-soundtrack-chip__actions">
+            <button type="button" class="recap-icon-btn" data-recap-soundtrack-toggle aria-label="{{ t('recap.soundtrack_toggle') }}">
+              <span data-soundtrack-playing>❚❚</span>
+              <span data-soundtrack-paused class="hidden">▶</span>
+            </button>
+            <button type="button" class="recap-icon-btn" data-recap-soundtrack-mute aria-label="{{ t('recap.soundtrack_mute') }}">
+              <span data-soundtrack-unmuted>♪</span>
+              <span data-soundtrack-muted class="hidden">×</span>
+            </button>
+          </div>
+        </div>
+        {% endif %}
+        <button type="button" class="recap-close-btn" data-recap-close aria-label="{{ t('recap.close') }}">×</button>
+      </div>
+    </div>
+
+    <div class="recap-story__viewport">
+      <div class="recap-slides" data-recap-track>
+        <article class="recap-slide active recap-slide--hero" data-recap-slide data-recap-slide-duration="7200">
+          <div class="recap-slide__content">
+            <div class="recap-slide__eyebrow">{{ t('recap.hero_kicker') }}</div>
+            <h1>{{ recap.title }}</h1>
+            <p class="recap-lead">
+              {% if recap.year %}
+                {{ t('recap.hero_year', year=recap.year) }}
+              {% else %}
+                {{ t('recap.hero_custom', start=recap.period_start[:10], end=recap.period_end[:10]) }}
+              {% endif %}
+            </p>
+            <div class="recap-hero-metrics">
+              <div class="recap-impact-card">
+                <span>{{ t('recap.total_plays') }}</span>
+                <strong data-recap-count="{{ recap.plays_total }}">{{ recap.plays_total }}</strong>
+              </div>
+              <div class="recap-impact-card">
+                <span>{{ t('recap.minutes_listened') }}</span>
+                <strong data-recap-count="{{ recap.minutes_listened|round(1) }}" data-recap-decimals="1">{{ recap.minutes_listened|round(1) }}</strong>
+              </div>
+              <div class="recap-impact-card">
+                <span>{{ t('recap.songs_discovered') }}</span>
+                <strong data-recap-count="{{ recap.songs_distinct }}">{{ recap.songs_distinct }}</strong>
+              </div>
+              <div class="recap-impact-card">
+                <span>{{ t('recap.artists_loved') }}</span>
+                <strong data-recap-count="{{ recap.artists_distinct }}">{{ recap.artists_distinct }}</strong>
+              </div>
+            </div>
+          </div>
+        </article>
+
+        <article class="recap-slide recap-slide--soundtrack" data-recap-slide data-recap-slide-duration="7600">
+          <div class="recap-slide__content">
+            <div class="recap-slide__eyebrow">{{ t('recap.soundtrack_kicker') }}</div>
+            <h2>{{ t('recap.soundtrack_title') }}</h2>
+            <p class="recap-lead">{{ t('recap.soundtrack_body') }}</p>
+            <div class="recap-soundtrack-stage">
+              <div class="recap-vinyl">
+                <span class="recap-vinyl__ring recap-vinyl__ring--one"></span>
+                <span class="recap-vinyl__ring recap-vinyl__ring--two"></span>
+                <span class="recap-vinyl__label">{{ recap.soundtrack.title if recap.soundtrack else app_name }}</span>
+              </div>
+              <div class="recap-soundtrack-panel">
+                <div class="recap-soundtrack-visualizer" aria-hidden="true">
+                  <span></span><span></span><span></span><span></span><span></span><span></span>
+                  <span></span><span></span><span></span><span></span><span></span><span></span>
+                </div>
+                {% if recap.soundtrack %}
+                <p class="recap-kicker">{{ t('recap.soundtrack_now_playing') }}</p>
+                <h3>{{ recap.soundtrack.title }}</h3>
+                <p class="recap-lead">{{ recap.soundtrack.artist }}</p>
+                <p class="muted">{{ t('recap.soundtrack_autoplay') }}</p>
+                <div class="row-actions top-gap">
+                  <a class="btn secondary" href="{{ recap.soundtrack.detail_url }}">{{ t('recap.soundtrack_open_song') }}</a>
+                </div>
+                {% else %}
+                <p class="recap-kicker">{{ t('recap.soundtrack_none_kicker') }}</p>
+                <h3>{{ t('recap.soundtrack_none_title') }}</h3>
+                <p class="recap-lead">{{ t('recap.soundtrack_none_body') }}</p>
+                {% endif %}
+              </div>
+            </div>
+            {% if recap.top_songs %}
+            <div class="recap-card-row">
+              {% for item in recap.top_songs[:3] %}
+              <article class="recap-mini-card">
+                <span>#{{ loop.index }}</span>
+                <strong>{{ item.title }}</strong>
+                <small>{{ item.artist }}</small>
+              </article>
+              {% endfor %}
+            </div>
+            {% endif %}
+          </div>
+        </article>
+
+        <article class="recap-slide recap-slide--accent" data-recap-slide data-recap-slide-duration="7000">
+          <div class="recap-slide__content">
+            <div class="recap-slide__eyebrow">{{ t('recap.top_song_kicker') }}</div>
+            {% if recap.summary.top_song %}
+            <h2>{{ recap.summary.top_song.title }}</h2>
+            <p class="recap-lead">{{ recap.summary.top_song.artist }}</p>
+            <p class="recap-big-number" data-recap-count="{{ recap.summary.top_song.plays }}">{{ recap.summary.top_song.plays }}</p>
+            <p class="muted">{{ t('recap.top_song_body') }}</p>
+            <div class="recap-highlight-strip">
+              <span>{{ t('recap.top_song_share') }}</span>
+              <strong data-recap-count="{{ recap.top_song_share }}" data-recap-decimals="1" data-recap-suffix="%">{{ recap.top_song_share }}%</strong>
+            </div>
+            {% else %}
+            <h2>{{ t('recap.no_song_title') }}</h2>
+            <p class="recap-lead">{{ t('recap.no_song_body') }}</p>
+            {% endif %}
+            {% if recap.top_songs %}
+            <ol class="recap-ranking">
+              {% for item in recap.top_songs %}
+              <li>
+                <span>{{ item.title }} - {{ item.artist }}</span>
+                <strong>{{ item.plays }}</strong>
+              </li>
+              {% endfor %}
+            </ol>
+            {% endif %}
+          </div>
+        </article>
+
+        <article class="recap-slide recap-slide--sunrise" data-recap-slide data-recap-slide-duration="7000">
+          <div class="recap-slide__content">
+            <div class="recap-slide__eyebrow">{{ t('recap.top_artist_kicker') }}</div>
+            {% if recap.summary.top_artist %}
+            <h2>{{ recap.summary.top_artist.name }}</h2>
+            <p class="recap-big-number" data-recap-count="{{ recap.summary.top_artist.plays }}">{{ recap.summary.top_artist.plays }}</p>
+            <p class="recap-lead">{{ t('recap.top_artist_body') }}</p>
+            {% else %}
+            <h2>{{ t('recap.artists_loved') }}</h2>
+            <p class="recap-lead">{{ t('recap.no_artist_body') }}</p>
+            {% endif %}
+            <div class="recap-duo-grid">
+              <div class="recap-stat-card">
+                <span>{{ t('recap.completed_plays') }}</span>
+                <strong data-recap-count="{{ recap.completed_plays }}">{{ recap.completed_plays }}</strong>
+              </div>
+              <div class="recap-stat-card">
+                <span>{{ t('recap.data_quality') }}</span>
+                <strong>{{ recap.basis_label }}</strong>
+              </div>
+            </div>
+            {% if recap.top_artists %}
+            <div class="recap-pill-row">
+              {% for item in recap.top_artists %}
+              <span class="recap-pill">{{ item.name }} · {{ item.plays }}</span>
+              {% endfor %}
+            </div>
+            {% endif %}
+          </div>
+        </article>
+
+        <article class="recap-slide recap-slide--genres" data-recap-slide data-recap-slide-duration="7000">
+          <div class="recap-slide__content">
+            <div class="recap-slide__eyebrow">{{ t('recap.genre_kicker') }}</div>
+            <h2>{{ t('recap.genre_title') }}</h2>
+            <p class="recap-lead">{{ t('recap.genre_body') }}</p>
+            <div class="recap-stat-grid">
+              <div class="recap-stat-card">
+                <span>{{ t('recap.completed_plays') }}</span>
+                <strong data-recap-count="{{ recap.completion_rate }}" data-recap-decimals="1" data-recap-suffix="%">{{ recap.completion_rate }}%</strong>
+              </div>
+              <div class="recap-stat-card">
+                <span>{{ t('recap.best_month') }}</span>
+                <strong>{{ recap.summary.best_month.label if recap.summary.best_month else "—" }}</strong>
+              </div>
+            </div>
+            {% if recap.top_genres %}
+            <div class="recap-genre-cloud">
+              {% for item in recap.top_genres %}
+              <span class="recap-genre-chip" style="--weight: {{ item.plays }}">{{ item.name }}</span>
+              {% endfor %}
+            </div>
+            {% endif %}
+          </div>
+        </article>
+
+        <article class="recap-slide recap-slide--midnight" data-recap-slide data-recap-slide-duration="7200">
+          <div class="recap-slide__content">
+            <div class="recap-slide__eyebrow">{{ t('recap.timeline_kicker') }}</div>
+            <h2>{{ t('recap.timeline_title') }}</h2>
+            {% if recap.monthly_breakdown %}
+            <div class="recap-bars">
+              {% set max_plays = recap.monthly_breakdown|map(attribute='plays')|max %}
+              {% for item in recap.monthly_breakdown %}
+              <div class="recap-bar-item">
+                <span>{{ item.label }}</span>
+                <div class="recap-bar-track">
+                  <div class="recap-bar-fill" style="height: {{ ((item.plays / max_plays) * 100) if max_plays else 0 }}%"></div>
+                </div>
+                <strong>{{ item.plays }}</strong>
+              </div>
+              {% endfor %}
+            </div>
+            {% else %}
+            <p class="recap-lead">{{ t('recap.timeline_empty') }}</p>
+            {% endif %}
+          </div>
+        </article>
+
+        <article class="recap-slide recap-slide--export" data-recap-slide data-recap-slide-duration="7600">
+          <div class="recap-slide__content">
+            <div class="recap-slide__eyebrow">{{ t('recap.export_kicker') }}</div>
+            <h2>{{ t('recap.export_title') }}</h2>
+            <p class="recap-lead">{{ t('recap.export_body') }}</p>
+            <div class="row-actions top-gap recap-export-actions">
+              <a class="btn" href="{{ url_for('accounts.export_recap', recap_id=recap.id, format='json') }}">{{ t('recap.export_json') }}</a>
+              <a class="btn secondary" href="{{ url_for('accounts.export_recap', recap_id=recap.id, format='csv') }}">{{ t('recap.export_csv') }}</a>
+            </div>
+            <div class="recap-outro-card">
+              <strong>{{ t('recap.outro_title') }}</strong>
+              <p>{{ t('recap.outro_body') }}</p>
+            </div>
+          </div>
+        </article>
+      </div>
+    </div>
+
+    <div class="recap-story__nav">
+      <button type="button" class="btn secondary" data-recap-prev>{{ t('main.prev') }}</button>
+      <button
+        type="button"
+        class="btn"
+        data-recap-next
+        data-next-label="{{ t('main.next') }}"
+        data-finish-label="{{ t('recap.finish') }}"
+      >{{ t('main.next') }}</button>
+    </div>
+  </div>
+</section>
+{% endblock %}

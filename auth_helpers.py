@@ -25,6 +25,7 @@ from server_cache import (
     bump_public_profile_cache,
     has_cached_youtube_audio,
 )
+from recap_helpers import ensure_yearly_recap_notification, RECAP_NOTIFICATION_TYPE
 
 ALLOWED_EXTENSIONS = {"mp3", "wav", "ogg", "m4a"}
 VISIBILITY_VALUES = {"public", "private", "unlisted"}
@@ -2159,6 +2160,7 @@ def create_creator_publication_notifications(creator_oid, content_type: str, con
 def count_unread_notifications(user_oid):
     if not user_oid or extensions.user_notifications_col is None:
         return 0
+    ensure_yearly_recap_notification(user_oid)
     return extensions.user_notifications_col.count_documents({"recipient_user_id": user_oid, "is_read": False})
 
 
@@ -2175,6 +2177,7 @@ def mark_notifications_read(user_oid):
 def get_user_notifications(user_oid, limit=20):
     if not user_oid or extensions.user_notifications_col is None:
         return []
+    ensure_yearly_recap_notification(user_oid)
 
     rows = list(
         extensions.user_notifications_col.find({"recipient_user_id": user_oid}).sort("created_at", -1).limit(max(1, int(limit or 20)))
@@ -2202,6 +2205,7 @@ def get_user_notifications(user_oid, limit=20):
 
     items = []
     for row in rows:
+        notification_type = str(row.get("notification_type") or "generic").strip().lower()
         creator_oid = row.get("creator_id")
         creator = creator_map.get(creator_oid)
         creator_username = (
@@ -2212,7 +2216,13 @@ def get_user_notifications(user_oid, limit=20):
         creator_url = url_for("accounts.public_profile", username=creator_username) if creator_username else ""
         content_id = row.get("content_id")
         content_type = (row.get("content_type") or "").strip().lower()
-        if content_type == "playlist" and content_id:
+        if notification_type == RECAP_NOTIFICATION_TYPE:
+            recap_id = row.get("recap_id")
+            content_type = "recap"
+            creator_username = current_app.config.get("APP_NAME", "PulseBeat")
+            creator_url = ""
+            content_url = url_for("accounts.view_recap", recap_id=str(recap_id)) if recap_id else ""
+        elif content_type == "playlist" and content_id:
             content_url = url_for("playlists.playlist_detail", playlist_id=str(content_id))
         elif content_type == "song" and content_id:
             content_url = url_for("songs.song_detail", song_id=str(content_id))
@@ -2222,6 +2232,7 @@ def get_user_notifications(user_oid, limit=20):
         items.append(
             {
                 "id": str(row.get("_id")),
+                "notification_type": notification_type,
                 "creator_username": creator_username,
                 "creator_url": creator_url,
                 "content_type": content_type,

@@ -41,6 +41,8 @@ Plateforme de streaming musical hybride en `Flask` + `Jinja`, inspirée de YouTu
 - Option de normalisation de volume côté lecteur
 - Cache serveur intelligent : audio YouTube récemment écouté + cache JSON des données publiques coûteuses
 - Lecteur avec vues `mini`, `normale` et `plein écran`
+- Recaps PulseBeat à la demande + recap annuel automatique avec notification interne et export JSON/CSV
+- Gestures tactiles mobile : ouverture/fermeture du menu hamburger par glissement, navigation recap par swipe, et transitions mini lecteur / plein écran par geste
 - Bouton `previous` type lecteur moderne : avant 5 secondes il revient à la chanson précédente, à partir de 5 secondes il redémarre la chanson courante
 - Anti-superposition audio multi-onglets (modal de garde audio + blocage de lecture sur onglet récent tant que non confirmé)
 - Si une chanson est référencée en base mais introuvable sur le serveur, le lecteur affiche une erreur générique avec code HTTP (ex. 404) et suggère de passer à la suivante
@@ -928,6 +930,368 @@ Si un onglet est bloqué, PulseBeat :
 - garde l'état du lecteur cohérent
 - affiche un message explicite indiquant que l'audio est bloqué tant que l'activation n'est pas confirmée
 
+## PulseBeat Recap
+
+PulseBeat propose maintenant deux formes de recap personnel :
+
+- un **recap annuel automatique**
+- un **recap à la demande**
+
+L'objectif est de produire une expérience proche des recaps modernes type Spotify / YouTube Music, mais avec une base de données et un rendu adaptés à PulseBeat.
+
+### Déclencheurs de génération
+
+PulseBeat génère un recap dans trois situations :
+
+1. **recap annuel automatique**
+   - il n'est pas envoyé par courriel
+   - il apparaît dans la cloche de notifications
+   - il est généré de façon paresseuse quand PulseBeat charge réellement les notifications de l'utilisateur
+2. **recap annuel à la demande**
+   - l'utilisateur choisit une année dans `Gérer mon compte`
+   - PulseBeat régénère explicitement ce recap pour cette période
+3. **recap personnalisé**
+   - l'utilisateur choisit une date de début et une date de fin
+   - PulseBeat construit un recap dédié à cette plage
+
+Ce modèle évite de pré-calculer tous les recaps de tout le monde au démarrage, ce qui serait trop coûteux pour une petite instance.
+
+### Construction des données : ordre réel des sources
+
+PulseBeat essaie toujours d'utiliser la source la plus précise disponible pour la période demandée.
+
+Ordre de priorité :
+
+1. **`listening_events`**
+2. **fallback `listening_history`**
+3. **aucun recap** si aucune des deux sources ne fournit assez de matière
+
+#### Cas 1 : `listening_events` est disponible
+
+PulseBeat utilise la collection `listening_events` si elle trouve de vrais événements `started` dans la période.
+
+Dans ce mode :
+
+- `plays_total` est calculé à partir du nombre d'événements `started`
+- `completed_plays` est calculé à partir du nombre d'événements `completed`
+- la ventilation mensuelle est calculée à partir des timestamps `created_at`
+- les chansons, artistes et genres dominants sont reconstruits à partir des `song_id`
+- la durée écoutée est estimée à partir du **plus grand `duration` observé** pour chaque chanson, puis multipliée par le nombre de lectures détectées
+
+C'est le mode le plus fidèle, et c'est celui que PulseBeat étiquette ensuite comme :
+
+- `données précises`
+
+#### Cas 2 : fallback sur `listening_history`
+
+Si PulseBeat ne trouve pas de base événementielle exploitable pour la période, il retombe sur `listening_history`.
+
+Dans ce mode :
+
+- la période est filtrée via `updated_at`, `last_completed_at` ou `created_at`
+- `plays_total` est reconstruit à partir de `play_count` avec un minimum de `1`
+- `completed_plays` correspond au nombre d'entrées ayant un `last_completed_at`
+- les minutes écoutées sont estimées à partir de `last_duration`
+- la ventilation mensuelle utilise `updated_at`, sinon `last_completed_at`, sinon `created_at`
+
+Ce mode reste cohérent, mais plus approximatif. Il est affiché dans l'interface comme :
+
+- `estimation intelligente`
+
+#### Cas 3 : aucune donnée suffisante
+
+Si ni `listening_events` ni `listening_history` ne fournissent de matière exploitable :
+
+- aucun recap n'est généré
+- PulseBeat renvoie un message utilisateur propre au lieu d'afficher un recap vide
+
+### Pipeline détaillé de calcul
+
+Une fois la période déterminée, PulseBeat exécute ce pipeline :
+
+1. **résolution de la période**
+   - année complète pour un recap annuel
+   - plage personnalisée inclusive pour un recap manuel
+2. **chargement des événements ou de l'historique**
+3. **reconstruction des snapshots chansons**
+   - titre
+   - artiste
+   - genre
+4. **agrégations principales**
+   - nombre total d'écoutes
+   - nombre de chansons distinctes
+   - nombre d'artistes distincts
+   - top chansons
+   - top artistes
+   - top genres
+   - ventilation mensuelle
+5. **construction du résumé**
+   - top morceau
+   - top artiste
+   - top genre
+   - meilleur mois
+6. **persistance MongoDB**
+   - le recap complet est stocké dans `user_recaps`
+
+### Réutilisation, régénération et anti-doublons
+
+Chaque recap possède une clé logique `period_key`.
+
+Exemples :
+
+- `annual:2026`
+- `custom:2026-01-01:2026-03-31`
+
+PulseBeat s'en sert pour :
+
+- éviter de créer plusieurs recaps pour la même période
+- retrouver rapidement un recap déjà calculé
+- régénérer explicitement un recap à la demande quand l'utilisateur le demande
+
+Concrètement :
+
+- les recaps automatiques annuels réutilisent l'existant si possible
+- les recaps manuels/à la demande peuvent forcer une régénération
+- un index unique protège la collection `user_recaps` contre les doublons
+
+### Enrichissement au moment de l'affichage
+
+Le document stocké ne suffit pas à lui seul à produire l'expérience premium finale. Au moment de l'ouverture du recap, PulseBeat enrichit encore les données.
+
+Il ajoute notamment :
+
+- les libellés mensuels localisés (`Mar 2026`, `Apr 2026`, etc.)
+- `completion_rate`
+- `top_song_share`
+- les URLs de détail des chansons
+- la vérification d'accessibilité de chaque chanson liée au recap
+
+PulseBeat ne fait pas confiance aveuglément aux anciennes références.
+
+Avant d'exposer une chanson du recap dans l'interface premium, il vérifie :
+
+- que la chanson existe toujours
+- que l'utilisateur a encore le droit d'y accéder
+- qu'elle est rejouable dans le lecteur actuel
+
+### Comment la bande sonore de fond est choisie
+
+La bande sonore du recap n'est pas une piste arbitraire.
+
+PulseBeat essaie de choisir :
+
+- la première chanson marquante du top recap
+- qui est encore accessible
+- et qui est réellement rejouable par le moteur audio courant
+
+Si aucune chanson du top ne satisfait ces conditions :
+
+- le recap reste entièrement fonctionnel
+- mais sans bande sonore de fond
+
+Si le navigateur refuse l'autoplay :
+
+- l'expérience visuelle continue normalement
+- PulseBeat retente au premier geste utilisateur
+
+### Expérience premium plein écran
+
+Le recap “premium” est conçu comme une expérience autonome.
+
+Pendant sa lecture :
+
+- le header PulseBeat est masqué
+- le footer est masqué
+- le lecteur global est masqué
+- la page entière est consacrée au recap
+
+L'utilisateur peut :
+
+- laisser défiler automatiquement les slides
+- passer en manuel
+- avancer / reculer
+- quitter via `X`
+- terminer le recap via le bouton final `Terminer`
+
+La dernière slide agit comme une vraie sortie d'expérience :
+
+- export des données
+- puis retour simple vers l'accueil
+
+### Slides et contenu affiché
+
+Le recap premium est construit comme une story en plusieurs sections, par exemple :
+
+- introduction générale
+- bande sonore du recap
+- top morceau
+- top artiste
+- styles / genres dominants
+- timeline mensuelle
+- slide finale d'export
+
+Chaque slide peut mixer :
+
+- gros chiffres animés
+- cartes de résumé
+- barres mensuelles
+- top contenus
+- bande sonore de fond
+
+### Export des données du recap
+
+La dernière slide propose :
+
+- `JSON`
+- `CSV`
+
+Le `JSON` correspond à une représentation structurée exploitable techniquement.
+
+Il contient notamment :
+
+- les métadonnées du recap
+- les métriques principales
+- les tops
+- la ventilation mensuelle
+- les enrichissements exposés à l'interface
+
+Le `CSV` fournit une version aplatie plus simple à ouvrir dans un tableur.
+
+### Stockage MongoDB
+
+Les recaps sont stockés dans `user_recaps`.
+
+Clés principales :
+
+- `user_id`
+- `period_key`
+- `recap_type`
+- `year`
+- `period_start`
+- `period_end`
+- `basis`
+- `metrics`
+- `top_songs`
+- `top_artists`
+- `top_genres`
+- `monthly_breakdown`
+- `summary`
+- `updated_at`
+
+### Optimisation et stratégie serveur
+
+Le système de recap est volontairement :
+
+- **paresseux** pour l'annuel automatique
+- **persisté** après calcul
+- **rejouable** sans recalcul tant que la période n'est pas régénérée
+- **adaptatif** selon la qualité des données disponibles
+
+Cela réduit :
+
+- les scans inutiles sur MongoDB Atlas
+- les recalculs répétés
+- la latence lors des ouvertures suivantes
+- la pression côté serveur pour les utilisateurs qui n'ouvrent jamais leur recap
+
+## Gestures tactiles et navigation mobile
+
+PulseBeat ajoute maintenant plusieurs gestures mobiles pour fluidifier l'interface sans multiplier les boutons.
+
+### Philosophie générale
+
+PulseBeat n'active pas des gestes au hasard sur toute l'interface.
+
+Chaque geste est limité à une surface précise et à une direction dominante, pour éviter les conflits avec :
+
+- la barre de progression audio
+- les boutons d'action
+- le scroll vertical naturel
+- les tap/clicks classiques
+
+Dans la plupart des cas, PulseBeat exige :
+
+- un déplacement suffisamment net
+- et une dominance claire de l'axe horizontal ou vertical
+
+Cela évite que de petits tremblements de doigt déclenchent une mauvaise action.
+
+### Lecteur mobile : mini ↔ plein écran
+
+Sur mobile, PulseBeat n'expose que deux modes de lecteur :
+
+- `mini`
+- `plein écran`
+
+Le passage par geste fonctionne comme ceci :
+
+- swipe **vers le haut** depuis le mini lecteur : ouverture en plein écran
+- swipe **vers le bas** depuis le plein écran : repli vers le mini lecteur
+
+Important :
+
+- le geste n'est accepté que depuis la poignée du lecteur ou la zone méta chanson
+- les contrôles sensibles comme la timeline ne servent pas de zone de geste
+- cela évite les conflits avec le seek audio
+
+### Menu hamburger mobile
+
+Le menu mobile suit maintenant une logique plus proche d'une vraie app tactile :
+
+- ouverture par swipe depuis le bord gauche
+- animation visuelle en **slide in gauche → droite**
+- fermeture par swipe inverse **droite → gauche**
+- fermeture aussi possible par :
+  - tap sur le backdrop
+  - clic/tap sur un lien du menu
+  - touche `Escape`
+
+Le mouvement visuel du menu a été aligné sur le geste lui-même :
+
+- on ouvre depuis la gauche, le panneau vient de la gauche
+- on ferme en ramenant vers la gauche, le panneau repart vers la gauche
+
+Cela rend l'interaction beaucoup plus intuitive pour la main.
+
+### Panneau de notifications
+
+Sur mobile, le panneau de notifications peut être fermé d'un geste simple :
+
+- swipe **vers le bas** sur le panneau
+
+Ce geste est utile parce que le panneau s'affiche comme une surface flottante au-dessus de l'interface, souvent près du menu mobile.
+
+### Recap premium
+
+Le recap possède aussi ses propres gestes :
+
+- swipe gauche : slide suivante
+- swipe droite : slide précédente
+- swipe descendant depuis la zone haute du recap : fermeture rapide
+
+Le recap combine aussi plusieurs formes de navigation :
+
+- défilement automatique
+- boutons visuels
+- clavier desktop (`flèche gauche`, `flèche droite`, `Escape`)
+- bouton `X`
+- bouton final `Terminer`
+
+### Pourquoi PulseBeat limite volontairement le nombre de gestes
+
+L'objectif n'est pas de transformer toute l'interface en surface à gestures, mais d'ajouter les gestes uniquement là où ils apportent un vrai gain :
+
+- ouverture/fermeture d'une grande surface
+- changement de mode du lecteur
+- navigation dans une expérience plein écran
+- fermeture rapide d'un panneau mobile
+
+Cette approche garde l'interface :
+
+- plus prévisible
+- plus facile à apprendre
+- plus sûre pour les contrôles audio
+
 ### Moteur hybride local + YouTube
 
 Le lecteur sélectionne automatiquement le moteur de lecture selon la chanson :
@@ -1150,6 +1514,8 @@ Non recommandé :
 - Le lecteur est maintenant masqué tant qu'aucune chanson n'est chargée, puis apparaît avec animation au premier lancement.
 - Le premier lancement manuel d'une chanson démarre automatiquement la lecture sur l'onglet principal.
 - Les recommandations et restaurations de file empêchent désormais les doublons de chansons dans une même file.
+- Les recaps PulseBeat annuels et personnalisés sont maintenant disponibles, avec notification automatique et export JSON/CSV.
+- Le menu mobile, les notifications et le lecteur plein écran gagnent des gestures tactiles plus naturelles.
 - Les bundles JavaScript obfusqués peuvent maintenant être servis au navigateur tout en gardant les sources projet éditables.
 
 
@@ -1175,6 +1541,8 @@ Collections utilisées :
 - `song_votes`
 - `song_comments`
 - `listening_history`
+- `listening_events`
+- `user_recaps`
 - `song_reports`
 - `admin_audit`
 - `system_status`

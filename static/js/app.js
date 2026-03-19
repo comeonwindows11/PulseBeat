@@ -78,12 +78,66 @@
 
   const menuBtn = document.getElementById("menu-toggle");
   const nav = document.getElementById("main-nav");
+  const navBackdrop = document.getElementById("nav-backdrop");
+
+  function setMenuOpen(open) {
+    if (!menuBtn || !nav) return;
+    const isOpen = !!open;
+    nav.classList.toggle("open", isOpen);
+    menuBtn.classList.toggle("active", isOpen);
+    menuBtn.setAttribute("aria-expanded", isOpen ? "true" : "false");
+    if (navBackdrop) {
+      navBackdrop.classList.toggle("hidden", !isOpen);
+      navBackdrop.setAttribute("aria-hidden", isOpen ? "false" : "true");
+    }
+    document.body.classList.toggle("nav-open", isOpen);
+  }
 
   if (menuBtn && nav) {
     menuBtn.addEventListener("click", () => {
-      const isOpen = nav.classList.toggle("open");
-      menuBtn.setAttribute("aria-expanded", isOpen ? "true" : "false");
+      setMenuOpen(!nav.classList.contains("open"));
     });
+    if (navBackdrop) {
+      navBackdrop.addEventListener("click", () => setMenuOpen(false));
+    }
+    nav.querySelectorAll("a").forEach((link) => {
+      link.addEventListener("click", () => setMenuOpen(false));
+    });
+
+    let navGesture = null;
+    window.addEventListener("pointerdown", (event) => {
+      if (window.innerWidth > 768) return;
+      if (event.pointerType === "mouse" && event.button !== 0) return;
+      const target = event.target;
+      if (nav.classList.contains("open")) {
+        if (target.closest("#main-nav") || target.closest("#nav-backdrop")) {
+          navGesture = { mode: "close", startX: event.clientX, startY: event.clientY };
+        }
+        return;
+      }
+      if (event.clientX <= 24) {
+        navGesture = { mode: "open", startX: event.clientX, startY: event.clientY };
+      }
+    }, { passive: true });
+
+    window.addEventListener("pointerup", (event) => {
+      if (!navGesture || window.innerWidth > 768) {
+        navGesture = null;
+        return;
+      }
+      const dx = event.clientX - navGesture.startX;
+      const dy = event.clientY - navGesture.startY;
+      if (Math.abs(dx) < 46 || Math.abs(dx) < Math.abs(dy)) {
+        navGesture = null;
+        return;
+      }
+      if (navGesture.mode === "open" && dx > 46) {
+        setMenuOpen(true);
+      } else if (navGesture.mode === "close" && dx < -46) {
+        setMenuOpen(false);
+      }
+      navGesture = null;
+    }, { passive: true });
   }
 
   document.querySelectorAll("[data-password-toggle-target]").forEach((button) => {
@@ -353,6 +407,24 @@
       if (event.target.closest("#notifications-panel") || event.target.closest("#notifications-toggle")) return;
       closeNotificationsPanel();
     });
+
+    let notificationGesture = null;
+    notificationsPanel.addEventListener("pointerdown", (event) => {
+      if (window.innerWidth > 768) return;
+      notificationGesture = { startX: event.clientX, startY: event.clientY };
+    }, { passive: true });
+    notificationsPanel.addEventListener("pointerup", (event) => {
+      if (!notificationGesture || window.innerWidth > 768) {
+        notificationGesture = null;
+        return;
+      }
+      const dx = event.clientX - notificationGesture.startX;
+      const dy = event.clientY - notificationGesture.startY;
+      notificationGesture = null;
+      if (Math.abs(dy) > 50 && Math.abs(dy) > Math.abs(dx) && dy > 0) {
+        closeNotificationsPanel();
+      }
+    }, { passive: true });
   }
 
   document.addEventListener("click", (event) => {
@@ -2103,6 +2175,7 @@
 
   window.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
+    setMenuOpen(false);
     hideModal(confirmModal);
     hideModal(reportModal);
     hideModal(userPickerModal);
@@ -2113,6 +2186,344 @@
     hideModal(databaseAudioChoiceModal);
     closeNotificationsPanel();
   });
+
+  const recapRoot = document.querySelector("[data-recap-root]");
+  if (recapRoot) {
+    const recapTrack = recapRoot.querySelector("[data-recap-track]");
+    const recapSlides = Array.from(recapRoot.querySelectorAll("[data-recap-slide]"));
+    const recapPrev = recapRoot.querySelector("[data-recap-prev]");
+    const recapNext = recapRoot.querySelector("[data-recap-next]");
+    const recapProgress = Array.from(recapRoot.querySelectorAll("[data-recap-progress] span"));
+    const recapClose = recapRoot.querySelector("[data-recap-close]");
+    const recapAutoplayToggle = recapRoot.querySelector("[data-recap-toggle-autoplay]");
+    const recapAutoplayPlayingLabel = recapAutoplayToggle ? recapAutoplayToggle.querySelector("[data-when-playing]") : null;
+    const recapAutoplayPausedLabel = recapAutoplayToggle ? recapAutoplayToggle.querySelector("[data-when-paused]") : null;
+    const recapSoundtrack = document.getElementById("recap-soundtrack-audio");
+    const recapSoundtrackToggle = recapRoot.querySelector("[data-recap-soundtrack-toggle]");
+    const recapSoundtrackMute = recapRoot.querySelector("[data-recap-soundtrack-mute]");
+    const recapSoundtrackPlaying = recapSoundtrackToggle ? recapSoundtrackToggle.querySelector("[data-soundtrack-playing]") : null;
+    const recapSoundtrackPaused = recapSoundtrackToggle ? recapSoundtrackToggle.querySelector("[data-soundtrack-paused]") : null;
+    const recapSoundtrackMuted = recapSoundtrackMute ? recapSoundtrackMute.querySelector("[data-soundtrack-muted]") : null;
+    const recapSoundtrackUnmuted = recapSoundtrackMute ? recapSoundtrackMute.querySelector("[data-soundtrack-unmuted]") : null;
+    let recapIndex = 0;
+    let recapTouch = null;
+    let recapAutoplayEnabled = true;
+    let recapTimeout = null;
+    let recapFrame = null;
+    let recapCountFrame = null;
+    let recapPauseOnHide = false;
+    let recapTimerStartedAt = 0;
+    let recapRemainingMs = 0;
+    let soundtrackNeedsGesture = false;
+    const defaultRecapDuration = Math.max(2200, Number(recapRoot.getAttribute("data-recap-autoplay-ms") || "6800"));
+    const recapNumberFormatLocale = document.documentElement.lang || "fr";
+    const recapHomeUrl = String(recapRoot.getAttribute("data-recap-home-url") || "/").trim() || "/";
+    const recapNextLabel = recapNext ? String(recapNext.getAttribute("data-next-label") || "").trim() : "";
+    const recapFinishLabel = recapNext ? String(recapNext.getAttribute("data-finish-label") || recapNextLabel || "").trim() : "";
+
+    function recapExit() {
+      const exitUrl = String(recapRoot.getAttribute("data-recap-exit-url") || "/").trim() || "/";
+      window.location.assign(exitUrl);
+    }
+
+    function recapGoHome() {
+      window.location.assign(recapHomeUrl);
+    }
+
+    function slideDuration(index) {
+      const slide = recapSlides[index];
+      const perSlide = Number(slide && slide.getAttribute("data-recap-slide-duration"));
+      return Number.isFinite(perSlide) && perSlide > 0 ? perSlide : defaultRecapDuration;
+    }
+
+    function clearRecapTimer() {
+      if (recapTimeout) {
+        clearTimeout(recapTimeout);
+        recapTimeout = null;
+      }
+      if (recapFrame) {
+        cancelAnimationFrame(recapFrame);
+        recapFrame = null;
+      }
+    }
+
+    function renderRecapProgress(currentPercent = 0) {
+      recapProgress.forEach((dot, index) => {
+        let fill = 0;
+        if (index < recapIndex) fill = 100;
+        else if (index === recapIndex) fill = Math.max(0, Math.min(100, currentPercent));
+        dot.style.setProperty("--recap-fill", `${fill}%`);
+        dot.classList.toggle("active", index <= recapIndex);
+        dot.classList.toggle("current", index === recapIndex);
+      });
+    }
+
+    function syncAutoplayControl() {
+      if (!recapAutoplayToggle) return;
+      recapAutoplayToggle.setAttribute("aria-pressed", recapAutoplayEnabled ? "true" : "false");
+      if (recapAutoplayPlayingLabel) recapAutoplayPlayingLabel.classList.toggle("hidden", !recapAutoplayEnabled);
+      if (recapAutoplayPausedLabel) recapAutoplayPausedLabel.classList.toggle("hidden", recapAutoplayEnabled);
+    }
+
+    function updateSoundtrackUi() {
+      if (!recapSoundtrack) return;
+      recapRoot.classList.toggle("recap-soundtrack-live", !recapSoundtrack.paused);
+      recapRoot.classList.toggle("recap-soundtrack-needs-gesture", soundtrackNeedsGesture);
+      if (recapSoundtrackToggle) {
+        recapSoundtrackToggle.setAttribute("aria-pressed", recapSoundtrack.paused ? "false" : "true");
+      }
+      if (recapSoundtrackMute) {
+        recapSoundtrackMute.setAttribute("aria-pressed", recapSoundtrack.muted ? "true" : "false");
+      }
+      if (recapSoundtrackPlaying) recapSoundtrackPlaying.classList.toggle("hidden", recapSoundtrack.paused);
+      if (recapSoundtrackPaused) recapSoundtrackPaused.classList.toggle("hidden", !recapSoundtrack.paused);
+      if (recapSoundtrackMuted) recapSoundtrackMuted.classList.toggle("hidden", !recapSoundtrack.muted);
+      if (recapSoundtrackUnmuted) recapSoundtrackUnmuted.classList.toggle("hidden", recapSoundtrack.muted);
+    }
+
+    async function attemptSoundtrackPlayback(fromGesture = false) {
+      if (!recapSoundtrack) return false;
+      if (fromGesture) soundtrackNeedsGesture = false;
+      try {
+        await recapSoundtrack.play();
+        soundtrackNeedsGesture = false;
+        updateSoundtrackUi();
+        return true;
+      } catch (_err) {
+        soundtrackNeedsGesture = true;
+        updateSoundtrackUi();
+        return false;
+      }
+    }
+
+    function tickRecapProgress() {
+      if (!recapAutoplayEnabled) return;
+      const duration = slideDuration(recapIndex);
+      const elapsed = Math.max(0, performance.now() - recapTimerStartedAt);
+      const used = Math.max(0, Math.min(duration, duration - recapRemainingMs + elapsed));
+      renderRecapProgress(duration > 0 ? (used / duration) * 100 : 0);
+      if (elapsed < recapRemainingMs - 18) {
+        recapFrame = requestAnimationFrame(tickRecapProgress);
+      }
+    }
+
+    function scheduleRecapAutoplay() {
+      clearRecapTimer();
+      renderRecapProgress(0);
+      if (!recapAutoplayEnabled || !recapSlides.length) return;
+      if (recapIndex >= recapSlides.length - 1) {
+        recapAutoplayEnabled = false;
+        syncAutoplayControl();
+        renderRecapProgress(100);
+        return;
+      }
+      recapRemainingMs = recapRemainingMs > 0 ? recapRemainingMs : slideDuration(recapIndex);
+      recapTimerStartedAt = performance.now();
+      recapTimeout = setTimeout(() => {
+        recapRemainingMs = slideDuration(recapIndex + 1);
+        moveRecap(1, { restartAutoplay: true });
+      }, recapRemainingMs);
+      recapFrame = requestAnimationFrame(tickRecapProgress);
+    }
+
+    function pauseRecapAutoplay() {
+      if (!recapAutoplayEnabled) return;
+      const elapsed = Math.max(0, performance.now() - recapTimerStartedAt);
+      recapRemainingMs = Math.max(220, recapRemainingMs - elapsed);
+      recapAutoplayEnabled = false;
+      clearRecapTimer();
+      syncAutoplayControl();
+      renderRecapProgress(((slideDuration(recapIndex) - recapRemainingMs) / slideDuration(recapIndex)) * 100);
+    }
+
+    function resumeRecapAutoplay() {
+      if (recapAutoplayEnabled) return;
+      recapAutoplayEnabled = true;
+      if (!recapRemainingMs || recapRemainingMs <= 0) recapRemainingMs = slideDuration(recapIndex);
+      syncAutoplayControl();
+      scheduleRecapAutoplay();
+    }
+
+    function renderRecap() {
+      if (!recapTrack || !recapSlides.length) return;
+      recapTrack.style.transform = `translateX(-${recapIndex * 100}%)`;
+      recapSlides.forEach((slide, index) => {
+        slide.classList.toggle("active", index === recapIndex);
+        if (index !== recapIndex) {
+          const content = slide.querySelector(".recap-slide__content");
+          if (content) content.scrollTop = 0;
+        }
+      });
+      if (recapPrev) recapPrev.disabled = recapIndex <= 0;
+      if (recapNext) {
+        const isLastSlide = recapIndex >= recapSlides.length - 1;
+        recapNext.disabled = false;
+        recapNext.textContent = isLastSlide ? (recapFinishLabel || recapNext.textContent) : (recapNextLabel || recapNext.textContent);
+        recapNext.setAttribute("aria-label", recapNext.textContent);
+      }
+      recapRoot.style.setProperty("--recap-index", String(recapIndex));
+      renderRecapProgress(0);
+      animateRecapCounters(recapSlides[recapIndex]);
+    }
+
+    function animateRecapCounters(slide) {
+      if (!slide) return;
+      if (recapCountFrame) {
+        cancelAnimationFrame(recapCountFrame);
+        recapCountFrame = null;
+      }
+      const counters = Array.from(slide.querySelectorAll("[data-recap-count]"));
+      if (!counters.length) return;
+      const formatterCache = new Map();
+      const makeFormatter = (decimals) => {
+        const key = String(decimals || 0);
+        if (!formatterCache.has(key)) {
+          formatterCache.set(key, new Intl.NumberFormat(recapNumberFormatLocale, {
+            minimumFractionDigits: decimals,
+            maximumFractionDigits: decimals,
+          }));
+        }
+        return formatterCache.get(key);
+      };
+      const items = counters.map((node) => ({
+        node,
+        target: Number(node.getAttribute("data-recap-count") || "0"),
+        decimals: Math.max(0, Number(node.getAttribute("data-recap-decimals") || "0")),
+        suffix: String(node.getAttribute("data-recap-suffix") || ""),
+      }));
+      const startedAt = performance.now();
+      const duration = 920;
+
+      const tick = (now) => {
+        const progress = Math.min(1, (now - startedAt) / duration);
+        const eased = 1 - Math.pow(1 - progress, 3);
+        items.forEach((item) => {
+          const currentValue = item.target * eased;
+          const rounded = item.decimals > 0 ? currentValue.toFixed(item.decimals) : String(Math.round(currentValue));
+          const numeric = Number(rounded);
+          item.node.textContent = `${makeFormatter(item.decimals).format(Number.isFinite(numeric) ? numeric : 0)}${item.suffix}`;
+        });
+        if (progress < 1) {
+          recapCountFrame = requestAnimationFrame(tick);
+        }
+      };
+      recapCountFrame = requestAnimationFrame(tick);
+    }
+
+    function moveRecap(delta, options = {}) {
+      const nextIndex = Math.max(0, Math.min(recapSlides.length - 1, recapIndex + delta));
+      if (nextIndex === recapIndex) return;
+      recapIndex = nextIndex;
+      recapRemainingMs = slideDuration(recapIndex);
+      renderRecap();
+      if (options.restartAutoplay !== false && recapAutoplayEnabled) {
+        scheduleRecapAutoplay();
+      }
+    }
+
+    if (recapPrev) recapPrev.addEventListener("click", () => moveRecap(-1, { restartAutoplay: true }));
+    if (recapNext) {
+      recapNext.addEventListener("click", () => {
+        if (recapIndex >= recapSlides.length - 1) {
+          recapGoHome();
+          return;
+        }
+        moveRecap(1, { restartAutoplay: true });
+      });
+    }
+    if (recapClose) recapClose.addEventListener("click", recapExit);
+    if (recapAutoplayToggle) {
+      recapAutoplayToggle.addEventListener("click", () => {
+        if (recapAutoplayEnabled) pauseRecapAutoplay();
+        else resumeRecapAutoplay();
+      });
+    }
+    if (recapSoundtrackToggle && recapSoundtrack) {
+      recapSoundtrackToggle.addEventListener("click", async () => {
+        if (recapSoundtrack.paused) {
+          await attemptSoundtrackPlayback(true);
+        } else {
+          recapSoundtrack.pause();
+          updateSoundtrackUi();
+        }
+      });
+    }
+    if (recapSoundtrackMute && recapSoundtrack) {
+      recapSoundtrackMute.addEventListener("click", () => {
+        recapSoundtrack.muted = !recapSoundtrack.muted;
+        updateSoundtrackUi();
+      });
+    }
+    if (recapSoundtrack) {
+      recapSoundtrack.volume = 0.34;
+      recapSoundtrack.addEventListener("play", updateSoundtrackUi);
+      recapSoundtrack.addEventListener("pause", updateSoundtrackUi);
+      recapSoundtrack.addEventListener("volumechange", updateSoundtrackUi);
+      window.setTimeout(() => {
+        attemptSoundtrackPlayback(false).catch(() => {});
+      }, 260);
+      const soundtrackGestureStart = () => {
+        if (!soundtrackNeedsGesture || !recapSoundtrack.paused) return;
+        attemptSoundtrackPlayback(true).catch(() => {});
+      };
+      window.addEventListener("pointerdown", soundtrackGestureStart, { passive: true });
+      window.addEventListener("keydown", soundtrackGestureStart);
+      updateSoundtrackUi();
+    }
+
+    recapRoot.addEventListener("pointerdown", (event) => {
+      if (event.pointerType === "mouse" && event.button !== 0) return;
+      recapTouch = { startX: event.clientX, startY: event.clientY };
+    }, { passive: true });
+
+    recapRoot.addEventListener("pointermove", (event) => {
+      const rect = recapRoot.getBoundingClientRect();
+      const x = Math.max(0, Math.min(100, ((event.clientX - rect.left) / Math.max(rect.width, 1)) * 100));
+      const y = Math.max(0, Math.min(100, ((event.clientY - rect.top) / Math.max(rect.height, 1)) * 100));
+      recapRoot.style.setProperty("--recap-pointer-x", `${x}%`);
+      recapRoot.style.setProperty("--recap-pointer-y", `${y}%`);
+    }, { passive: true });
+
+    recapRoot.addEventListener("pointerup", (event) => {
+      if (!recapTouch) return;
+      const dx = event.clientX - recapTouch.startX;
+      const dy = event.clientY - recapTouch.startY;
+      recapTouch = null;
+      if (Math.abs(dy) > 100 && Math.abs(dy) > Math.abs(dx) && dy > 0 && event.clientY < 180) {
+        recapExit();
+        return;
+      }
+      if (Math.abs(dx) < 50 || Math.abs(dx) < Math.abs(dy)) return;
+      moveRecap(dx < 0 ? 1 : -1, { restartAutoplay: true });
+    }, { passive: true });
+
+    window.addEventListener("keydown", (event) => {
+      if (!document.body.contains(recapRoot)) return;
+      if (event.key === "ArrowRight") moveRecap(1, { restartAutoplay: true });
+      if (event.key === "ArrowLeft") moveRecap(-1, { restartAutoplay: true });
+      if (event.key === "Escape") recapExit();
+      if (event.key === " ") {
+        event.preventDefault();
+        if (recapAutoplayEnabled) pauseRecapAutoplay();
+        else resumeRecapAutoplay();
+      }
+    });
+
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden" && recapAutoplayEnabled) {
+        recapPauseOnHide = true;
+        pauseRecapAutoplay();
+      } else if (document.visibilityState === "visible" && recapPauseOnHide) {
+        recapPauseOnHide = false;
+        resumeRecapAutoplay();
+      }
+    });
+
+    recapRemainingMs = slideDuration(0);
+    syncAutoplayControl();
+    renderRecap();
+    scheduleRecapAutoplay();
+  }
 })();
 
 

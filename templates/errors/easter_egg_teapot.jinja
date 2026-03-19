@@ -114,6 +114,9 @@
   let robotRestartCooldown = 0;
   let runUsedRobot = false;
   let scoreSubmittedForRun = false;
+  const mobileDuckHoldMs = 190;
+  let mobilePressState = null;
+  let mobilePressTimer = null;
 
   const obstacles = [];
   const collectibles = [];
@@ -770,11 +773,76 @@
     startRun();
   }
 
+  function clearMobilePress(options = {}) {
+    const releaseDuck = options.releaseDuck !== false;
+    if (mobilePressTimer) {
+      window.clearTimeout(mobilePressTimer);
+      mobilePressTimer = null;
+    }
+    if (releaseDuck && mobilePressState && mobilePressState.ducking) {
+      setDuck(false);
+    }
+    mobilePressState = null;
+  }
+
+  function beginMobilePress(event) {
+    if (!event) return;
+    if (typeof event.button === "number" && event.button !== 0) return;
+    if (event.cancelable) event.preventDefault();
+    if (robotEnabled) setRobotEnabled(false);
+    clearMobilePress();
+    mobilePressState = {
+      pointerId: typeof event.pointerId === "number" ? event.pointerId : null,
+      ducking: false
+    };
+    mobilePressTimer = window.setTimeout(() => {
+      if (!mobilePressState) return;
+      if (!started || over || dino.jumping) return;
+      setDuck(true);
+      mobilePressState.ducking = dino.ducking;
+    }, mobileDuckHoldMs);
+  }
+
+  function endMobilePress(event) {
+    if (!mobilePressState) return;
+    if (
+      event
+      && typeof event.pointerId === "number"
+      && typeof mobilePressState.pointerId === "number"
+      && event.pointerId !== mobilePressState.pointerId
+    ) {
+      return;
+    }
+    const usedDuck = !!mobilePressState.ducking;
+    clearMobilePress({ releaseDuck: true });
+    if (!usedDuck) {
+      startRun();
+    }
+  }
+
   if (window.PointerEvent) {
-    canvas.addEventListener("pointerdown", handleCanvasPress, { passive: false });
+    canvas.addEventListener("pointerdown", (event) => {
+      if (event.pointerType === "touch" || event.pointerType === "pen") {
+        beginMobilePress(event);
+        return;
+      }
+      handleCanvasPress(event);
+    }, { passive: false });
+    canvas.addEventListener("pointerup", (event) => {
+      if (event.pointerType === "touch" || event.pointerType === "pen") {
+        endMobilePress(event);
+      }
+    }, { passive: false });
+    canvas.addEventListener("pointercancel", (event) => {
+      if (event.pointerType === "touch" || event.pointerType === "pen") {
+        clearMobilePress({ releaseDuck: true });
+      }
+    }, { passive: true });
   } else {
     canvas.addEventListener("mousedown", handleCanvasPress);
-    canvas.addEventListener("touchstart", handleCanvasPress, { passive: false });
+    canvas.addEventListener("touchstart", beginMobilePress, { passive: false });
+    canvas.addEventListener("touchend", endMobilePress, { passive: false });
+    canvas.addEventListener("touchcancel", () => clearMobilePress({ releaseDuck: true }), { passive: true });
   }
   if (robotToggleButton) {
     robotToggleButton.addEventListener("click", () => {

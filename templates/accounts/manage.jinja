@@ -19,6 +19,7 @@
       {% if not me.require_password_change %}
       <a href="#account-integrations">{{ t('account.section_integrations') }}</a>
       <a href="#account-stats">{{ t('account.section_stats') }}</a>
+      <a href="#account-recaps">{{ t('account.section_recaps') }}</a>
       <a href="#account-preferences">{{ t('account.section_preferences') }}</a>
       <a href="#account-export">{{ t('account.section_export') }}</a>
       <a href="#account-danger">{{ t('account.section_danger') }}</a>
@@ -121,6 +122,70 @@
       </div>
       {% endif %}
     </section>
+
+    {% if not me.require_password_change %}
+    <section id="account-recaps" class="card dashboard-panel">
+      <h2>{{ t('account.section_recaps') }}</h2>
+      <p class="muted">{{ t('recap.manage_intro') }}</p>
+      <div class="security-split">
+        <article class="sub-card">
+          <h3>{{ t('recap.generate_annual_title') }}</h3>
+          <p class="muted small">{{ t('recap.generate_annual_hint') }}</p>
+          <form method="post" action="{{ recap_generate_url }}" class="stack">
+            <input type="hidden" name="mode" value="annual">
+            <label>{{ t('recap.year_label') }}
+              <select name="year">
+                {% for year in available_recap_years %}
+                <option value="{{ year }}">{{ year }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <button type="submit">{{ t('recap.generate_cta') }}</button>
+          </form>
+        </article>
+
+        <article class="sub-card">
+          <h3>{{ t('recap.generate_custom_title') }}</h3>
+          <p class="muted small">{{ t('recap.generate_custom_hint') }}</p>
+          <form method="post" action="{{ recap_generate_url }}" class="stack">
+            <input type="hidden" name="mode" value="custom">
+            <label>{{ t('recap.start_date') }}
+              <input type="date" name="start_date" required>
+            </label>
+            <label>{{ t('recap.end_date') }}
+              <input type="date" name="end_date" required>
+            </label>
+            <button type="submit" class="btn secondary">{{ t('recap.generate_custom_cta') }}</button>
+          </form>
+        </article>
+      </div>
+
+      <div class="top-gap">
+        <h3>{{ t('recap.recent_title') }}</h3>
+        {% if recent_recaps %}
+        <ul class="playlist-list recap-list">
+          {% for item in recent_recaps %}
+          <li>
+            <div>
+              <strong>{{ item.title }}</strong>
+              <p class="muted small">
+                {{ item.updated_at.strftime('%Y-%m-%d %H:%M') if item.updated_at else '' }}
+                - {{ item.plays_total }} {{ t('recap.plays_label') }}
+                - {{ item.basis_label if item.basis_label is defined else item.basis }}
+              </p>
+            </div>
+            <div class="row-actions">
+              <a class="btn secondary" href="{{ url_for('accounts.view_recap', recap_id=item.id) }}">{{ t('recap.open_cta') }}</a>
+            </div>
+          </li>
+          {% endfor %}
+        </ul>
+        {% else %}
+        <p class="muted small">{{ t('recap.none_yet') }}</p>
+        {% endif %}
+      </div>
+    </section>
+    {% endif %}
 
     <section id="account-security" class="card dashboard-panel">
       <h2>{{ t('account.section_security') }}</h2>

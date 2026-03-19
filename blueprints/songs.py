@@ -50,6 +50,7 @@ from auth_helpers import (
 )
 import extensions
 from i18n import tr
+from recap_helpers import record_listening_event
 from server_cache import cached_popular_song_ids, cached_youtube_audio_info, queue_youtube_audio_cache
 
 bp = Blueprint("songs", __name__, url_prefix="/songs")
@@ -1572,6 +1573,13 @@ def update_progress(song_id):
         raise_http_error_for_mongo_failure(exc)
         current_app.logger.exception("Failed to update listening history safely")
         return jsonify({"ok": False}), 503
+    try:
+        if started:
+            record_listening_event(user_oid, song_oid, "started", position=position, duration=duration)
+        if completed:
+            record_listening_event(user_oid, song_oid, "completed", position=position, duration=duration)
+    except Exception:
+        current_app.logger.warning("Unable to record listening recap event", exc_info=True)
     if started and is_youtube_song(song):
         queue_youtube_audio_cache(current_app._get_current_object(), song)
     return jsonify({"ok": True})

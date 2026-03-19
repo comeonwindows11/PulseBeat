@@ -73,7 +73,15 @@ from auth_helpers import (
     username_policy_ok,
     youtube_playlist_visibility_clause,
 )
-from i18n import tr
+from i18n import get_lang, tr
+from recap_helpers import (
+    RECAP_TYPE_ANNUAL,
+    RECAP_TYPE_CUSTOM,
+    create_or_refresh_recap,
+    get_available_recap_years,
+    get_recap_document,
+    list_user_recaps,
+)
 from server_cache import cached_public_profile_payload
 
 bp = Blueprint("accounts", __name__)
@@ -1581,6 +1589,163 @@ def _external_provider_is_configured(provider: str) -> bool:
         current_app.config.get("YOUTUBE_SYNC_CLIENT_ID", "").strip()
         and current_app.config.get("YOUTUBE_SYNC_CLIENT_SECRET", "").strip()
     )
+
+
+RECAP_MONTH_NAMES = {
+    "fr": ["Jan", "Fev", "Mar", "Avr", "Mai", "Juin", "Juil", "Aout", "Sep", "Oct", "Nov", "Dec"],
+    "en": ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
+}
+
+
+def _recap_bucket_label(bucket: str):
+    text = str(bucket or "").strip()
+    if len(text) != 7 or "-" not in text:
+        return text
+    try:
+        year, month = text.split("-", 1)
+        month_index = max(1, min(12, int(month))) - 1
+    except Exception:
+        return text
+    labels = RECAP_MONTH_NAMES.get(get_lang(), RECAP_MONTH_NAMES["en"])
+    return f"{labels[month_index]} {year}"
+
+
+def _recap_basis_label(basis: str):
+    return tr("recap.basis.events") if str(basis or "").strip().lower() == "events" else tr("recap.basis.approx")
+
+
+def _recap_public_data(doc, user_oid=None):
+    if not doc:
+        return None
+    metrics = doc.get("metrics", {}) if isinstance(doc.get("metrics"), dict) else {}
+    monthly_breakdown = []
+    for item in doc.get("monthly_breakdown", []) or []:
+        bucket = str((item or {}).get("bucket", "") or "").strip()
+        monthly_breakdown.append(
+            {
+                "bucket": bucket,
+                "label": _recap_bucket_label(bucket),
+                "plays": int((item or {}).get("plays", 0) or 0),
+            }
+        )
+    song_map = {}
+    top_song_ids = []
+    for item in doc.get("top_songs", []) or []:
+        song_oid = parse_object_id((item or {}).get("song_id"))
+        if song_oid:
+            top_song_ids.append(song_oid)
+    if top_song_ids:
+        for row in extensions.songs_col.find({"_id": {"$in": top_song_ids}}):
+            valid_song = validate_or_purge_document("songs", row, context="accounts._recap_public_data.song")
+            if valid_song:
+                song_map[valid_song["_id"]] = valid_song
+
+    top_songs = []
+    soundtrack = None
+    for item in doc.get("top_songs", []) or []:
+        safe_item = dict(item or {})
+        song_oid = parse_object_id(safe_item.get("song_id"))
+        song_doc = song_map.get(song_oid) if song_oid else None
+        serialized = None
+        if song_doc and can_access_song(song_doc, user_oid):
+            try:
+                serialized = serialize_song(song_doc, user_oid)
+            except Exception:
+                serialized = None
+        top_entry = {
+            "song_id": safe_item.get("song_id", ""),
+            "title": safe_item.get("title", tr("defaults.untitled")),
+            "artist": safe_item.get("artist", tr("defaults.unknown_artist")),
+            "genre": safe_item.get("genre", ""),
+            "plays": int(safe_item.get("plays", 0) or 0),
+            "detail_url": url_for("songs.song_detail", song_id=str(song_oid)) if song_oid else "",
+            "stream_url": "",
+            "is_audio_playable": False,
+            "playback_mode": "",
+        }
+        if serialized:
+            top_entry["is_audio_playable"] = bool(serialized.get("is_audio_playable", False))
+            top_entry["playback_mode"] = serialized.get("playback_mode", "")
+            top_entry["stream_url"] = song_stream_url(str(song_oid)) if top_entry["is_audio_playable"] else ""
+            if not soundtrack and top_entry["stream_url"]:
+                soundtrack = {
+                    "song_id": top_entry["song_id"],
+                    "title": top_entry["title"],
+                    "artist": top_entry["artist"],
+                    "detail_url": top_entry["detail_url"],
+                    "stream_url": top_entry["stream_url"],
+                }
+        top_songs.append(top_entry)
+
+    summary = dict(doc.get("summary", {}) or {})
+    best_month = summary.get("best_month") if isinstance(summary.get("best_month"), dict) else None
+    if best_month:
+        summary["best_month"] = {
+            "bucket": str(best_month.get("bucket", "") or ""),
+            "label": _recap_bucket_label(best_month.get("bucket", "")),
+            "plays": int(best_month.get("plays", 0) or 0),
+        }
+    plays_total = int(metrics.get("plays_total", 0) or 0)
+    completed_plays = int(metrics.get("completed_plays", 0) or 0)
+    top_song_summary = summary.get("top_song") if isinstance(summary.get("top_song"), dict) else None
+    top_song_share = 0
+    if plays_total > 0 and top_song_summary:
+        top_song_share = round((int(top_song_summary.get("plays", 0) or 0) / plays_total) * 100, 1)
+    return {
+        "id": str(doc.get("_id")),
+        "title": doc.get("title", "PulseBeat Recap"),
+        "recap_type": doc.get("recap_type", RECAP_TYPE_CUSTOM),
+        "year": doc.get("year"),
+        "period_start": doc.get("period_start", ""),
+        "period_end": doc.get("period_end", ""),
+        "basis": doc.get("basis", "history_approx"),
+        "basis_label": _recap_basis_label(doc.get("basis", "history_approx")),
+        "updated_at": (
+            (doc.get("updated_at") or doc.get("created_at")).isoformat()
+            if isinstance((doc.get("updated_at") or doc.get("created_at")), datetime)
+            else (doc.get("updated_at") or doc.get("created_at"))
+        ),
+        "plays_total": plays_total,
+        "songs_distinct": int(metrics.get("songs_distinct", 0) or 0),
+        "artists_distinct": int(metrics.get("artists_distinct", 0) or 0),
+        "completed_plays": completed_plays,
+        "minutes_listened": float(metrics.get("minutes_listened", 0) or 0),
+        "data_points": int(metrics.get("data_points", 0) or 0),
+        "completion_rate": round((completed_plays / plays_total) * 100, 1) if plays_total > 0 else 0.0,
+        "top_song_share": top_song_share,
+        "top_songs": top_songs,
+        "top_artists": list(doc.get("top_artists", []) or []),
+        "top_genres": list(doc.get("top_genres", []) or []),
+        "monthly_breakdown": monthly_breakdown,
+        "summary": summary,
+        "soundtrack": soundtrack,
+    }
+
+
+def _write_recap_csv(recap):
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(["section", "name", "value", "plays"])
+    writer.writerow(["meta", "title", recap.get("title", ""), ""])
+    writer.writerow(["meta", "recap_type", recap.get("recap_type", ""), ""])
+    writer.writerow(["meta", "year", recap.get("year", ""), ""])
+    writer.writerow(["meta", "period_start", recap.get("period_start", ""), ""])
+    writer.writerow(["meta", "period_end", recap.get("period_end", ""), ""])
+    writer.writerow(["meta", "basis", recap.get("basis", ""), ""])
+    writer.writerow(["metric", "plays_total", recap.get("plays_total", 0), ""])
+    writer.writerow(["metric", "songs_distinct", recap.get("songs_distinct", 0), ""])
+    writer.writerow(["metric", "artists_distinct", recap.get("artists_distinct", 0), ""])
+    writer.writerow(["metric", "completed_plays", recap.get("completed_plays", 0), ""])
+    writer.writerow(["metric", "minutes_listened", recap.get("minutes_listened", 0), ""])
+    for item in recap.get("top_songs", []) or []:
+        writer.writerow(["top_song", f"{item.get('title', '')} - {item.get('artist', '')}", item.get("song_id", ""), item.get("plays", 0)])
+    for item in recap.get("top_artists", []) or []:
+        writer.writerow(["top_artist", item.get("name", ""), "", item.get("plays", 0)])
+    for item in recap.get("top_genres", []) or []:
+        writer.writerow(["top_genre", item.get("name", ""), "", item.get("plays", 0)])
+    for item in recap.get("monthly_breakdown", []) or []:
+        writer.writerow(["month", item.get("label", item.get("bucket", "")), item.get("bucket", ""), item.get("plays", 0)])
+    return buffer.getvalue()
 
 
 def _external_redirect_uri(provider: str) -> str:
@@ -3614,6 +3779,8 @@ def manage_account():
     user = extensions.users_col.find_one({"_id": user_oid})
     my_songs_count = extensions.songs_col.count_documents({"created_by": user_oid})
     creator_stats = _build_creator_stats(user_oid)
+    available_recap_years = get_available_recap_years(user_oid)
+    recent_recaps = list_user_recaps(user_oid, limit=10)
 
     blocked_song_ids = [sid for sid in (user.get("recommendation_blocked_song_ids", []) or []) if sid]
     songs_map = {
@@ -3743,6 +3910,8 @@ def manage_account():
         },
         my_songs_count=my_songs_count,
         creator_stats=creator_stats,
+        available_recap_years=available_recap_years,
+        recent_recaps=recent_recaps,
         blocked_songs=blocked_songs,
         blocked_artists=blocked_artists,
         youtube_integration_enabled=youtube_enabled,
@@ -3759,7 +3928,85 @@ def manage_account():
         username_update_url=url_for("accounts.update_username"),
         primary_email_update_url=url_for("accounts.update_primary_email"),
         backup_email_update_url=url_for("accounts.update_backup_email"),
+        recap_generate_url=url_for("accounts.generate_recap"),
         show_two_factor_prompt=_recovery_prompt_pending(user),
+    )
+
+
+@bp.route("/account/recaps/generate", methods=["POST"])
+@login_required
+def generate_recap():
+    user_oid = get_session_user_oid()
+    mode = str(request.form.get("mode", RECAP_TYPE_ANNUAL) or RECAP_TYPE_ANNUAL).strip().lower()
+    if mode == RECAP_TYPE_ANNUAL:
+        year_raw = str(request.form.get("year", "") or "").strip()
+        if not year_raw.isdigit():
+            flash(tr("recap.generate_invalid"), "danger")
+            return redirect(url_for("accounts.manage_account", _anchor="account-recaps"))
+        recap_doc = create_or_refresh_recap(user_oid, RECAP_TYPE_ANNUAL, year=int(year_raw), trigger="manual", force=True)
+    else:
+        start_date = str(request.form.get("start_date", "") or "").strip()
+        end_date = str(request.form.get("end_date", "") or "").strip()
+        recap_doc = create_or_refresh_recap(
+            user_oid,
+            RECAP_TYPE_CUSTOM,
+            start_date=start_date,
+            end_date=end_date,
+            trigger="manual",
+            force=True,
+        )
+
+    if not recap_doc:
+        flash(tr("recap.generate_empty"), "warning")
+        return redirect(url_for("accounts.manage_account", _anchor="account-recaps"))
+
+    flash(tr("recap.generate_success"), "success")
+    return redirect(url_for("accounts.view_recap", recap_id=str(recap_doc.get("_id"))))
+
+
+@bp.route("/account/recaps/<recap_id>")
+@login_required
+def view_recap(recap_id):
+    user_oid = get_session_user_oid()
+    recap_doc = get_recap_document(user_oid, recap_id)
+    if not recap_doc:
+        abort(404)
+    recap = _recap_public_data(recap_doc, user_oid=user_oid)
+    if not recap:
+        abort(404)
+    return render_template(
+        "accounts/recap.jinja",
+        recap=recap,
+        hide_global_chrome=True,
+        hide_global_player=True,
+        page_body_class="recap-experience-page",
+        recap_exit_url=url_for("accounts.manage_account", _anchor="account-recaps"),
+    )
+
+
+@bp.route("/account/recaps/<recap_id>/export")
+@login_required
+def export_recap(recap_id):
+    user_oid = get_session_user_oid()
+    recap_doc = get_recap_document(user_oid, recap_id)
+    if not recap_doc:
+        abort(404)
+    recap = _recap_public_data(recap_doc, user_oid=user_oid)
+    export_format = str(request.args.get("format", "json") or "json").strip().lower()
+    safe_name = re.sub(r"[^a-zA-Z0-9_-]+", "-", recap.get("title", "pulsebeat-recap")).strip("-").lower() or "pulsebeat-recap"
+
+    if export_format == "csv":
+        csv_payload = _write_recap_csv(recap)
+        return Response(
+            csv_payload,
+            mimetype="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f"attachment; filename={safe_name}.csv"},
+        )
+
+    return Response(
+        json.dumps(recap, ensure_ascii=False, indent=2, default=str),
+        mimetype="application/json; charset=utf-8",
+        headers={"Content-Disposition": f"attachment; filename={safe_name}.json"},
     )
 
 

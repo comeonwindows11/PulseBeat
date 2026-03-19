@@ -2166,8 +2166,7 @@ Les comptes connectés via Google OAuth ont un comportement spécifique :
 
 PulseBeat est un projet que tu peux utiliser librement dans un cadre **personnel**.
 
-- l'usage personnel est gratuit
-- l'usage personnel le restera toujours
+- l'usage personnel est gratuit et le restera toujours
 - la modification du code est autorisée
 - la modification du code est même encouragée pour adapter PulseBeat à tes besoins
 

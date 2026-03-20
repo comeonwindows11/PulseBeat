@@ -25,6 +25,7 @@ Plateforme de streaming musical hybride en `Flask` + `Jinja`, inspirée de YouTu
 - Écran de blocage de session suspecte renforcé avec bandeau d'avertissement visuel, animation d'alerte et tentative de son d'avertissement au chargement
 - Watchdog d'intégrité MongoDB : tentative d'auto-récupération des documents invalides, suppression en dernier recours, alerte admins et fallback `422`
 - Détection de stockage saturé avec erreur `507`, verrouillage global de la plateforme jusqu'au redémarrage, et blocage du setup tant qu'un espace minimal n'est pas disponible
+- Résilience runtime avec gestion des erreurs `503`, `408` et `429` : limp mode, surcharge latched, timeout adaptatif selon la qualité réseau perçue, watchdog anti-robot et honeypot de formulaires
 - Ajout de chansons par URL ou upload (avec détection automatique des balises ID3)
 - Stockage optionnel des chansons publiques dans MongoDB GridFS avec cache local reconstructible côté serveur
 - Enrichissement automatique artiste/genre après upload via recherche en ligne
@@ -2137,6 +2138,275 @@ Cette approche est particulièrement utile avec :
 - des caches audio locaux
 - des uploads utilisateur
 - des clusters MongoDB à quota limité comme certains plans gratuits Atlas
+
+## Gestion des erreurs 503, 408 et 429
+
+PulseBeat gère maintenant séparément les problèmes de surcharge, de latence excessive et de comportement automatisé trop agressif.
+
+L'objectif est double :
+
+- garder l'instance en vie aussi longtemps que possible sans la laisser s'effondrer silencieusement
+- protéger la plateforme contre les rafales de requêtes non humaines ou les connexions franchement instables
+
+### Erreur 503 : serveur fatigué, mode limp et mode latched
+
+Quand PulseBeat estime qu'il est en surcharge ou qu'un service essentiel devient trop instable, il peut renvoyer `503 Service Unavailable`.
+
+Le message utilisateur reste volontairement léger :
+
+- le serveur est "fatigué"
+- il est "un peu étourdi"
+- il a décidé de prendre une courte pause
+
+En interne, PulseBeat gère trois états :
+
+- `normal`
+- `limp`
+- `latched`
+
+#### Mode normal
+
+- toutes les routes fonctionnent normalement
+- les compteurs de charge et d'incidents sont observés en arrière-plan
+
+#### Mode limp
+
+Si PulseBeat détecte une surcharge importante mais encore potentiellement récupérable :
+
+- il passe en `limp mode`
+- seules les routes les plus légères et utiles à la récupération restent autorisées
+- les routes plus lourdes sont rejetées avec `503`
+- PulseBeat attend un court délai de refroidissement
+- puis essaye automatiquement de revenir en `normal` si la charge est retombée
+
+Le `limp mode` sert à donner une vraie chance de récupération automatique à l'instance sans continuer à accepter aveuglément toute la charge.
+
+#### Mode latched
+
+Si les incidents de surcharge se répètent trop vite ou trop fort :
+
+- PulseBeat passe en `latched`
+- l'instance considère alors qu'elle ne peut plus revenir proprement seule à un état sain
+- un redémarrage administrateur devient nécessaire
+
+Le mode `latched` ne se retire pas tout seul pendant l'exécution.
+
+#### Comment les admins sont informés
+
+Lors d'une entrée en `limp` ou `latched`, PulseBeat tente de prévenir les admins par plusieurs canaux :
+
+- mise à jour de `system_status` avec l'état courant du watchdog de service
+- entrée dans `admin_audit`
+- courriel d'alerte admin
+- carte d'alerte visible dans le dashboard admin dès que l'interface est consultable
+
+Cela permet :
+
+- une trace persistante côté base
+- une alerte visible dans l'interface
+- une notification hors bande par courriel
+
+#### Que déclenche concrètement le 503
+
+La décision est basée sur des signaux de surcharge côté instance, par exemple :
+
+- trop de requêtes simultanées
+- trop de requêtes sur une courte fenêtre
+- accumulation de requêtes anormalement lentes
+- certaines erreurs MongoDB non liées au stockage saturé
+
+PulseBeat ne prétend pas détecter un DDoS "parfaitement", mais il essaie de réduire la surface d'impact et de laisser un chemin de récupération avant de demander un redémarrage.
+
+### Erreur 408 : timeout adaptatif et best effort réseau
+
+PulseBeat applique un timeout de base de `20` secondes (`REQUEST_TIMEOUT_SECONDS`).
+
+Cependant, le comportement n'est pas complètement rigide.
+
+#### Cas nominal
+
+Si la requête dépasse le budget de temps autorisé :
+
+- PulseBeat transforme la réponse en `408 Request Timeout` quand cela peut être fait proprement
+- surtout sur les lectures / API / routes sûres
+
+#### Connexions lentes mais plausibles
+
+PulseBeat essaie de distinguer une connexion "lente mais raisonnable" d'une connexion plus franchement instable.
+
+Pour cela, il utilise en best effort :
+
+- certains indices de qualité réseau envoyés par le navigateur ou le client quand ils existent
+- l'historique récent de temps de réponse du même acteur
+
+Quand le serveur voit plutôt des signaux cohérents avec une connexion lente :
+
+- il donne plus de marge avant timeout
+- le budget peut être étendu au-delà des `20` secondes de base
+
+Exemple de logique :
+
+- mode économie de données
+- réseau mobile lent
+- RTT élevée
+- débit annoncé faible
+
+#### Connexions plutôt instables
+
+Si PulseBeat observe au contraire des timeouts ou coupures répétées sans signe crédible d'une simple lenteur stable :
+
+- le budget de temps peut être raccourci
+- le `408` peut arriver avant `20` secondes
+
+L'idée est de ne pas laisser une requête monopoliser inutilement des ressources quand le serveur est presque certain qu'il ne s'agit pas d'une simple connexion lente mais d'un flux peu fiable ou cassé.
+
+#### Limites assumées
+
+Le `408` de PulseBeat reste un mécanisme **best effort** :
+
+- Flask ne permet pas d'interrompre magiquement et sans risque n'importe quel traitement serveur déjà bien avancé
+- le système fait donc au mieux pour couper proprement les réponses trop longues sans rendre l'application plus fragile
+
+### Erreur 429 : watchdog anti-robot
+
+PulseBeat dispose maintenant d'un watchdog anti-robot destiné à freiner les activités manifestement trop rapides pour être confortablement humaines.
+
+Le message utilisateur garde volontairement une touche d'humour :
+
+- l'utilisateur est "en feu aujourd'hui"
+- mais un peu trop vite pour que le serveur suive
+
+#### Philosophie
+
+Le watchdog cherche un équilibre :
+
+- assez strict pour ralentir les scripts agressifs
+- assez tolérant pour ne pas punir des utilisateurs normaux ou le trafic légitime du lecteur
+
+Certaines routes naturellement bavardes côté player sont explicitement exclues de cette logique pour éviter les faux positifs.
+
+#### Détection
+
+PulseBeat observe notamment :
+
+- le volume de requêtes sur de courtes fenêtres
+- les rafales très compactes
+- le volume de requêtes d'écriture
+- d'autres signaux d'activité automatisée trop dense
+
+La documentation ne détaille volontairement pas tous les seuils ni tous les critères exacts, afin d'éviter d'offrir un guide de contournement aux robots.
+
+#### Réaction
+
+Au premier niveau :
+
+- PulseBeat renvoie `429`
+- un blocage temporaire court peut être appliqué
+- un log d'audit et un état admin peuvent être produits
+
+Au second niveau :
+
+- PulseBeat exige une vérification anti-robot avant de laisser l'acteur continuer
+- pour un compte connecté, cette exigence peut être mémorisée côté compte
+- pour un invité, elle est mémorisée côté session
+
+#### Vérification anti-robot
+
+La vérification actuelle est un challenge simple de type captcha léger / question de contrôle.
+
+Si la vérification réussit :
+
+- les restrictions temporaires sont levées
+- l'utilisateur peut reprendre une activité normale
+
+#### Exemption du root admin
+
+Le compte root admin n'est jamais bloqué par le `429` ni par la vérification anti-robot.
+
+Cette exemption est volontaire pour éviter qu'un faux positif verrouille l'accès au compte d'administration principal.
+
+### Honeypot de formulaires
+
+En plus du watchdog 429, PulseBeat ajoute une couche supplémentaire sur les formulaires `POST`.
+
+Chaque formulaire contient désormais au moins un champ caché non fonctionnel, invisible pour un utilisateur normal.
+
+Le README mentionne volontairement l'existence de ce mécanisme, mais ne documente pas l'identité exacte de ces champs.
+
+#### Si le honeypot est déclenché
+
+Pour un compte utilisateur standard :
+
+- le compte est banni automatiquement
+- le ban reste en place jusqu'à intervention d'un admin
+- la raison de ban stockée est :
+  - `Utilisation de scripts automatisé ou d'un robot suspectée`
+
+Cette logique est volontairement plus sévère qu'un simple `429`, car remplir ce type de champ est considéré comme un signal beaucoup plus fort d'automatisation bête ou malveillante.
+
+#### Exception root admin
+
+Le root admin n'est pas auto-banni par ce mécanisme.
+
+L'événement peut être journalisé, mais le compte root reste utilisable pour éviter un blocage administratif accidentel.
+
+### Routes de test locales
+
+Pour faciliter la validation, PulseBeat expose temporairement plusieurs routes de test locales :
+
+- `/debug/test/503/limp`
+- `/debug/test/503/latched`
+- `/debug/test/503/reset`
+- `/debug/test/408`
+- `/debug/test/429`
+
+Notes :
+
+- elles sont réservées aux accès locaux
+- la route `503/reset` permet de sortir des modes de test `limp` ou `latched`
+- la route de test `429` n'est pas punitive par elle-même
+- un mode `challenge` peut aussi être demandé sur la route de test `429` sans faire progresser le vrai niveau de sanction du compte
+
+### Variables d'environnement associées
+
+- `REQUEST_TIMEOUT_SECONDS`
+  - budget de base du timeout applicatif
+- `SERVICE_OVERLOAD_ACTIVE_REQUESTS`
+  - seuil de requêtes actives simultanées avant réaction watchdog
+- `SERVICE_OVERLOAD_BURST_REQUESTS`
+  - seuil de rafale sur fenêtre courte
+- `SERVICE_BURST_WINDOW_SECONDS`
+  - taille de la fenêtre de rafale
+- `SERVICE_OVERLOAD_SLOW_REQUESTS`
+  - nombre de requêtes lentes tolérées sur la fenêtre lente
+- `SERVICE_SLOW_WINDOW_SECONDS`
+  - fenêtre d'observation des requêtes lentes
+- `SERVICE_LIMP_MODE_SECONDS`
+  - durée minimale d'un limp mode avant tentative de récupération
+- `SERVICE_LATCH_OVERLOAD_EVENTS`
+  - nombre d'événements de surcharge avant passage en `latched`
+- `SERVICE_LATCH_WINDOW_SECONDS`
+  - fenêtre de comptage des événements de surcharge
+- `SERVICE_RECOVER_ACTIVE_REQUESTS`
+  - niveau de requêtes actives considéré assez bas pour une récupération
+- `SERVICE_RECOVER_BURST_REQUESTS`
+  - niveau de trafic récent considéré assez calme pour une récupération
+- `ROBOT_WATCHDOG_WINDOW_SECONDS`
+  - fenêtre principale du watchdog anti-robot
+- `ROBOT_WATCHDOG_MAX_REQUESTS`
+  - volume de requêtes toléré sur cette fenêtre
+- `ROBOT_WATCHDOG_WRITE_WINDOW_SECONDS`
+  - fenêtre d'observation des écritures
+- `ROBOT_WATCHDOG_MAX_WRITE_REQUESTS`
+  - volume d'écritures toléré sur cette fenêtre
+- `ROBOT_WATCHDOG_BURST_WINDOW_SECONDS`
+  - fenêtre ultra-courte pour détecter les rafales anormales
+- `ROBOT_WATCHDOG_MAX_BURST_REQUESTS`
+  - seuil de rafale très dense
+- `ROBOT_WATCHDOG_BLOCK_SECONDS`
+  - durée de blocage temporaire de premier niveau
+- `ROBOT_WATCHDOG_CHALLENGE_BLOCK_SECONDS`
+  - durée de blocage pendant une vérification anti-robot
 
 ### Ce qui a été étendu dans la dernière passe
 

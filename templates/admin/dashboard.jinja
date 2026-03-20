@@ -48,6 +48,15 @@
         <p class="muted small">{{ invalid_document_status.updated_at }}</p>
       </div>
       {% endif %}
+
+      {% if show_service_watchdog_alert %}
+      <div class="card alert-card admin-alert-card" data-admin-alert-key="{{ service_watchdog_alert_key }}">
+        <button type="button" class="admin-alert-dismiss-btn" aria-label="{{ t('admin.dismiss_alert') }}" title="{{ t('admin.dismiss_alert') }}">×</button>
+        <h3>{{ t('admin.service_watchdog_alert') }}</h3>
+        <p>{{ service_watchdog_status.message }}</p>
+        <p class="muted small">{{ service_watchdog_status.updated_at }}</p>
+      </div>
+      {% endif %}
     </section>
 
     <div
@@ -183,6 +192,9 @@
             <strong>{{ user.username }}</strong> ({{ user.email }}) {% if user.is_root_admin %}[root admin]{% elif user.is_admin %}[admin]{% endif %}
             {% if user.banned_until and user.banned_until > now %}
             <p class="muted small">{{ t('admin.banned_until') }}: {{ user.banned_until }}</p>
+            {% if user.ban_reason %}
+            <p class="muted small">{{ user.ban_reason }}</p>
+            {% endif %}
             {% endif %}
           </div>
           <div class="row-actions">

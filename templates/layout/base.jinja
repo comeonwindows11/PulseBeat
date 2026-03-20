@@ -463,7 +463,45 @@
   </div>
   {% endif %}
 
+  <template id="pulsebeat-form-honeypot-template">
+    <div style="position:absolute;left:-10000px;top:auto;width:1px;height:1px;overflow:hidden;" aria-hidden="true">
+      <label>{{ t('auth.robot_honeypot_label') }}
+        <input type="text" name="{{ form_honeypot_name }}" tabindex="-1" autocomplete="off">
+      </label>
+    </div>
+  </template>
+
   <script>
+    (function () {
+      const template = document.getElementById('pulsebeat-form-honeypot-template');
+      if (!template) return;
+
+      function hydrateForm(form) {
+        if (!form || form.dataset.honeypotBound === '1') return;
+        const method = (form.getAttribute('method') || 'get').toLowerCase();
+        if (method !== 'post') return;
+        if (form.querySelector('input[name="{{ form_honeypot_name }}"]')) {
+          form.dataset.honeypotBound = '1';
+          return;
+        }
+        const fragment = template.content.cloneNode(true);
+        form.insertBefore(fragment, form.firstChild);
+        form.dataset.honeypotBound = '1';
+      }
+
+      document.querySelectorAll('form').forEach(hydrateForm);
+      const observer = new MutationObserver((mutations) => {
+        mutations.forEach((mutation) => {
+          mutation.addedNodes.forEach((node) => {
+            if (!(node instanceof Element)) return;
+            if (node.matches('form')) hydrateForm(node);
+            node.querySelectorAll && node.querySelectorAll('form').forEach(hydrateForm);
+          });
+        });
+      });
+      observer.observe(document.documentElement, { childList: true, subtree: true });
+    })();
+
     window.CSRF_TOKEN = {{ csrf_token|tojson }};
     window.I18N = {
       playerNoSong: {{ t('player.none')|tojson }},

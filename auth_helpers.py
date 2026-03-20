@@ -3,8 +3,10 @@ import os
 import re
 import secrets
 import smtplib
+import threading
 import time
 import errno
+from collections import deque
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 from functools import wraps
@@ -103,6 +105,19 @@ YOUTUBE_URL_RE = re.compile(r"(youtube\.com|youtu\.be)", re.IGNORECASE)
 DEVICE_COOKIE_DEFAULT_NAME = "pulsebeat_device_id"
 MAX_TRACKED_DEVICES = 10
 MAX_TRACKED_ACTIVE_SESSIONS = 10
+ROBOT_WATCHDOG_SESSION_KEY = "pulsebeat_robot_watchdog"
+ROBOT_CHALLENGE_SESSION_KEY = "pulsebeat_robot_challenge"
+ROBOT_WATCHDOG_SKIP_ENDPOINTS = {
+    "favicon",
+    "dino_easter_egg",
+    "dino_leaderboard_api",
+    "accounts.robot_check",
+    "songs.stream_song",
+    "songs.playback_meta",
+    "songs.update_progress",
+    "songs.recover_audio",
+    "main.live_songs",
+}
 
 
 class InvalidStoredDocumentError(Exception):
@@ -2243,6 +2258,312 @@ def get_user_notifications(user_oid, limit=20):
             }
         )
     return items
+
+
+def get_form_honeypot_name() -> str:
+    name = str(session.get("form_honeypot_name", "") or "").strip()
+    if not name:
+        name = f"pb_extra_{secrets.token_hex(8)}"
+        session["form_honeypot_name"] = name
+    return name
+
+
+def _safe_internal_next_path(raw_value: str) -> str:
+    candidate = str(raw_value or "").strip()
+    if not candidate:
+        return ""
+    parsed = urlparse(candidate)
+    if parsed.scheme or parsed.netloc:
+        return ""
+    if not candidate.startswith("/"):
+        return ""
+    return candidate
+
+
+def get_robot_watchdog_runtime():
+    runtime = current_app.extensions.get("robot_watchdog_runtime")
+    if runtime is None:
+        runtime = {"lock": threading.Lock(), "actors": {}}
+        current_app.extensions["robot_watchdog_runtime"] = runtime
+    return runtime
+
+
+def get_robot_watchdog_actor():
+    user_oid = get_session_user_oid()
+    if user_oid:
+        return {
+            "actor_key": f"user:{user_oid}",
+            "actor_type": "user",
+            "user_oid": user_oid,
+            "label": f"user:{user_oid}",
+        }
+
+    device_id = ensure_request_device_id()
+    digest = hashlib.sha256((device_id or "").encode("utf-8")).hexdigest()
+    guest_code = digest[:6].upper() or "GUEST"
+    return {
+        "actor_key": f"guest:{digest}",
+        "actor_type": "guest",
+        "user_oid": None,
+        "guest_code": guest_code,
+        "label": f"guest:{guest_code}",
+    }
+
+
+def robot_watchdog_should_skip(endpoint: str | None = None) -> bool:
+    endpoint_name = str(endpoint or request.endpoint or "").strip()
+    if not endpoint_name:
+        return False
+    if endpoint_name == "static" or endpoint_name.startswith("static"):
+        return True
+    if endpoint_name.startswith("debug_") or request.path.startswith("/debug/test/"):
+        return True
+    return endpoint_name in ROBOT_WATCHDOG_SKIP_ENDPOINTS
+
+
+def _guest_robot_watchdog_state():
+    raw = session.get(ROBOT_WATCHDOG_SESSION_KEY)
+    if not isinstance(raw, dict):
+        raw = {}
+    return {
+        "hits": max(0, int(raw.get("hits", 0) or 0)),
+        "challenge_required": bool(raw.get("challenge_required", False)),
+        "last_hit_at": raw.get("last_hit_at"),
+    }
+
+
+def _save_guest_robot_watchdog_state(state: dict):
+    session[ROBOT_WATCHDOG_SESSION_KEY] = {
+        "hits": max(0, int((state or {}).get("hits", 0) or 0)),
+        "challenge_required": bool((state or {}).get("challenge_required", False)),
+        "last_hit_at": (state or {}).get("last_hit_at"),
+    }
+
+
+def robot_challenge_required_for_actor(actor=None) -> bool:
+    actor = actor or get_robot_watchdog_actor()
+    if actor.get("actor_type") == "user" and actor.get("user_oid"):
+        row = extensions.users_col.find_one(
+            {"_id": actor["user_oid"]},
+            {"robot_challenge_required": 1},
+        )
+        row = validate_or_purge_document("users", row, context="auth.robot_challenge_required_for_actor")
+        return bool((row or {}).get("robot_challenge_required", False))
+    return bool(_guest_robot_watchdog_state().get("challenge_required", False))
+
+
+def _log_robot_watchdog_event(actor: dict, reason: str, require_challenge: bool):
+    now = datetime.utcnow()
+    details = {
+        "actor_key": actor.get("actor_key", ""),
+        "actor_type": actor.get("actor_type", "guest"),
+        "endpoint": request.endpoint or "",
+        "path": request.path,
+        "method": request.method,
+        "reason": str(reason or "").strip(),
+        "challenge_required": bool(require_challenge),
+        "ip_prefix": get_request_device_context().get("ip_prefix", ""),
+    }
+    if getattr(extensions, "admin_audit_col", None) is not None:
+        try:
+            extensions.admin_audit_col.insert_one(
+                {
+                    "admin_user_id": None,
+                    "action": "robot_watchdog_detected",
+                    "target_type": actor.get("actor_type", "guest"),
+                    "target_id": actor.get("user_oid") or actor.get("actor_key"),
+                    "details": details,
+                    "created_at": now,
+                }
+            )
+        except Exception:
+            current_app.logger.warning("Unable to write robot watchdog audit log", exc_info=True)
+    if getattr(extensions, "system_status_col", None) is not None:
+        try:
+            extensions.system_status_col.update_one(
+                {"key": "robot_watchdog"},
+                {
+                    "$set": {
+                        "key": "robot_watchdog",
+                        "status": "alert",
+                        "message": f"{actor.get('label', 'actor')} flagged for suspicious automation on {request.endpoint or request.path}",
+                        "updated_at": now,
+                        "actor_key": actor.get("actor_key", ""),
+                        "reason": str(reason or "").strip(),
+                        "challenge_required": bool(require_challenge),
+                    }
+                },
+                upsert=True,
+            )
+        except Exception:
+            current_app.logger.warning("Unable to update robot watchdog system status", exc_info=True)
+
+
+def mark_robot_watchdog_detection(actor: dict, reason: str, require_challenge: bool = False) -> int:
+    now = datetime.utcnow()
+    hits = 1
+    if actor.get("actor_type") == "user" and actor.get("user_oid"):
+        row = extensions.users_col.find_one(
+            {"_id": actor["user_oid"]},
+            {"robot_watchdog_hits": 1},
+        )
+        row = validate_or_purge_document("users", row, context="auth.mark_robot_watchdog_detection")
+        hits = max(0, int((row or {}).get("robot_watchdog_hits", 0) or 0)) + 1
+        safe_mongo_update_one(
+            extensions.users_col,
+            {"_id": actor["user_oid"]},
+            {
+                "$set": {
+                    "robot_watchdog_hits": hits,
+                    "robot_watchdog_last_hit_at": now,
+                    "robot_watchdog_last_reason": str(reason or "").strip(),
+                    "robot_challenge_required": bool(require_challenge or hits >= 2),
+                    "robot_challenge_required_at": now if (require_challenge or hits >= 2) else None,
+                }
+            },
+        )
+    else:
+        state = _guest_robot_watchdog_state()
+        hits = max(0, int(state.get("hits", 0) or 0)) + 1
+        state["hits"] = hits
+        state["last_hit_at"] = now.isoformat()
+        state["challenge_required"] = bool(require_challenge or hits >= 2)
+        _save_guest_robot_watchdog_state(state)
+
+    _log_robot_watchdog_event(actor, reason, require_challenge or hits >= 2)
+    return hits
+
+
+def clear_robot_watchdog_restrictions(actor=None):
+    actor = actor or get_robot_watchdog_actor()
+    runtime = get_robot_watchdog_runtime()
+    with runtime["lock"]:
+        runtime["actors"].pop(actor.get("actor_key", ""), None)
+
+    if actor.get("actor_type") == "user" and actor.get("user_oid"):
+        safe_mongo_update_one(
+            extensions.users_col,
+            {"_id": actor["user_oid"]},
+            {
+                "$set": {
+                    "robot_watchdog_hits": 1,
+                    "robot_challenge_required": False,
+                    "robot_challenge_required_at": None,
+                }
+            },
+        )
+    else:
+        state = _guest_robot_watchdog_state()
+        state["hits"] = 1
+        state["challenge_required"] = False
+        _save_guest_robot_watchdog_state(state)
+
+    session.pop(ROBOT_CHALLENGE_SESSION_KEY, None)
+
+
+def _robot_challenge_hash(answer: str, nonce: str) -> str:
+    raw = "|".join([str(current_app.secret_key or ""), str(nonce or ""), str(answer or "").strip()])
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def get_or_issue_robot_challenge(next_path: str = "", rotate: bool = False):
+    payload = session.get(ROBOT_CHALLENGE_SESSION_KEY)
+    if isinstance(payload, dict) and not rotate:
+        expires_at = int(payload.get("expires_at", 0) or 0)
+        if expires_at > int(time.time()):
+            if next_path:
+                payload["next_path"] = _safe_internal_next_path(next_path)
+                session[ROBOT_CHALLENGE_SESSION_KEY] = payload
+            return payload
+
+    a = 3 + secrets.randbelow(9)
+    b = 2 + secrets.randbelow(8)
+    if secrets.randbelow(2):
+        question = tr("auth.robot_check_question_add", a=a, b=b)
+        answer = str(a + b)
+    else:
+        big = max(a, b)
+        small = min(a, b)
+        question = tr("auth.robot_check_question_sub", a=big, b=small)
+        answer = str(big - small)
+
+    nonce = secrets.token_urlsafe(12)
+    payload = {
+        "question": question,
+        "nonce": nonce,
+        "expected_hash": _robot_challenge_hash(answer, nonce),
+        "expires_at": int(time.time()) + 600,
+        "next_path": _safe_internal_next_path(next_path),
+    }
+    session[ROBOT_CHALLENGE_SESSION_KEY] = payload
+    return payload
+
+
+def verify_robot_challenge_answer(answer: str):
+    payload = session.get(ROBOT_CHALLENGE_SESSION_KEY)
+    if not isinstance(payload, dict):
+        return False, ""
+    expires_at = int(payload.get("expires_at", 0) or 0)
+    if expires_at <= int(time.time()):
+        session.pop(ROBOT_CHALLENGE_SESSION_KEY, None)
+        return False, ""
+    expected_hash = str(payload.get("expected_hash", "") or "").strip()
+    nonce = str(payload.get("nonce", "") or "").strip()
+    if not expected_hash or not nonce:
+        session.pop(ROBOT_CHALLENGE_SESSION_KEY, None)
+        return False, ""
+    if expected_hash != _robot_challenge_hash(str(answer or "").strip(), nonce):
+        return False, _safe_internal_next_path(payload.get("next_path", ""))
+
+    next_path = _safe_internal_next_path(payload.get("next_path", ""))
+    clear_robot_watchdog_restrictions()
+    return True, next_path
+
+
+def ban_user_for_robot_honeypot(user_oid):
+    if not user_oid:
+        return False
+    user = extensions.users_col.find_one({"_id": user_oid}, {"is_root_admin": 1})
+    user = validate_or_purge_document("users", user, context="auth.ban_user_for_robot_honeypot") or {}
+    if user.get("is_root_admin", False):
+        _log_robot_watchdog_event(
+            {"actor_key": f"user:{user_oid}", "actor_type": "user", "user_oid": user_oid, "label": f"user:{user_oid}"},
+            "honeypot_root_admin_exempt",
+            False,
+        )
+        return False
+    now = datetime.utcnow()
+    ban_reason = "Utilisation de scripts automatisé ou d'un robot suspectée"
+    safe_mongo_update_one(
+        extensions.users_col,
+        {"_id": user_oid},
+        {
+            "$set": {
+                "banned_until": now + timedelta(days=36500),
+                "auto_banned": True,
+                "ban_reason": ban_reason,
+                "robot_watchdog_hits": 2,
+                "robot_challenge_required": True,
+                "robot_challenge_required_at": now,
+            }
+        },
+    )
+    actor = {
+        "actor_key": f"user:{user_oid}",
+        "actor_type": "user",
+        "user_oid": user_oid,
+        "label": f"user:{user_oid}",
+    }
+    _log_robot_watchdog_event(actor, "honeypot_triggered", True)
+    try:
+        notify_admins(
+            "email.admin_alert_subject",
+            "email.admin_alert_body",
+            message=f"Autobanned account after honeypot form trigger: {user_oid}",
+        )
+    except Exception:
+        current_app.logger.warning("Unable to notify admins after honeypot autoban", exc_info=True)
+    return True
 
 
 def current_user():

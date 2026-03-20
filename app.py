@@ -1,12 +1,15 @@
 import hashlib
+from collections import deque
 import errno
 import os
 import secrets
 import shutil
+import threading
+import time
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
 
-from flask import Flask, abort, flash, jsonify, redirect, render_template, request, session, url_for
+from flask import Flask, abort, flash, g, jsonify, redirect, render_template, request, session, url_for
 from dotenv import load_dotenv
 from pymongo.errors import DuplicateKeyError, PyMongoError
 
@@ -20,10 +23,20 @@ from auth_helpers import (
     compose_and_filters,
     count_unread_notifications,
     current_user,
+    get_form_honeypot_name,
+    get_or_issue_robot_challenge,
+    get_robot_watchdog_actor,
+    get_robot_watchdog_runtime,
     ensure_request_device_id,
     get_user_notifications,
     get_session_user_oid,
     is_local_storage_os_error,
+    ban_user_for_robot_honeypot,
+    clear_robot_watchdog_restrictions,
+    mark_robot_watchdog_detection,
+    notify_admins,
+    robot_challenge_required_for_actor,
+    robot_watchdog_should_skip,
     is_storage_related_mongo_error,
     mark_storage_full_latch,
     normalize_email,
@@ -51,7 +64,17 @@ def _request_wants_json():
 def _render_error_response(code, error=None):
     if _request_wants_json():
         return jsonify({"ok": False, "message": t(f"errors.{code}.msg")}), code
-    return render_template("errors/base_error.jinja", error=error, error_code=code), code
+    if code in {408, 429, 503, 507}:
+        g.minimal_context_only = True
+    return (
+        render_template(
+            "errors/base_error.jinja",
+            error=error,
+            error_code=code,
+            hide_global_player=code in {408, 429, 503, 507},
+        ),
+        code,
+    )
 
 
 def _resolve_storage_probe_path(path: str):
@@ -118,6 +141,461 @@ def _check_database_storage_health(app):
     return True, ""
 
 
+def _service_watchdog_state(app):
+    state = app.extensions.get("service_watchdog")
+    if state is None:
+        state = {
+            "lock": threading.RLock(),
+            "mode": "normal",
+            "reason": "",
+            "limp_until": 0.0,
+            "restart_required": False,
+            "active_requests": 0,
+            "recent_requests": deque(maxlen=1200),
+            "slow_requests": deque(maxlen=300),
+            "overload_events": deque(maxlen=24),
+            "last_notified_at": 0.0,
+        }
+        app.extensions["service_watchdog"] = state
+    return state
+
+
+def _service_watchdog_skip(endpoint: str | None = None) -> bool:
+    endpoint_name = str(endpoint or request.endpoint or "").strip()
+    if endpoint_name == "static" or endpoint_name.startswith("static"):
+        return True
+    if endpoint_name.startswith("debug_") or request.path.startswith("/debug/test/"):
+        return True
+    return endpoint_name in {"favicon"}
+
+
+def _service_watchdog_limp_allowed(endpoint: str | None = None) -> bool:
+    endpoint_name = str(endpoint or request.endpoint or "").strip()
+    if _service_watchdog_skip(endpoint_name):
+        return True
+    return endpoint_name in {
+        "accounts.login",
+        "accounts.logout",
+        "accounts.register",
+        "accounts.forgot_password",
+        "accounts.robot_check",
+        "main.set_language",
+        "main.license_page",
+        "dino_easter_egg",
+        "dino_leaderboard_api",
+    }
+
+
+def _service_watchdog_trim(state, now_ts: float, burst_window: int, slow_window: int, latch_window: int):
+    while state["recent_requests"] and state["recent_requests"][0] < now_ts - burst_window:
+        state["recent_requests"].popleft()
+    while state["slow_requests"] and state["slow_requests"][0] < now_ts - slow_window:
+        state["slow_requests"].popleft()
+    while state["overload_events"] and state["overload_events"][0] < now_ts - latch_window:
+        state["overload_events"].popleft()
+
+
+def _record_service_watchdog_status(app, mode: str, reason: str):
+    now = datetime.now(UTC)
+    restart_required = mode == "latched"
+    message = reason or t("errors.503.msg")
+    try:
+        if getattr(extensions, "system_status_col", None) is not None:
+            extensions.system_status_col.update_one(
+                {"key": "service_watchdog"},
+                {
+                    "$set": {
+                        "key": "service_watchdog",
+                        "status": mode,
+                        "message": message,
+                        "updated_at": now,
+                        "restart_required": restart_required,
+                    }
+                },
+                upsert=True,
+            )
+    except Exception:
+        app.logger.warning("Unable to persist service watchdog status", exc_info=True)
+
+    if mode not in {"limp", "latched"}:
+        return
+
+    try:
+        if getattr(extensions, "admin_audit_col", None) is not None:
+            extensions.admin_audit_col.insert_one(
+                {
+                    "admin_user_id": None,
+                    "action": f"service_watchdog_{mode}",
+                    "target_type": "platform",
+                    "target_id": "global",
+                    "details": {"reason": message, "restart_required": restart_required},
+                    "created_at": now,
+                }
+            )
+    except Exception:
+        app.logger.warning("Unable to write service watchdog audit log", exc_info=True)
+
+    state = _service_watchdog_state(app)
+    now_ts = time.time()
+    if mode == "latched" or now_ts - float(state.get("last_notified_at", 0.0) or 0.0) > 900:
+        try:
+            notify_admins("email.admin_alert_subject", "email.admin_alert_body", message=message)
+            state["last_notified_at"] = now_ts
+        except Exception:
+            app.logger.warning("Unable to notify admins for service watchdog", exc_info=True)
+
+
+def _set_service_watchdog_mode(app, mode: str, reason: str):
+    state = _service_watchdog_state(app)
+    mode = str(mode or "normal").strip().lower()
+    if mode not in {"normal", "limp", "latched"}:
+        mode = "normal"
+
+    with state["lock"]:
+        previous_mode = state["mode"]
+        now_ts = time.time()
+        if previous_mode == "latched" and mode != "normal":
+            state["mode"] = "latched"
+            state["restart_required"] = True
+        elif mode == "normal":
+            state["mode"] = "normal"
+            state["reason"] = ""
+            state["limp_until"] = 0.0
+            state["restart_required"] = False
+            state["overload_events"].clear()
+            state["recent_requests"].clear()
+            state["slow_requests"].clear()
+        elif mode == "limp":
+            state["mode"] = "limp"
+            state["reason"] = reason
+            state["limp_until"] = max(state.get("limp_until", 0.0) or 0.0, now_ts + int(app.config.get("SERVICE_LIMP_MODE_SECONDS", 45)))
+            state["overload_events"].append(now_ts)
+            if len(state["overload_events"]) >= int(app.config.get("SERVICE_LATCH_OVERLOAD_EVENTS", 3)):
+                state["mode"] = "latched"
+                state["reason"] = t("errors.503.restart_required")
+                state["restart_required"] = True
+        elif mode == "latched":
+            state["mode"] = "latched"
+            state["reason"] = reason
+            state["limp_until"] = 0.0
+            state["restart_required"] = True
+            state["overload_events"].append(now_ts)
+
+        final_mode = state["mode"]
+        final_reason = state["reason"]
+
+    if previous_mode != final_mode or final_reason != reason:
+        _record_service_watchdog_status(app, final_mode, final_reason)
+    return final_mode
+
+
+def _maybe_recover_service_watchdog(app):
+    state = _service_watchdog_state(app)
+    with state["lock"]:
+        if state["mode"] != "limp":
+            return
+        now_ts = time.time()
+        _service_watchdog_trim(
+            state,
+            now_ts,
+            int(app.config.get("SERVICE_BURST_WINDOW_SECONDS", 8)),
+            int(app.config.get("SERVICE_SLOW_WINDOW_SECONDS", 180)),
+            int(app.config.get("SERVICE_LATCH_WINDOW_SECONDS", 300)),
+        )
+        if now_ts < float(state.get("limp_until", 0.0) or 0.0):
+            return
+        if state["active_requests"] > max(1, int(app.config.get("SERVICE_RECOVER_ACTIVE_REQUESTS", 2))):
+            return
+        if len(state["recent_requests"]) > int(app.config.get("SERVICE_RECOVER_BURST_REQUESTS", 6)):
+            return
+
+    _set_service_watchdog_mode(app, "normal", "")
+
+
+def _service_watchdog_overload_message(mode: str) -> str:
+    if mode == "latched":
+        return t("errors.503.restart_required")
+    return t("errors.503.limp_mode")
+
+
+def _network_watchdog_state(app):
+    state = app.extensions.get("network_watchdog")
+    if state is None:
+        state = {"lock": threading.RLock(), "actors": {}}
+        app.extensions["network_watchdog"] = state
+    return state
+
+
+def _request_header_float(*names: str):
+    for name in names:
+        raw = str(request.headers.get(name, "") or "").strip().lower()
+        if not raw:
+            continue
+        normalized = raw.replace("mbps", "").replace("ms", "").strip()
+        try:
+            return float(normalized)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _connection_hints():
+    ect = str(request.headers.get("ECT", "") or request.headers.get("Sec-CH-ECT", "") or "").strip().lower()
+    save_data = str(request.headers.get("Save-Data", "") or "").strip().lower() == "on"
+    downlink = _request_header_float("Downlink", "Sec-CH-Downlink")
+    rtt = _request_header_float("RTT", "Sec-CH-RTT")
+
+    strong_slow = bool(
+        save_data
+        or ect in {"slow-2g", "2g"}
+        or (downlink is not None and downlink <= 0.45)
+        or (rtt is not None and rtt >= 1400)
+    )
+    possible_slow = bool(
+        strong_slow
+        or ect == "3g"
+        or (downlink is not None and downlink <= 0.9)
+        or (rtt is not None and rtt >= 700)
+    )
+    return {
+        "ect": ect,
+        "save_data": save_data,
+        "downlink": downlink,
+        "rtt": rtt,
+        "possible_slow": possible_slow,
+        "strong_slow": strong_slow,
+    }
+
+
+def _request_timeout_budget_seconds(app):
+    base_timeout = max(1, int(app.config.get("REQUEST_TIMEOUT_SECONDS", 20) or 20))
+    hints = _connection_hints()
+    actor = get_robot_watchdog_actor()
+    actor_key = actor.get("actor_key", "")
+    state = _network_watchdog_state(app)
+    now_ts = time.time()
+    recent_timeouts = 0
+    recent_disconnects = 0
+    with state["lock"]:
+        actor_state = state["actors"].setdefault(
+            actor_key,
+            {"timeouts": deque(maxlen=10), "disconnects": deque(maxlen=10), "slow_successes": deque(maxlen=10), "last_seen": 0.0},
+        )
+        while actor_state["timeouts"] and actor_state["timeouts"][0] < now_ts - 600:
+            actor_state["timeouts"].popleft()
+        while actor_state["disconnects"] and actor_state["disconnects"][0] < now_ts - 600:
+            actor_state["disconnects"].popleft()
+        while actor_state["slow_successes"] and actor_state["slow_successes"][0] < now_ts - 600:
+            actor_state["slow_successes"].popleft()
+        actor_state["last_seen"] = now_ts
+        recent_timeouts = len(actor_state["timeouts"])
+        recent_disconnects = len(actor_state["disconnects"])
+
+    budget = base_timeout
+    if hints["strong_slow"]:
+        budget = max(budget, base_timeout + 20)
+    elif hints["possible_slow"]:
+        budget = max(budget, base_timeout + 10)
+
+    if not hints["possible_slow"]:
+        if recent_disconnects >= 2 or recent_timeouts >= 2:
+            budget = min(budget, max(8, base_timeout - 8))
+        elif recent_disconnects >= 1 or recent_timeouts >= 1:
+            budget = min(budget, max(12, base_timeout - 4))
+
+    g._request_timeout_actor_key = actor_key
+    g._request_timeout_hints = hints
+    return budget
+
+
+def _record_network_timeout_signal(app, elapsed: float, did_timeout: bool):
+    actor_key = str(getattr(g, "_request_timeout_actor_key", "") or "")
+    if not actor_key:
+        return
+    hints = getattr(g, "_request_timeout_hints", {}) or {}
+    state = _network_watchdog_state(app)
+    now_ts = time.time()
+    with state["lock"]:
+        actor_state = state["actors"].setdefault(
+            actor_key,
+            {"timeouts": deque(maxlen=10), "disconnects": deque(maxlen=10), "slow_successes": deque(maxlen=10), "last_seen": 0.0},
+        )
+        actor_state["last_seen"] = now_ts
+        if did_timeout:
+            actor_state["timeouts"].append(now_ts)
+        elif hints.get("possible_slow", False) and elapsed > max(1, int(app.config.get("REQUEST_TIMEOUT_SECONDS", 20) or 20)):
+            actor_state["slow_successes"].append(now_ts)
+
+
+def _record_network_disconnect_signal(app):
+    actor_key = str(getattr(g, "_request_timeout_actor_key", "") or "")
+    if not actor_key:
+        return
+    state = _network_watchdog_state(app)
+    now_ts = time.time()
+    with state["lock"]:
+        actor_state = state["actors"].setdefault(
+            actor_key,
+            {"timeouts": deque(maxlen=10), "disconnects": deque(maxlen=10), "slow_successes": deque(maxlen=10), "last_seen": 0.0},
+        )
+        actor_state["last_seen"] = now_ts
+        actor_state["disconnects"].append(now_ts)
+
+
+def _evaluate_service_watchdog_before_request(app):
+    endpoint = request.endpoint or ""
+    if _service_watchdog_skip(endpoint):
+        return None
+
+    _maybe_recover_service_watchdog(app)
+    state = _service_watchdog_state(app)
+    with state["lock"]:
+        now_ts = time.time()
+        burst_window = int(app.config.get("SERVICE_BURST_WINDOW_SECONDS", 8))
+        slow_window = int(app.config.get("SERVICE_SLOW_WINDOW_SECONDS", 180))
+        latch_window = int(app.config.get("SERVICE_LATCH_WINDOW_SECONDS", 300))
+        _service_watchdog_trim(state, now_ts, burst_window, slow_window, latch_window)
+
+        if state["mode"] == "latched":
+            return _render_error_response(503, RuntimeError(_service_watchdog_overload_message("latched")))
+
+        if state["mode"] == "limp" and not _service_watchdog_limp_allowed(endpoint):
+            return _render_error_response(503, RuntimeError(_service_watchdog_overload_message("limp")))
+
+        projected_recent = len(state["recent_requests"]) + 1
+        active_requests = int(state.get("active_requests", 0) or 0)
+        if (
+            active_requests >= int(app.config.get("SERVICE_OVERLOAD_ACTIVE_REQUESTS", 18))
+            or projected_recent > int(app.config.get("SERVICE_OVERLOAD_BURST_REQUESTS", 36))
+            or len(state["slow_requests"]) >= int(app.config.get("SERVICE_OVERLOAD_SLOW_REQUESTS", 4))
+        ):
+            reason = t("errors.503.msg")
+            mode = _set_service_watchdog_mode(app, "limp", reason)
+            if mode == "latched" or not _service_watchdog_limp_allowed(endpoint):
+                return _render_error_response(503, RuntimeError(_service_watchdog_overload_message(mode)))
+
+        state["active_requests"] = active_requests + 1
+        state["recent_requests"].append(now_ts)
+        g._service_watchdog_counted = True
+
+    return None
+
+
+def _teardown_service_watchdog(app):
+    if not getattr(g, "_service_watchdog_counted", False):
+        return
+    state = _service_watchdog_state(app)
+    with state["lock"]:
+        state["active_requests"] = max(0, int(state.get("active_requests", 0) or 0) - 1)
+    g._service_watchdog_counted = False
+
+
+def _record_request_timing_and_timeout(app, response):
+    started_at = getattr(g, "_request_started_at", None)
+    if started_at is None:
+        return response
+    elapsed = time.perf_counter() - float(started_at)
+    threshold = max(1, int(getattr(g, "_request_timeout_budget", app.config.get("REQUEST_TIMEOUT_SECONDS", 20)) or 20))
+    if elapsed <= threshold:
+        _record_network_timeout_signal(app, elapsed, False)
+        return response
+
+    state = _service_watchdog_state(app)
+    with state["lock"]:
+        state["slow_requests"].append(time.time())
+
+    can_replace_response = request.method in {"GET", "HEAD", "OPTIONS"} or _request_wants_json()
+    if can_replace_response and not response.direct_passthrough and int(response.status_code or 200) < 400:
+        timeout_response = app.make_response(_render_error_response(408, TimeoutError(f"{elapsed:.2f}s")))
+        response = timeout_response
+    _record_network_timeout_signal(app, elapsed, True)
+    return response
+
+
+def _robot_watchdog_current_path() -> str:
+    path = request.full_path or request.path or "/"
+    return path[:-1] if path.endswith("?") else path
+
+
+def _evaluate_robot_watchdog_before_request(app):
+    endpoint = request.endpoint or ""
+    if robot_watchdog_should_skip(endpoint):
+        return None
+
+    session_user = current_user()
+    if session_user and bool(session_user.get("is_root_admin", False)):
+        return None
+
+    actor = get_robot_watchdog_actor()
+    if robot_challenge_required_for_actor(actor):
+        challenge_url = url_for("accounts.robot_check", next=_robot_watchdog_current_path())
+        if _request_wants_json():
+            return jsonify(
+                {
+                    "ok": False,
+                    "message": t("errors.429.msg"),
+                    "robot_challenge_required": True,
+                    "challenge_url": challenge_url,
+                }
+            ), 429
+        return redirect(challenge_url)
+
+    runtime = get_robot_watchdog_runtime()
+    with runtime["lock"]:
+        now_ts = time.time()
+        actor_state = runtime["actors"].setdefault(
+            actor["actor_key"],
+            {"recent": deque(maxlen=80), "writes": deque(maxlen=40), "blocked_until": 0.0, "last_seen": 0.0},
+        )
+        while actor_state["recent"] and actor_state["recent"][0] < now_ts - int(app.config.get("ROBOT_WATCHDOG_WINDOW_SECONDS", 8)):
+            actor_state["recent"].popleft()
+        while actor_state["writes"] and actor_state["writes"][0] < now_ts - int(app.config.get("ROBOT_WATCHDOG_WRITE_WINDOW_SECONDS", 20)):
+            actor_state["writes"].popleft()
+
+        if float(actor_state.get("blocked_until", 0.0) or 0.0) > now_ts:
+            return _render_error_response(429, RuntimeError(t("errors.429.msg")))
+
+        actor_state["recent"].append(now_ts)
+        if request.method not in {"GET", "HEAD", "OPTIONS"}:
+            actor_state["writes"].append(now_ts)
+        actor_state["last_seen"] = now_ts
+
+        burst_count = sum(1 for ts in actor_state["recent"] if ts >= now_ts - int(app.config.get("ROBOT_WATCHDOG_BURST_WINDOW_SECONDS", 2)))
+        too_fast = (
+            len(actor_state["recent"]) > int(app.config.get("ROBOT_WATCHDOG_MAX_REQUESTS", 28))
+            or len(actor_state["writes"]) > int(app.config.get("ROBOT_WATCHDOG_MAX_WRITE_REQUESTS", 10))
+            or burst_count > int(app.config.get("ROBOT_WATCHDOG_MAX_BURST_REQUESTS", 12))
+        )
+        if not too_fast:
+            stale_before = now_ts - 300
+            stale_keys = [key for key, value in runtime["actors"].items() if float(value.get("last_seen", 0.0) or 0.0) < stale_before]
+            for key in stale_keys[:40]:
+                runtime["actors"].pop(key, None)
+            return None
+
+        hits = mark_robot_watchdog_detection(actor, "request_rate_exceeded")
+        require_challenge = hits >= 2
+        actor_state["blocked_until"] = now_ts + int(
+            app.config.get("ROBOT_WATCHDOG_CHALLENGE_BLOCK_SECONDS" if require_challenge else "ROBOT_WATCHDOG_BLOCK_SECONDS", 300 if require_challenge else 30)
+        )
+
+    if require_challenge:
+        get_or_issue_robot_challenge(_robot_watchdog_current_path(), rotate=True)
+        challenge_url = url_for("accounts.robot_check", next=_robot_watchdog_current_path())
+        if _request_wants_json():
+            return jsonify(
+                {
+                    "ok": False,
+                    "message": t("errors.429.msg"),
+                    "robot_challenge_required": True,
+                    "challenge_url": challenge_url,
+                }
+            ), 429
+        return redirect(challenge_url)
+
+    return _render_error_response(429, RuntimeError(t("errors.429.msg")))
+
+
 def register_error_handlers(app):
     def make_handler(code):
         def handler(error):
@@ -157,6 +635,7 @@ def register_error_handlers(app):
         if is_storage_related_mongo_error(error):
             mark_storage_full_latch("database", str(error))
             return _render_error_response(507, error)
+        _set_service_watchdog_mode(app, "limp", t("errors.503.msg"))
         return _render_error_response(503, error)
 
     @app.errorhandler(OSError)
@@ -164,6 +643,10 @@ def register_error_handlers(app):
         if is_local_storage_os_error(error):
             mark_storage_full_latch("server", str(error))
             return _render_error_response(507, error)
+        lowered = str(error or "").lower()
+        if "broken pipe" in lowered or "connection reset by peer" in lowered or "forcibly closed" in lowered:
+            _record_network_disconnect_signal(app)
+            return _render_error_response(408, error)
         app.logger.exception("Unhandled OS error", exc_info=error)
         return _render_error_response(500, error)
 
@@ -403,6 +886,25 @@ def create_app():
     app.config["SERVER_STORAGE_MIN_FREE_BYTES"] = int(os.getenv("SERVER_STORAGE_MIN_FREE_BYTES", str(64 * 1024 * 1024)))
     app.config["DATABASE_STORAGE_MIN_FREE_BYTES"] = int(os.getenv("DATABASE_STORAGE_MIN_FREE_BYTES", str(64 * 1024 * 1024)))
     app.config["DATABASE_STORAGE_CAPACITY_BYTES"] = int(os.getenv("DATABASE_STORAGE_CAPACITY_BYTES", "0"))
+    app.config["REQUEST_TIMEOUT_SECONDS"] = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "20"))
+    app.config["SERVICE_OVERLOAD_ACTIVE_REQUESTS"] = int(os.getenv("SERVICE_OVERLOAD_ACTIVE_REQUESTS", "18"))
+    app.config["SERVICE_OVERLOAD_BURST_REQUESTS"] = int(os.getenv("SERVICE_OVERLOAD_BURST_REQUESTS", "36"))
+    app.config["SERVICE_BURST_WINDOW_SECONDS"] = int(os.getenv("SERVICE_BURST_WINDOW_SECONDS", "8"))
+    app.config["SERVICE_OVERLOAD_SLOW_REQUESTS"] = int(os.getenv("SERVICE_OVERLOAD_SLOW_REQUESTS", "4"))
+    app.config["SERVICE_SLOW_WINDOW_SECONDS"] = int(os.getenv("SERVICE_SLOW_WINDOW_SECONDS", "180"))
+    app.config["SERVICE_LIMP_MODE_SECONDS"] = int(os.getenv("SERVICE_LIMP_MODE_SECONDS", "45"))
+    app.config["SERVICE_LATCH_OVERLOAD_EVENTS"] = int(os.getenv("SERVICE_LATCH_OVERLOAD_EVENTS", "3"))
+    app.config["SERVICE_LATCH_WINDOW_SECONDS"] = int(os.getenv("SERVICE_LATCH_WINDOW_SECONDS", "300"))
+    app.config["SERVICE_RECOVER_ACTIVE_REQUESTS"] = int(os.getenv("SERVICE_RECOVER_ACTIVE_REQUESTS", "2"))
+    app.config["SERVICE_RECOVER_BURST_REQUESTS"] = int(os.getenv("SERVICE_RECOVER_BURST_REQUESTS", "6"))
+    app.config["ROBOT_WATCHDOG_WINDOW_SECONDS"] = int(os.getenv("ROBOT_WATCHDOG_WINDOW_SECONDS", "8"))
+    app.config["ROBOT_WATCHDOG_MAX_REQUESTS"] = int(os.getenv("ROBOT_WATCHDOG_MAX_REQUESTS", "28"))
+    app.config["ROBOT_WATCHDOG_WRITE_WINDOW_SECONDS"] = int(os.getenv("ROBOT_WATCHDOG_WRITE_WINDOW_SECONDS", "20"))
+    app.config["ROBOT_WATCHDOG_MAX_WRITE_REQUESTS"] = int(os.getenv("ROBOT_WATCHDOG_MAX_WRITE_REQUESTS", "10"))
+    app.config["ROBOT_WATCHDOG_BURST_WINDOW_SECONDS"] = int(os.getenv("ROBOT_WATCHDOG_BURST_WINDOW_SECONDS", "2"))
+    app.config["ROBOT_WATCHDOG_MAX_BURST_REQUESTS"] = int(os.getenv("ROBOT_WATCHDOG_MAX_BURST_REQUESTS", "12"))
+    app.config["ROBOT_WATCHDOG_BLOCK_SECONDS"] = int(os.getenv("ROBOT_WATCHDOG_BLOCK_SECONDS", "30"))
+    app.config["ROBOT_WATCHDOG_CHALLENGE_BLOCK_SECONDS"] = int(os.getenv("ROBOT_WATCHDOG_CHALLENGE_BLOCK_SECONDS", "300"))
     app.config["STORAGE_FULL_LATCHED"] = False
     app.config["STORAGE_FULL_STATE"] = {"server": False, "database": False, "details": []}
 
@@ -487,6 +989,12 @@ def create_app():
     extensions.users_col.update_many({"trusted_devices": {"$exists": False}}, {"$set": {"trusted_devices": []}})
     extensions.users_col.update_many({"active_sessions": {"$exists": False}}, {"$set": {"active_sessions": []}})
     extensions.users_col.update_many({"pending_device_approvals": {"$exists": False}}, {"$set": {"pending_device_approvals": []}})
+    extensions.users_col.update_many({"robot_watchdog_hits": {"$exists": False}}, {"$set": {"robot_watchdog_hits": 0}})
+    extensions.users_col.update_many({"robot_watchdog_last_hit_at": {"$exists": False}}, {"$set": {"robot_watchdog_last_hit_at": None}})
+    extensions.users_col.update_many({"robot_watchdog_last_reason": {"$exists": False}}, {"$set": {"robot_watchdog_last_reason": ""}})
+    extensions.users_col.update_many({"robot_challenge_required": {"$exists": False}}, {"$set": {"robot_challenge_required": False}})
+    extensions.users_col.update_many({"robot_challenge_required_at": {"$exists": False}}, {"$set": {"robot_challenge_required_at": None}})
+    extensions.users_col.update_many({"ban_reason": {"$exists": False}}, {"$set": {"ban_reason": ""}})
     extensions.songs_col.update_many({"is_available": {"$exists": False}}, {"$set": {"is_available": True}})
     extensions.songs_col.update_many({"availability_reason": {"$exists": False}}, {"$set": {"availability_reason": ""}})
     extensions.songs_col.update_many({"storage_mode": {"$exists": False}}, {"$set": {"storage_mode": "server"}})
@@ -591,6 +1099,60 @@ def create_app():
     def favicon():
         return ("", 204)
 
+    def _allow_local_debug_only():
+        host = str((request.host or "").split(":", 1)[0] or "").strip().lower()
+        remote = str(request.remote_addr or "").strip().lower()
+        if host in {"127.0.0.1", "localhost", "::1"} or remote in {"127.0.0.1", "::1"}:
+            return None
+        abort(404)
+
+    @app.route("/debug/test/503/limp")
+    def debug_503_limp():
+        _allow_local_debug_only()
+        _set_service_watchdog_mode(app, "limp", t("errors.503.limp_mode"))
+        return _render_error_response(503, RuntimeError(t("errors.503.limp_mode")))
+
+    @app.route("/debug/test/503/latched")
+    def debug_503_latched():
+        _allow_local_debug_only()
+        _set_service_watchdog_mode(app, "latched", t("errors.503.restart_required"))
+        return _render_error_response(503, RuntimeError(t("errors.503.restart_required")))
+
+    @app.route("/debug/test/503/reset")
+    def debug_503_reset():
+        _allow_local_debug_only()
+        _set_service_watchdog_mode(app, "normal", "")
+        return jsonify({"ok": True, "message": "service watchdog reset"})
+
+    @app.route("/debug/test/408")
+    def debug_408_timeout():
+        _allow_local_debug_only()
+        if request.args.get("runtime") == "1":
+            budget = max(1, int(getattr(g, "_request_timeout_budget", app.config.get("REQUEST_TIMEOUT_SECONDS", 20)) or 20))
+            time.sleep(budget + 2)
+            return f"late response after {budget + 2}s"
+        return _render_error_response(408, TimeoutError("debug_forced_timeout"))
+
+    @app.route("/debug/test/429")
+    def debug_429_guard():
+        _allow_local_debug_only()
+        debug_state = session.get("pulsebeat_debug_429") or {}
+        hits = int(debug_state.get("hits", 0) or 0) + 1
+        debug_state["hits"] = hits
+        debug_state["last_at"] = int(time.time())
+        session["pulsebeat_debug_429"] = debug_state
+        if hits >= 2:
+            get_or_issue_robot_challenge(url_for("main.index"), rotate=True)
+            return redirect(url_for("accounts.robot_check", next=url_for("main.index")))
+        return _render_error_response(429, RuntimeError(t("errors.429.msg")))
+
+    @app.route("/debug/test/429/reset")
+    def debug_429_reset():
+        _allow_local_debug_only()
+        session.pop("pulsebeat_debug_429", None)
+        session.pop("pulsebeat_robot_challenge", None)
+        return jsonify({"ok": True, "message": "robot watchdog debug state reset"})
+
     @app.route("/dino")
     def dino_easter_egg():
         return render_template(
@@ -660,6 +1222,26 @@ def create_app():
         return jsonify({"ok": True, "improved": score > existing_score, **get_dino_leaderboard_snapshot()})
 
     @app.before_request
+    def enforce_runtime_watchdogs():
+        g._request_started_at = time.perf_counter()
+        g._request_timeout_budget = _request_timeout_budget_seconds(app)
+        g.minimal_context_only = False
+        g._service_watchdog_counted = False
+
+        endpoint = request.endpoint or ""
+        if _service_watchdog_skip(endpoint):
+            return None
+
+        service_response = _evaluate_service_watchdog_before_request(app)
+        if service_response is not None:
+            return service_response
+
+        robot_response = _evaluate_robot_watchdog_before_request(app)
+        if robot_response is not None:
+            return robot_response
+        return None
+
+    @app.before_request
     def enforce_storage_capacity_guard():
         endpoint = request.endpoint or ""
         if endpoint == "static" or endpoint.startswith("static"):
@@ -687,7 +1269,19 @@ def create_app():
         if endpoint != "static" and not endpoint.startswith("static"):
             ensure_request_device_id()
         if not setup_done:
-            allowed = {"accounts.setup_admin", "dino_easter_egg", "dino_leaderboard_api", "static"}
+            allowed = {
+                "accounts.setup_admin",
+                "accounts.robot_check",
+                "dino_easter_egg",
+                "dino_leaderboard_api",
+                "debug_503_limp",
+                "debug_503_latched",
+                "debug_503_reset",
+                "debug_408_timeout",
+                "debug_429_guard",
+                "debug_429_reset",
+                "static",
+            }
             if endpoint in allowed or endpoint.startswith("static"):
                 return None
             return redirect(url_for("accounts.setup_admin"))
@@ -713,7 +1307,22 @@ def create_app():
             session.clear()
             if endpoint == "static" or endpoint.startswith("static"):
                 return None
-            if endpoint not in {"accounts.login", "accounts.google_login", "accounts.google_callback", "accounts.setup_admin", "dino_easter_egg", "dino_leaderboard_api", "static"} and not endpoint.startswith("static"):
+            if endpoint not in {
+                "accounts.login",
+                "accounts.google_login",
+                "accounts.google_callback",
+                "accounts.setup_admin",
+                "accounts.robot_check",
+                "dino_easter_egg",
+                "dino_leaderboard_api",
+                "debug_503_limp",
+                "debug_503_latched",
+                "debug_503_reset",
+                "debug_408_timeout",
+                "debug_429_guard",
+                "debug_429_reset",
+                "static",
+            } and not endpoint.startswith("static"):
                 flash(t("flash.accounts.session_invalidated"), "warning")
             return redirect(url_for("accounts.login"))
         session_security_response = validate_bound_session_request(user)
@@ -784,8 +1393,40 @@ def create_app():
             abort(403)
         return None
 
+    @app.before_request
+    def enforce_form_honeypot():
+        if request.method in {"GET", "HEAD", "OPTIONS"}:
+            return None
+        endpoint = request.endpoint or ""
+        if endpoint == "static" or endpoint.startswith("static"):
+            return None
+        content_type = (request.content_type or "").lower()
+        if "multipart/form-data" not in content_type and "application/x-www-form-urlencoded" not in content_type:
+            return None
+
+        honeypot_name = get_form_honeypot_name()
+        if not honeypot_name:
+            return None
+        if not str(request.form.get(honeypot_name, "") or "").strip():
+            return None
+
+        user_oid = get_session_user_oid()
+        if user_oid:
+            ban_user_for_robot_honeypot(user_oid)
+            session.clear()
+        else:
+            actor = get_robot_watchdog_actor()
+            mark_robot_watchdog_detection(actor, "honeypot_triggered", require_challenge=True)
+            get_or_issue_robot_challenge(_robot_watchdog_current_path(), rotate=True)
+        return _render_error_response(429, RuntimeError(t("errors.429.msg")))
+
+    @app.teardown_request
+    def teardown_runtime_watchdogs(_error=None):
+        _teardown_service_watchdog(app)
+
     @app.after_request
     def add_security_headers(response):
+        response = _record_request_timing_and_timeout(app, response)
         response = apply_session_security_cookies(response)
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("X-Frame-Options", "DENY")
@@ -824,7 +1465,7 @@ def create_app():
         if not csrf_token:
             csrf_token = secrets.token_urlsafe(32)
             session["csrf_token"] = csrf_token
-        if app.config.get("STORAGE_FULL_LATCHED"):
+        if app.config.get("STORAGE_FULL_LATCHED") or getattr(g, "minimal_context_only", False):
             return {
                 "app_name": app.config["APP_NAME"],
                 "current_user": None,
@@ -835,6 +1476,7 @@ def create_app():
                 "t": t,
                 "setup_required": False,
                 "csrf_token": csrf_token,
+                "form_honeypot_name": get_form_honeypot_name(),
                 "client_js_asset": client_js_asset,
             }
         user = current_user()
@@ -865,6 +1507,7 @@ def create_app():
             "t": t,
             "setup_required": not root_admin_exists(),
             "csrf_token": csrf_token,
+            "form_honeypot_name": get_form_honeypot_name(),
             "client_js_asset": client_js_asset,
         }
 

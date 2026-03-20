@@ -323,9 +323,16 @@ def dashboard():
         invalid_document_status,
         context="admin.dashboard.invalid_document_status",
     )
+    service_watchdog_status = extensions.system_status_col.find_one({"key": "service_watchdog"})
+    service_watchdog_status = validate_or_purge_document(
+        "system_status",
+        service_watchdog_status,
+        context="admin.dashboard.service_watchdog_status",
+    )
     password_alert_key = _build_alert_key("password_leak_service_down", password_check_status, primary_time_field="last_failed_at")
     moderation_alert_key = _build_alert_key("auto_moderation_alert", moderation_status)
     invalid_document_alert_key = _build_alert_key("invalid_document_watchdog", invalid_document_status)
+    service_watchdog_alert_key = _build_alert_key("service_watchdog", service_watchdog_status)
     dismissed_admin_alerts = {
         value.strip()
         for value in (me or {}).get("dismissed_admin_alerts", [])
@@ -348,6 +355,12 @@ def dashboard():
         and invalid_document_status.get("status") == "alert"
         and invalid_document_alert_key
         and invalid_document_alert_key not in dismissed_admin_alerts
+    )
+    show_service_watchdog_alert = bool(
+        service_watchdog_status
+        and str(service_watchdog_status.get("status", "") or "").strip().lower() in {"limp", "latched"}
+        and service_watchdog_alert_key
+        and service_watchdog_alert_key not in dismissed_admin_alerts
     )
     weak_recovery_accounts_count = extensions.users_col.count_documents(
         {
@@ -420,12 +433,15 @@ def dashboard():
         password_check_status=password_check_status,
         moderation_status=moderation_status,
         invalid_document_status=invalid_document_status,
+        service_watchdog_status=service_watchdog_status,
         password_alert_key=password_alert_key,
         moderation_alert_key=moderation_alert_key,
         invalid_document_alert_key=invalid_document_alert_key,
+        service_watchdog_alert_key=service_watchdog_alert_key,
         show_password_alert=show_password_alert,
         show_moderation_alert=show_moderation_alert,
         show_invalid_document_alert=show_invalid_document_alert,
+        show_service_watchdog_alert=show_service_watchdog_alert,
         weak_recovery_accounts_count=weak_recovery_accounts_count,
         youtube_integration_enabled=youtube_integration_enabled,
         youtube_toggle_url=youtube_toggle_url,
@@ -743,7 +759,7 @@ def ban_user(user_id):
 
     days = max(1, min(int(days_raw), 365))
     banned_until = datetime.utcnow() + timedelta(days=days)
-    extensions.users_col.update_one({"_id": user_oid}, {"$set": {"banned_until": banned_until}})
+    extensions.users_col.update_one({"_id": user_oid}, {"$set": {"banned_until": banned_until, "ban_reason": "Admin ban"}})
     create_audit_log(get_session_user_oid(), "ban_user", "user", user_oid, {"days": days})
     flash(tr("flash.admin.user_banned"), "success")
     return redirect(url_for("admin.dashboard"))
@@ -761,7 +777,7 @@ def unban_user(user_id):
         flash(tr("flash.admin.root_admin_ban_forbidden"), "danger")
         return redirect(url_for("admin.dashboard"))
 
-    extensions.users_col.update_one({"_id": user_oid}, {"$unset": {"banned_until": ""}})
+    extensions.users_col.update_one({"_id": user_oid}, {"$unset": {"banned_until": "", "ban_reason": ""}})
     create_audit_log(get_session_user_oid(), "unban_user", "user", user_oid)
     flash(tr("flash.admin.user_unbanned"), "success")
     return redirect(url_for("admin.dashboard"))

@@ -45,6 +45,8 @@ from auth_helpers import (
     count_creator_subscribers,
     device_summary_text,
     get_creator_subscription,
+    get_or_issue_robot_challenge,
+    get_robot_watchdog_actor,
     get_user_notifications,
     get_request_device_context,
     is_disposable_email,
@@ -67,7 +69,9 @@ from auth_helpers import (
     safe_mongo_update_one,
     send_email_message,
     serialize_song,
+    verify_robot_challenge_answer,
     song_stream_url,
+    clear_robot_watchdog_restrictions,
     validate_or_purge_document,
     visible_song_filter,
     username_policy_ok,
@@ -2593,6 +2597,28 @@ def verify_email(token):
         session.pop("pending_verification_email", None)
     flash(tr("flash.accounts.email_verified"), "success")
     return redirect(url_for("accounts.login"))
+
+
+@bp.route("/robot-check", methods=["GET", "POST"])
+def robot_check():
+    requested_next = request.values.get("next", "")
+    challenge = get_or_issue_robot_challenge(requested_next)
+
+    if request.method == "POST":
+        answer = (request.form.get("answer", "") or "").strip()
+        ok, next_path = verify_robot_challenge_answer(answer)
+        if ok:
+            flash(tr("flash.auth.robot_check_success"), "success")
+            return redirect(next_path or url_for("main.index"))
+        flash(tr("flash.auth.robot_check_invalid"), "danger")
+        challenge = get_or_issue_robot_challenge(requested_next, rotate=True)
+
+    return render_template(
+        "accounts/robot_check.jinja",
+        challenge_question=challenge.get("question", ""),
+        challenge_expires_seconds=max(1, int(challenge.get("expires_at", 0) or 0) - int(time.time())),
+        next_url=challenge.get("next_path", "") or url_for("main.index"),
+    )
 
 
 @bp.route("/forgot-password", methods=["GET", "POST"])

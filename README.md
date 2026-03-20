@@ -2350,23 +2350,6 @@ Le root admin n'est pas auto-banni par ce mécanisme.
 
 L'événement peut être journalisé, mais le compte root reste utilisable pour éviter un blocage administratif accidentel.
 
-### Routes de test locales
-
-Pour faciliter la validation, PulseBeat expose temporairement plusieurs routes de test locales :
-
-- `/debug/test/503/limp`
-- `/debug/test/503/latched`
-- `/debug/test/503/reset`
-- `/debug/test/408`
-- `/debug/test/429`
-
-Notes :
-
-- elles sont réservées aux accès locaux
-- la route `503/reset` permet de sortir des modes de test `limp` ou `latched`
-- la route de test `429` n'est pas punitive par elle-même
-- un mode `challenge` peut aussi être demandé sur la route de test `429` sans faire progresser le vrai niveau de sanction du compte
-
 ### Variables d'environnement associées
 
 - `REQUEST_TIMEOUT_SECONDS`

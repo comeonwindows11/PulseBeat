@@ -2316,8 +2316,6 @@ def robot_watchdog_should_skip(endpoint: str | None = None) -> bool:
         return False
     if endpoint_name == "static" or endpoint_name.startswith("static"):
         return True
-    if endpoint_name.startswith("debug_") or request.path.startswith("/debug/test/"):
-        return True
     return endpoint_name in ROBOT_WATCHDOG_SKIP_ENDPOINTS
 
 

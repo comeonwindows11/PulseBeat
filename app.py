@@ -164,8 +164,6 @@ def _service_watchdog_skip(endpoint: str | None = None) -> bool:
     endpoint_name = str(endpoint or request.endpoint or "").strip()
     if endpoint_name == "static" or endpoint_name.startswith("static"):
         return True
-    if endpoint_name.startswith("debug_") or request.path.startswith("/debug/test/"):
-        return True
     return endpoint_name in {"favicon"}
 
 
@@ -1099,60 +1097,6 @@ def create_app():
     def favicon():
         return ("", 204)
 
-    def _allow_local_debug_only():
-        host = str((request.host or "").split(":", 1)[0] or "").strip().lower()
-        remote = str(request.remote_addr or "").strip().lower()
-        if host in {"127.0.0.1", "localhost", "::1"} or remote in {"127.0.0.1", "::1"}:
-            return None
-        abort(404)
-
-    @app.route("/debug/test/503/limp")
-    def debug_503_limp():
-        _allow_local_debug_only()
-        _set_service_watchdog_mode(app, "limp", t("errors.503.limp_mode"))
-        return _render_error_response(503, RuntimeError(t("errors.503.limp_mode")))
-
-    @app.route("/debug/test/503/latched")
-    def debug_503_latched():
-        _allow_local_debug_only()
-        _set_service_watchdog_mode(app, "latched", t("errors.503.restart_required"))
-        return _render_error_response(503, RuntimeError(t("errors.503.restart_required")))
-
-    @app.route("/debug/test/503/reset")
-    def debug_503_reset():
-        _allow_local_debug_only()
-        _set_service_watchdog_mode(app, "normal", "")
-        return jsonify({"ok": True, "message": "service watchdog reset"})
-
-    @app.route("/debug/test/408")
-    def debug_408_timeout():
-        _allow_local_debug_only()
-        if request.args.get("runtime") == "1":
-            budget = max(1, int(getattr(g, "_request_timeout_budget", app.config.get("REQUEST_TIMEOUT_SECONDS", 20)) or 20))
-            time.sleep(budget + 2)
-            return f"late response after {budget + 2}s"
-        return _render_error_response(408, TimeoutError("debug_forced_timeout"))
-
-    @app.route("/debug/test/429")
-    def debug_429_guard():
-        _allow_local_debug_only()
-        debug_state = session.get("pulsebeat_debug_429") or {}
-        hits = int(debug_state.get("hits", 0) or 0) + 1
-        debug_state["hits"] = hits
-        debug_state["last_at"] = int(time.time())
-        session["pulsebeat_debug_429"] = debug_state
-        if hits >= 2:
-            get_or_issue_robot_challenge(url_for("main.index"), rotate=True)
-            return redirect(url_for("accounts.robot_check", next=url_for("main.index")))
-        return _render_error_response(429, RuntimeError(t("errors.429.msg")))
-
-    @app.route("/debug/test/429/reset")
-    def debug_429_reset():
-        _allow_local_debug_only()
-        session.pop("pulsebeat_debug_429", None)
-        session.pop("pulsebeat_robot_challenge", None)
-        return jsonify({"ok": True, "message": "robot watchdog debug state reset"})
-
     @app.route("/dino")
     def dino_easter_egg():
         return render_template(
@@ -1274,12 +1218,6 @@ def create_app():
                 "accounts.robot_check",
                 "dino_easter_egg",
                 "dino_leaderboard_api",
-                "debug_503_limp",
-                "debug_503_latched",
-                "debug_503_reset",
-                "debug_408_timeout",
-                "debug_429_guard",
-                "debug_429_reset",
                 "static",
             }
             if endpoint in allowed or endpoint.startswith("static"):
@@ -1315,12 +1253,6 @@ def create_app():
                 "accounts.robot_check",
                 "dino_easter_egg",
                 "dino_leaderboard_api",
-                "debug_503_limp",
-                "debug_503_latched",
-                "debug_503_reset",
-                "debug_408_timeout",
-                "debug_429_guard",
-                "debug_429_reset",
                 "static",
             } and not endpoint.startswith("static"):
                 flash(t("flash.accounts.session_invalidated"), "warning")

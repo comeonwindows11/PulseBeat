@@ -7,6 +7,7 @@ from pymongo.errors import PyMongoError
 
 from auth_helpers import (
     InvalidStoredDocumentError,
+    build_special_insensitive_search_pattern,
     can_access_song,
     compose_and_filters,
     contains_profanity,
@@ -424,7 +425,8 @@ def playlist_search_suggest(playlist_id):
     if not song_ids:
         return jsonify({"items": []})
 
-    regex = {"$regex": re.escape(q), "$options": "i"}
+    pattern = build_special_insensitive_search_pattern(q, max_len=120)
+    regex = {"$regex": pattern, "$options": "i"}
     query = {
         "_id": {"$in": song_ids},
         "$or": [{"title": regex}, {"artist": regex}, {"genre": regex}, {"lyrics_text": regex}],
@@ -513,15 +515,14 @@ def playlist_detail(playlist_id):
             songs_by_id = {song["_id"]: song for song in raw_songs}
             ordered = [songs_by_id[sid] for sid in song_ids if sid in songs_by_id]
             if songs_q:
-                needle = re.escape(songs_q)
-                pattern = re.compile(needle, re.IGNORECASE)
+                compiled_pattern = re.compile(build_special_insensitive_search_pattern(songs_q, max_len=120), re.IGNORECASE)
                 ordered = [
                     song
                     for song in ordered
-                    if pattern.search(song.get("title", ""))
-                    or pattern.search(song.get("artist", ""))
-                    or pattern.search(song.get("genre", ""))
-                    or pattern.search(song.get("lyrics_text", ""))
+                    if compiled_pattern.search(song.get("title", ""))
+                    or compiled_pattern.search(song.get("artist", ""))
+                    or compiled_pattern.search(song.get("genre", ""))
+                    or compiled_pattern.search(song.get("lyrics_text", ""))
                 ]
             total_playlist_songs = len(ordered)
             songs_pages = max(1, ceil(total_playlist_songs / per_page)) if total_playlist_songs else 1

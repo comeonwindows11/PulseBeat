@@ -1095,7 +1095,7 @@ def create_app():
 
     @app.route("/favicon.ico")
     def favicon():
-        return ("", 204)
+        return redirect(url_for("static", filename="favicon.svg"), code=302)
 
     @app.route("/dino")
     def dino_easter_egg():

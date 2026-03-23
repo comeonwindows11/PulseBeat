@@ -5,6 +5,7 @@ from flask import Blueprint, abort, current_app, make_response, redirect, render
 
 from auth_helpers import (
     InvalidStoredDocumentError,
+    build_special_insensitive_search_pattern,
     get_session_user_oid,
     parse_object_id,
     serialize_song,
@@ -282,7 +283,7 @@ def index():
     text_filters = []
 
     if q:
-        escaped = re.escape(q)
+        escaped = build_special_insensitive_search_pattern(q, max_len=120)
         text_filters = [
             {"title": {"$regex": escaped, "$options": "i"}},
             {"artist": {"$regex": escaped, "$options": "i"}},

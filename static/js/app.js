@@ -1941,24 +1941,9 @@
         index = Math.max(index - 1, 0);
         render();
       } else if (event.key === "Enter") {
-        event.preventDefault();
-        if (items[index]) {
-          input.value = items[index].value || items[index].title || "";
-          const targetHiddenId = input.getAttribute("data-target-hidden");
-          if (targetHiddenId) {
-            const hidden = document.getElementById(targetHiddenId);
-            if (hidden) hidden.value = items[index].song_id || "";
-          }
-          items = [];
-          index = -1;
-          render();
-
-          if (input.getAttribute("data-submit-on-select") === "1") {
-            const form = input.closest("form");
-            if (form && typeof form.requestSubmit === "function") form.requestSubmit();
-            else if (form) form.submit();
-          }
-        }
+        items = [];
+        index = -1;
+        render();
       }
     });
 

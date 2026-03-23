@@ -6,6 +6,7 @@ import smtplib
 import threading
 import time
 import errno
+import unicodedata
 from collections import deque
 from datetime import datetime, timedelta
 from email.message import EmailMessage
@@ -119,6 +120,20 @@ ROBOT_WATCHDOG_SKIP_ENDPOINTS = {
     "main.live_songs",
 }
 
+SEARCH_EQUIVALENT_CHAR_GROUPS = {
+    "a": "aàáâãäåāăą",
+    "c": "cçćĉċč",
+    "e": "eèéêëēĕėęě",
+    "i": "iìíîïĩīĭįı",
+    "n": "nñńņňŉ",
+    "o": "oòóôõöøōŏő",
+    "s": "sśŝşšß",
+    "u": "uùúûüũūŭůűų",
+    "y": "yýÿŷ",
+    "z": "zźżž",
+}
+SEARCH_SEPARATOR_PATTERN = r"[\s'’`\"._\-()/\[\]{}:,;!?+&|]*"
+
 
 class InvalidStoredDocumentError(Exception):
     def __init__(self, collection_name: str, reason: str, document_id=None):
@@ -142,6 +157,42 @@ def parse_object_id(value: str):
         return ObjectId(value)
     except Exception:
         return None
+
+
+def build_special_insensitive_search_pattern(value: str, *, max_len: int = 120) -> str:
+    text = unicodedata.normalize("NFKC", str(value or "")).strip()
+    if not text:
+        return ""
+    text = text[: max(1, int(max_len or 120))]
+
+    parts = []
+    last_was_separator = False
+
+    for raw_char in text:
+        lowered = raw_char.lower()
+        decomposed = unicodedata.normalize("NFKD", lowered)
+        base = "".join(ch for ch in decomposed if not unicodedata.combining(ch)) or lowered
+
+        if any(ch.isalnum() for ch in base):
+            if base in SEARCH_EQUIVALENT_CHAR_GROUPS:
+                parts.append(f"[{re.escape(SEARCH_EQUIVALENT_CHAR_GROUPS[base])}]")
+            else:
+                parts.append(re.escape(lowered))
+            last_was_separator = False
+            continue
+
+        if raw_char.isspace() or raw_char in "'’`\"._-()/[]{}:,;!?+&|":
+            if not last_was_separator and parts:
+                parts.append(SEARCH_SEPARATOR_PATTERN)
+                last_was_separator = True
+            continue
+
+        parts.append(re.escape(raw_char))
+        last_was_separator = False
+
+    while parts and parts[-1] == SEARCH_SEPARATOR_PATTERN:
+        parts.pop()
+    return "".join(parts) or re.escape(text)
 
 
 def _flatten_pymongo_error_message(exc) -> str:

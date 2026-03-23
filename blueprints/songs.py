@@ -23,6 +23,7 @@ from auth_helpers import (
     admin_required,
     allowed_file,
     audio_upload_signature_ok,
+    build_special_insensitive_search_pattern,
     can_user_use_database_audio_storage,
     can_access_song,
     cleanup_song,
@@ -982,7 +983,7 @@ def search_suggest():
     if not q:
         return jsonify({"items": []})
     user_oid = get_session_user_oid()
-    safe_query = re.escape(q[:80])
+    safe_query = build_special_insensitive_search_pattern(q, max_len=80)
     regex = {"$regex": safe_query, "$options": "i"}
     query = {"$and": [visible_song_filter(user_oid), {"$or": [{"title": regex}, {"artist": regex}, {"genre": regex}, {"lyrics_text": regex}]}]}
     rows = list(extensions.songs_col.find(query, {"title": 1, "artist": 1}).sort("created_at", -1).limit(15))

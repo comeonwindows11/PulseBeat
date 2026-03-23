@@ -1398,11 +1398,11 @@
     if (!Array.isArray(state.queue) || !state.queue.length) return;
     if (index < 0 || index >= state.queue.length) return;
     if (index === state.index) return;
-    transitionWithCrossfade(() => {
-      state.index = index;
-      state.time = 0;
-      return applySong(true, { manual: true });
-    }).catch(() => {});
+    navigateToIndex(index, { manual: true, useCrossfade: false })
+      .then(() => {
+        renderQueueEditor();
+      })
+      .catch(() => {});
   }
 
   function renderQueueEditor() {

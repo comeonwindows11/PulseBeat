@@ -827,8 +827,7 @@ def create_app():
     app.secret_key = os.getenv("FLASK_SECRET_KEY", "change-me-in-production")
     app.config["APP_NAME"] = "PulseBeat"
     app.config["MONGO_URI"] = os.getenv(
-        "MONGO_URI",
-        "mongodb://localhost:27017/musicPlayer",
+        "MONGO_URI"
     )
     app.config["MONGO_DB_NAME"] = "musicPlayer"
     app.config["UPLOAD_DIR"] = os.path.join(app.static_folder, "uploads")

@@ -88,8 +88,10 @@
   const TAB_ID_KEY = "pulsebeat_tab_id_v1";
   const TAB_OPENED_AT_KEY = "pulsebeat_tab_opened_at_v1";
   const TAB_AUDIO_DECISION_KEY = "pulsebeat_tab_audio_decision_v1";
+  const INTERNAL_NAV_RESUME_KEY = "pulsebeat_internal_navigation_resume_v1";
   const TAB_HEARTBEAT_MS = 5000;
   const TAB_STALE_MS = 20000;
+  const INTERNAL_NAV_RESUME_TTL_MS = 12000;
   const MOBILE_PLAYER_BREAKPOINT_QUERY = "(max-width: 768px)";
   const mobilePlayerMediaQuery = window.matchMedia ? window.matchMedia(MOBILE_PLAYER_BREAKPOINT_QUERY) : null;
 
@@ -131,6 +133,7 @@
     isPlaying: false,
     time: 0,
     playMode: "normal",
+    autoPlayMode: "normal",
     shuffleHistory: [],
     queueContext: "auto",
     playbackRate: 1,
@@ -380,7 +383,7 @@
     tabGuardState.decision = decision === "allow" ? "allow" : (decision === "deny" ? "deny" : "ask");
 
     ensureTabRegistered();
-    evaluateTabGuard(true);
+    evaluateTabGuard(false);
 
     if (tabGuardAllowBtn) {
       tabGuardAllowBtn.addEventListener("click", () => {
@@ -1657,18 +1660,29 @@
     return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
   }
 
+  function normalizeAutoPlayMode(mode) {
+    return mode === "repeat_one" ? "repeat_one" : "normal";
+  }
+
+  function effectivePlayMode() {
+    if (state.queueContext === "playlist") {
+      return ["normal", "shuffle", "repeat_one"].includes(state.playMode) ? state.playMode : "normal";
+    }
+    return normalizeAutoPlayMode(state.autoPlayMode);
+  }
+
   function modeLabel() {
-    if (state.queueContext !== "playlist") return i18n.playerAutoMode;
-    if (state.playMode === "shuffle") return i18n.playerModeShuffle;
-    if (state.playMode === "repeat_one") return i18n.playerModeRepeatOne;
+    const mode = effectivePlayMode();
+    if (mode === "shuffle") return i18n.playerModeShuffle;
+    if (mode === "repeat_one") return i18n.playerModeRepeatOne;
     return i18n.playerModeNormal;
   }
 
   function updateModeUI() {
     if (!modeBtn) return;
-    const isPlaylist = state.queueContext === "playlist";
-    modeBtn.classList.toggle("hidden", !isPlaylist);
-    modeBtn.dataset.mode = state.playMode;
+    const hasQueue = Array.isArray(state.queue) && state.queue.length > 0 && Boolean(currentSong());
+    modeBtn.classList.toggle("hidden", !hasQueue);
+    modeBtn.dataset.mode = effectivePlayMode();
     modeBtn.setAttribute("aria-label", modeLabel());
     modeBtn.title = modeLabel();
   }
@@ -1678,8 +1692,10 @@
     if (queueNormalizeToggle) queueNormalizeToggle.checked = !!state.normalizeVolumeEnabled;
   }
 
-  function saveState() {
-    state.time = getPlaybackTimeSeconds();
+  function saveState(options = {}) {
+    if (!options.preserveTime) {
+      state.time = getPlaybackTimeSeconds();
+    }
     const persistedState = Object.assign({}, state, {
       // UI transient state must not survive page changes.
       playlistModalOpen: false,
@@ -1703,6 +1719,7 @@
       if (!["normal", "shuffle", "repeat_one"].includes(state.playMode)) {
         state.playMode = "normal";
       }
+      state.autoPlayMode = normalizeAutoPlayMode(state.autoPlayMode);
       if (!["auto", "playlist"].includes(state.queueContext)) {
         state.queueContext = "auto";
       }
@@ -2339,7 +2356,10 @@
           } catch (_e) {}
         }
         startYoutubeTimer();
-        saveState();
+        if (!autoplay && resumeAt > 0) {
+          state.time = resumeAt;
+        }
+        saveState({ preserveTime: !autoplay && resumeAt > 0 });
       } catch (_e) {
         clearManualPlaybackAssist();
         showPlayerError(404);
@@ -2431,9 +2451,12 @@
       clearManualPlaybackAssist();
       const targetGain = state.normalizeVolumeEnabled ? Number(state.normalizationGain || 1) : 1;
       setMasterGain(targetGain, 0).catch(() => {});
+      if (resumeAt > 0) {
+        state.time = resumeAt;
+      }
       state.isPlaying = false;
       updateMeta(song);
-      saveState();
+      saveState({ preserveTime: resumeAt > 0 });
     }
   }
 
@@ -2614,18 +2637,19 @@
     if (state.playlistModalOpen) return;
     if (!state.queue.length) return;
     hydrateQueueFromPageIfNeeded();
+    const mode = effectivePlayMode();
+
+    if (mode === "repeat_one" && !manual) {
+      restartCurrentSongFromStart();
+      if (!state.isPlaying) {
+        togglePlayPause();
+      }
+      return;
+    }
 
     if (state.queueContext === "playlist") {
-      if (state.playMode === "repeat_one" && !manual) {
-        restartCurrentSongFromStart();
-        if (!state.isPlaying) {
-          togglePlayPause();
-        }
-        return;
-      }
-
       let nextIndex = state.index;
-      if (state.playMode === "shuffle") {
+      if (mode === "shuffle") {
         state.shuffleHistory.push(state.index);
         nextIndex = pickRandomIndex(state.index);
       } else {
@@ -2652,12 +2676,13 @@
 
   function resolvePreviousIndex() {
     if (!state.queue.length) return -1;
+    const mode = effectivePlayMode();
 
     if (state.queueContext === "playlist") {
-      if (state.playMode === "shuffle" && state.shuffleHistory.length) {
+      if (mode === "shuffle" && state.shuffleHistory.length) {
         return state.shuffleHistory[state.shuffleHistory.length - 1];
       }
-      if (state.playMode === "shuffle") {
+      if (mode === "shuffle") {
         return pickRandomIndex(state.index);
       }
       return (state.index - 1 + state.queue.length) % state.queue.length;
@@ -2693,7 +2718,7 @@
     }
 
     let prevIndex = prevIndexCandidate;
-    if (state.queueContext === "playlist" && state.playMode === "shuffle" && state.shuffleHistory.length) {
+    if (state.queueContext === "playlist" && effectivePlayMode() === "shuffle" && state.shuffleHistory.length) {
       // En mode shuffle, on consomme bien l'historique au moment du déplacement.
       prevIndex = state.shuffleHistory.pop();
     }
@@ -2711,11 +2736,19 @@
   }
 
   function cycleMode() {
-    if (state.queueContext !== "playlist") return;
-    if (state.playMode === "normal") {
+    if (state.queueContext !== "playlist") {
+      state.autoPlayMode = effectivePlayMode() === "repeat_one" ? "normal" : "repeat_one";
+      state.shuffleHistory = [];
+      updateModeUI();
+      saveState();
+      return;
+    }
+
+    const mode = effectivePlayMode();
+    if (mode === "normal") {
       state.playMode = "shuffle";
       state.shuffleHistory = [];
-    } else if (state.playMode === "shuffle") {
+    } else if (mode === "shuffle") {
       state.playMode = "repeat_one";
     } else {
       state.playMode = "normal";
@@ -3211,6 +3244,52 @@
     }
   }
 
+  function isPlainCurrentTabClick(event, anchor) {
+    if (!event || !anchor) return false;
+    const target = String(anchor.getAttribute("target") || "").trim().toLowerCase();
+    return event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey && target !== "_blank";
+  }
+
+  function isInternalNavigationForm(form) {
+    if (!form || typeof form.getAttribute !== "function") return false;
+    const target = String(form.getAttribute("target") || "").trim().toLowerCase();
+    if (target === "_blank") return false;
+    const action = String(form.getAttribute("action") || window.location.href).trim();
+    try {
+      const resolved = new URL(action || window.location.href, window.location.href);
+      return resolved.origin === window.location.origin;
+    } catch (_e) {
+      return !action || action.startsWith("/");
+    }
+  }
+
+  function markInternalNavigationResumeIntent() {
+    const song = currentSong();
+    if (!song || !song.id || !isSongActuallyPlaying(song)) return;
+    try {
+      sessionStorage.setItem(INTERNAL_NAV_RESUME_KEY, JSON.stringify({
+        at: Date.now(),
+        songId: normalizeSongId(song.id),
+      }));
+    } catch (_e) {}
+  }
+
+  function consumeInternalNavigationResumeIntent(song) {
+    let raw = "";
+    try {
+      raw = sessionStorage.getItem(INTERNAL_NAV_RESUME_KEY) || "";
+      sessionStorage.removeItem(INTERNAL_NAV_RESUME_KEY);
+    } catch (_e) {
+      return false;
+    }
+    const parsed = safeParseJson(raw, null);
+    const at = Number((parsed && parsed.at) || 0);
+    if (!at || Date.now() - at > INTERNAL_NAV_RESUME_TTL_MS) return false;
+    const expectedSongId = normalizeSongId(parsed && parsed.songId);
+    const currentSongId = normalizeSongId(song && song.id);
+    return !expectedSongId || !currentSongId || expectedSongId === currentSongId;
+  }
+
   window.addEventListener("beforeunload", () => {
     persistPlaybackSnapshot(true);
   });
@@ -3231,6 +3310,9 @@
       const anchor = event.target && event.target.closest ? event.target.closest("a[href]") : null;
       if (!anchor) return;
       if (!isInternalNavigationAnchor(anchor)) return;
+      if (isPlainCurrentTabClick(event, anchor)) {
+        markInternalNavigationResumeIntent();
+      }
       persistPlaybackSnapshot(true);
     },
     true,
@@ -3238,7 +3320,10 @@
 
   document.addEventListener(
     "submit",
-    () => {
+    (event) => {
+      if (isInternalNavigationForm(event.target)) {
+        markInternalNavigationResumeIntent();
+      }
       persistPlaybackSnapshot(true);
     },
     true,
@@ -3279,20 +3364,20 @@
 
   async function initializePlayerState() {
     loadState();
+    state.isPlaying = false;
     sanitizeQueueState();
     ensureWaveformLoop();
 
     if (state.queue.length) {
-      const wasPlayingBeforePageChange = !!state.isPlaying;
       const song = currentSong();
       if (song && Number(state.time || 0) > 0) {
         song.resume_at = Number(state.time || 0);
       }
+      const shouldResumePlayback = consumeInternalNavigationResumeIntent(song);
       await applySong(false);
       audio.playbackRate = Number(state.playbackRate) || 1;
       if (speedSelect) speedSelect.value = String(audio.playbackRate);
-
-      if (wasPlayingBeforePageChange && !isPlaybackBlocked(true)) {
+      if (shouldResumePlayback && !isPlaybackBlocked(true)) {
         if (isYoutubeEngineActive()) {
           state.isPlaying = true;
           const player = await ensureYouTubePlayer();
@@ -3313,11 +3398,12 @@
             state.isPlaying = false;
           }
         }
-      } else if (wasPlayingBeforePageChange) {
-        state.isPlaying = false;
+      }
+      if (!state.isPlaying && song && Number(song.resume_at || 0) > 0) {
+        state.time = Number(song.resume_at || 0);
       }
       updateMeta(song);
-      saveState();
+      saveState({ preserveTime: !state.isPlaying && song && Number(song.resume_at || 0) > 0 });
     } else {
       updateMeta(null);
     }

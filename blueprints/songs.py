@@ -746,20 +746,27 @@ def build_comments(song_oid, user_oid, page=1, per_page=50):
         owner_str = str(owner_id) if owner_id else ""
         is_owner = bool(user_oid and owner_str == str(user_oid))
         user_meta = users.get(owner_str, {"username": tr("defaults.unnamed"), "profile_url": ""})
+        username = user_meta.get("username", tr("defaults.unnamed"))
+        created_at = row.get("created_at")
+        created_label = created_at.strftime("%Y-%m-%d %H:%M") if isinstance(created_at, datetime) else ""
+        direct_replies = by_parent.get(comment_id, [])
         item = {
             "id": comment_id,
             "content": row.get("content", ""),
             "created_at": row.get("created_at"),
+            "created_label": created_label,
             "edited_at": row.get("edited_at"),
-            "username": user_meta.get("username", tr("defaults.unnamed")),
+            "username": username,
+            "initial": (username or tr("defaults.unnamed") or "?").strip()[:1].upper(),
             "profile_url": user_meta.get("profile_url", ""),
             "is_owner": is_owner,
             "likes": likes_map.get(comment_id, 0),
             "dislikes": dislikes_map.get(comment_id, 0),
             "user_vote": user_votes_map.get(comment_id, 0),
+            "reply_count": len(direct_replies),
             "replies": [],
         }
-        for child in by_parent.get(comment_id, []):
+        for child in direct_replies:
             item["replies"].append(map_comment(child))
         return item
 

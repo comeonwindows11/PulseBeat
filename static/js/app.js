@@ -1301,8 +1301,13 @@
 
   function setVoteButtonActive(button, active) {
     if (!button) return;
+    if (button.classList.contains("comment-card__vote-btn")) {
+      button.classList.toggle("active", !!active);
+      return;
+    }
     button.classList.add("btn");
     button.classList.toggle("secondary", !active);
+    button.classList.toggle("active", !!active);
   }
 
   function applySongVotesState(data) {
@@ -1356,8 +1361,97 @@
     }
   }
 
+  const COMMENT_PREVIEW_LENGTH = 280;
+  const commentUiState = {
+    expandedCommentIds: new Set(),
+    openReplyThreadIds: new Set(),
+  };
+
   function getCommentsRoot() {
     return document.getElementById("song-comments-root");
+  }
+
+  function commentRootLabel(root, attrName, fallback) {
+    return String((root && root.getAttribute(attrName)) || fallback || "");
+  }
+
+  function formatCommentCountLabel(template, count) {
+    return String(template || "").replace("{count}", String(count));
+  }
+
+  function appendCommentTextWithMentions(target, text) {
+    target.textContent = "";
+    const value = String(text || "");
+    const mentionPattern = /(^|\s)(@[^\s@]+)/g;
+    let lastIndex = 0;
+    let match = mentionPattern.exec(value);
+    while (match) {
+      const prefix = match[1] || "";
+      const mention = match[2] || "";
+      const mentionStart = match.index + prefix.length;
+      if (mentionStart > lastIndex) {
+        target.appendChild(document.createTextNode(value.slice(lastIndex, mentionStart)));
+      }
+      const mentionEl = document.createElement("span");
+      mentionEl.className = "comment-card__mention";
+      mentionEl.textContent = mention;
+      target.appendChild(mentionEl);
+      lastIndex = mentionStart + mention.length;
+      match = mentionPattern.exec(value);
+    }
+    if (lastIndex < value.length) {
+      target.appendChild(document.createTextNode(value.slice(lastIndex)));
+    }
+  }
+
+  function renderCommentContent(card, contentEl, toggleBtn, root) {
+    const commentId = card.getAttribute("data-comment-id") || "";
+    const fullText = contentEl.getAttribute("data-full-text") || contentEl.textContent || "";
+    contentEl.setAttribute("data-full-text", fullText);
+
+    const isLong = fullText.length > COMMENT_PREVIEW_LENGTH;
+    const isExpanded = commentUiState.expandedCommentIds.has(commentId);
+    const visibleText = isLong && !isExpanded
+      ? `${fullText.slice(0, COMMENT_PREVIEW_LENGTH).trimEnd()}...`
+      : fullText;
+
+    appendCommentTextWithMentions(contentEl, visibleText);
+    if (!toggleBtn) return;
+    toggleBtn.hidden = !isLong;
+    toggleBtn.textContent = isExpanded
+      ? commentRootLabel(root, "data-comment-show-less", "Voir moins")
+      : commentRootLabel(root, "data-comment-show-more", "Voir plus");
+    toggleBtn.setAttribute("aria-expanded", isExpanded ? "true" : "false");
+  }
+
+  function updateRepliesToggle(button, root, isOpen) {
+    const count = Number.parseInt(button.getAttribute("data-reply-count") || "0", 10) || 0;
+    const template = isOpen
+      ? commentRootLabel(root, "data-comment-hide-replies", "Masquer les réponses ({count})")
+      : commentRootLabel(root, "data-comment-show-replies", "Voir les réponses ({count})");
+    button.textContent = formatCommentCountLabel(template, count);
+    button.setAttribute("aria-expanded", isOpen ? "true" : "false");
+  }
+
+  function initCommentsUi(root = getCommentsRoot()) {
+    if (!root) return;
+
+    root.querySelectorAll("[data-comment-content]").forEach((contentEl) => {
+      const card = contentEl.closest("[data-comment-id]");
+      const toggleBtn = card ? card.querySelector("[data-comment-content-toggle]") : null;
+      if (!card) return;
+      renderCommentContent(card, contentEl, toggleBtn, root);
+    });
+
+    root.querySelectorAll("[data-replies-toggle]").forEach((button) => {
+      const commentId = button.closest("[data-comment-id]")?.getAttribute("data-comment-id") || "";
+      const targetId = button.getAttribute("data-replies-target") || "";
+      const target = targetId ? document.getElementById(targetId) : null;
+      if (!target) return;
+      const isOpen = commentUiState.openReplyThreadIds.has(commentId);
+      target.hidden = !isOpen;
+      updateRepliesToggle(button, root, isOpen);
+    });
   }
 
   function replaceCommentsRoot(html) {
@@ -1368,6 +1462,7 @@
     const next = doc.getElementById("song-comments-root");
     if (!next) return false;
     current.replaceWith(next);
+    initCommentsUi(next);
     return true;
   }
 
@@ -1415,6 +1510,27 @@
     const userVote = Number(data.user_vote || 0);
     setVoteButtonActive(row.querySelector('button[data-vote="1"]'), userVote === 1);
     setVoteButtonActive(row.querySelector('button[data-vote="-1"]'), userVote === -1);
+  }
+
+  function buildCommentFormPayload(form) {
+    const payload = new FormData(form);
+    const mention = String(form.getAttribute("data-reply-mention") || "").trim();
+    if (!mention) return payload;
+
+    const content = String(payload.get("content") || "").trim();
+    if (!content) {
+      payload.set("content", "");
+      return payload;
+    }
+
+    const normalizedContent = content.toLowerCase();
+    const normalizedMention = mention.toLowerCase();
+    if (normalizedContent === normalizedMention || normalizedContent.startsWith(`${normalizedMention} `) || normalizedContent.startsWith(`${normalizedMention}\n`)) {
+      payload.set("content", content);
+      return payload;
+    }
+    payload.set("content", `${mention} ${content}`);
+    return payload;
   }
 
   function setFormDisabled(form, disabled) {
@@ -1564,7 +1680,7 @@
     if (commentsForm) {
       event.preventDefault();
       const root = getCommentsRoot();
-      const payload = new FormData(commentsForm);
+      const payload = buildCommentFormPayload(commentsForm);
       if (!payload.get("comments_page") && root) {
         payload.set("comments_page", root.getAttribute("data-comments-page") || "1");
       }
@@ -1591,12 +1707,78 @@
   });
 
   document.addEventListener("click", (event) => {
+    const commentTextToggle = event.target.closest("[data-comment-content-toggle]");
+    if (commentTextToggle) {
+      const root = getCommentsRoot();
+      const card = commentTextToggle.closest("[data-comment-id]");
+      const contentEl = card ? card.querySelector("[data-comment-content]") : null;
+      const commentId = card ? card.getAttribute("data-comment-id") || "" : "";
+      if (!root || !card || !contentEl || !commentId) return;
+      if (commentUiState.expandedCommentIds.has(commentId)) {
+        commentUiState.expandedCommentIds.delete(commentId);
+      } else {
+        commentUiState.expandedCommentIds.add(commentId);
+      }
+      renderCommentContent(card, contentEl, commentTextToggle, root);
+      return;
+    }
+
+    const repliesToggle = event.target.closest("[data-replies-toggle]");
+    if (repliesToggle) {
+      const root = getCommentsRoot();
+      const card = repliesToggle.closest("[data-comment-id]");
+      const commentId = card ? card.getAttribute("data-comment-id") || "" : "";
+      const targetId = repliesToggle.getAttribute("data-replies-target") || "";
+      const target = targetId ? document.getElementById(targetId) : null;
+      if (!root || !target || !commentId) return;
+      const willOpen = target.hidden;
+      target.hidden = !willOpen;
+      if (willOpen) commentUiState.openReplyThreadIds.add(commentId);
+      else commentUiState.openReplyThreadIds.delete(commentId);
+      updateRepliesToggle(repliesToggle, root, willOpen);
+      return;
+    }
+
+    const replyOpenBtn = event.target.closest("[data-comment-reply-toggle]");
+    if (replyOpenBtn) {
+      const root = getCommentsRoot();
+      const targetId = replyOpenBtn.getAttribute("data-reply-target") || "";
+      const target = targetId ? document.getElementById(targetId) : null;
+      if (!root || !target) return;
+      root.querySelectorAll(".comment-reply-form").forEach((form) => {
+        if (form !== target && !form.classList.contains("comment-edit-form")) {
+          form.classList.add("hidden");
+        }
+      });
+      target.classList.toggle("hidden");
+      if (!target.classList.contains("hidden")) {
+        const input = target.querySelector('textarea[name="content"]');
+        if (input && typeof input.focus === "function") input.focus();
+      }
+      return;
+    }
+
+    const commentCancelBtn = event.target.closest("[data-comment-cancel]");
+    if (commentCancelBtn) {
+      const form = commentCancelBtn.closest("form");
+      if (!form) return;
+      const input = form.querySelector('textarea[name="content"], input[name="content"]');
+      if (input) input.value = "";
+      if (form.classList.contains("comment-reply-form")) {
+        form.classList.add("hidden");
+      }
+      return;
+    }
+
     const editOpenBtn = event.target.closest(".comment-edit-toggle");
     if (editOpenBtn) {
       const root = getCommentsRoot();
       const targetId = editOpenBtn.getAttribute("data-edit-target");
       if (!root || !targetId) return;
       root.querySelectorAll(".comment-edit-form").forEach((form) => {
+        form.classList.add("hidden");
+      });
+      root.querySelectorAll(".comment-reply-form:not(.comment-edit-form)").forEach((form) => {
         form.classList.add("hidden");
       });
       const target = document.getElementById(targetId);
@@ -1643,6 +1825,7 @@
     }
 
     if (hasComments) {
+      initCommentsUi();
       let commentsPending = false;
       setInterval(() => {
         const root = getCommentsRoot();

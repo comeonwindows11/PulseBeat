@@ -10,7 +10,7 @@ const staticDir = path.join(rootDir, "static");
 const sourceDir = path.join(staticDir, "js");
 const distDir = path.join(staticDir, "dist");
 
-const entryNames = ["app", "player", "admin"];
+const entryNames = ["app", "spa", "player", "admin"];
 
 const obfuscationOptions = {
   compact: true,

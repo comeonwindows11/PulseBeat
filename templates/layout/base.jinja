@@ -160,7 +160,7 @@
   <div id="nav-backdrop" class="nav-backdrop hidden" aria-hidden="true"></div>
   {% endif %}
 
-  <main class="page-container">
+  <main id="pulsebeat-view" class="page-container" aria-live="polite">
     {% with messages = get_flashed_messages(with_categories=true) %}
       {% if messages and not is_recap_experience %}
         <div class="flash-list server-flash-list">
@@ -599,6 +599,7 @@
     };
   </script>
   <script src="{{ url_for('static', filename=client_js_asset('app')) }}"></script>
+  <script src="{{ url_for('static', filename=client_js_asset('spa')) }}"></script>
   {% if not hide_global_player %}
   <script src="{{ url_for('static', filename=client_js_asset('player')) }}"></script>
   {% endif %}

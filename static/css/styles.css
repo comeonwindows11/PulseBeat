@@ -13,6 +13,42 @@
   box-sizing: border-box;
 }
 
+html::before {
+  content: "";
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 2600;
+  width: 100%;
+  height: 3px;
+  pointer-events: none;
+  background:
+    linear-gradient(90deg, transparent 0%, rgba(255, 122, 24, 0.95) 18%, #ffd8b4 52%, rgba(255, 122, 24, 0.95) 82%, transparent 100%);
+  box-shadow: 0 0 18px rgba(255, 122, 24, 0.45);
+  opacity: 0;
+  transform: translateX(-105%) scaleX(0.35);
+  transform-origin: left center;
+}
+
+html.is-spa-navigating::before {
+  opacity: 1;
+  animation: pulsebeat-route-progress 1.05s ease-in-out infinite;
+}
+
+@keyframes pulsebeat-route-progress {
+  0% {
+    transform: translateX(-105%) scaleX(0.35);
+  }
+
+  48% {
+    transform: translateX(-18%) scaleX(0.72);
+  }
+
+  100% {
+    transform: translateX(106%) scaleX(0.38);
+  }
+}
+
 body {
   margin: 0;
   font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;

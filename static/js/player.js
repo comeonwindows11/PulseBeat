@@ -1,6 +1,10 @@
 (function () {
+  if (window.__PULSEBEAT_PLAYER_READY__) return;
+  window.__PULSEBEAT_PLAYER_READY__ = true;
+
   const STORAGE_KEY = "music_player_state_v2";
   const WAVE_STORAGE_KEY = "music_player_wave_v1";
+  const CLOSED_QUEUE_ROOMS_KEY = "pulsebeat_closed_queue_rooms_v1";
   const DEFAULT_PAGE_TITLE = document.title;
   const i18n = window.I18N || {
     playerNoSong: "Aucune musique",
@@ -35,6 +39,7 @@
   const modeBtn = document.getElementById("play-mode-btn");
   const addToPlaylistBtn = document.getElementById("add-to-playlist-btn");
   const playerViewBtn = document.getElementById("player-view-btn");
+  const playerFocusBtn = document.getElementById("player-focus-btn");
   const playerViewStatus = document.getElementById("player-view-status");
   const playerErrorBanner = document.getElementById("player-error-banner");
   const playerErrorText = document.getElementById("player-error-text");
@@ -52,6 +57,20 @@
   const queueInfo = document.getElementById("player-queue-info");
   const queueEmpty = document.getElementById("player-queue-empty");
   const queueClearBtn = document.getElementById("queue-clear-btn");
+  const queueRoomCreateBtn = document.getElementById("queue-room-create-btn");
+  const queueRoomPanel = document.getElementById("queue-room-panel");
+  const queueRoomStatus = document.getElementById("queue-room-status");
+  const queueRoomCode = document.getElementById("queue-room-code");
+  const queueRoomJoinCode = document.getElementById("queue-room-join-code");
+  const queueRoomJoinBtn = document.getElementById("queue-room-join-btn");
+  const queueRoomCopyBtn = document.getElementById("queue-room-copy-btn");
+  const queueRoomCloseBtn = document.getElementById("queue-room-close-btn");
+  const queueRoomParticipants = document.getElementById("queue-room-participants");
+  const queueRoomChat = document.getElementById("queue-room-chat");
+  const queueRoomChatList = document.getElementById("queue-room-chat-list");
+  const queueRoomChatForm = document.getElementById("queue-room-chat-form");
+  const queueRoomChatInput = document.getElementById("queue-room-chat-input");
+  const queueRoomTyping = document.getElementById("queue-room-typing");
   const queueCrossfadeToggle = document.getElementById("queue-crossfade-toggle");
   const queueNormalizeToggle = document.getElementById("queue-normalize-toggle");
   const openCreatePlaylistBtn = document.getElementById("player-open-create-playlist-modal");
@@ -168,6 +187,18 @@
   let playerShellVisible = false;
   let playerShellAnimateOnNextReveal = false;
   let manualPlaybackAssistTimers = [];
+  let activeQueueRoomCode = "";
+  let queueRoomPolling = false;
+  let queueRoomTimer = null;
+  let queueRoomSyncTimer = null;
+  let queueRoomApplyingRemote = false;
+  let queueRoomActorId = "";
+  let queueRoomSeenEventIds = new Set();
+  let queueRoomTypingTimer = null;
+  let queueRoomTypingIdleTimer = null;
+  let queueRoomLastTypingSentAt = 0;
+  let queueRoomTypingActive = false;
+  let queueRoomIsOwner = false;
   const tabGuardState = {
     tabId: "",
     runtimeId: "",
@@ -1359,6 +1390,437 @@
     queueEditorModal.setAttribute("aria-hidden", "true");
   }
 
+  function queueRoomSetVisible(visible) {
+    if (!queueRoomPanel) return;
+    queueRoomPanel.classList.toggle("hidden", !visible);
+  }
+
+  function queueRoomSetStatus(message, code = "") {
+    if (queueRoomStatus) queueRoomStatus.textContent = message || "";
+    if (queueRoomCode) queueRoomCode.textContent = code || activeQueueRoomCode || "";
+    queueRoomSetVisible(true);
+  }
+
+  function queueRoomFormatTime(value) {
+    if (!value) return "";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "";
+    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+
+  function renderQueueRoomChat(messages) {
+    if (!queueRoomChatList) return;
+    queueRoomChatList.innerHTML = "";
+    const visibleMessages = Array.isArray(messages) ? messages.slice(-60) : [];
+    if (!visibleMessages.length) {
+      const empty = document.createElement("li");
+      empty.className = "queue-room-chat__empty muted small";
+      empty.textContent = "Aucun message pour l'instant.";
+      queueRoomChatList.appendChild(empty);
+      return;
+    }
+
+    visibleMessages.forEach((message) => {
+      const item = document.createElement("li");
+      item.className = "queue-room-chat__message";
+      if (message && message.actor_id && message.actor_id === queueRoomActorId) {
+        item.classList.add("is-own");
+      }
+
+      const meta = document.createElement("div");
+      meta.className = "queue-room-chat__meta";
+
+      const author = document.createElement("span");
+      author.textContent = (message && message.actor_name) || "Utilisateur";
+      meta.appendChild(author);
+
+      const time = document.createElement("time");
+      time.textContent = queueRoomFormatTime(message && message.created_at);
+      meta.appendChild(time);
+
+      const body = document.createElement("p");
+      body.textContent = (message && message.body) || "";
+
+      item.appendChild(meta);
+      item.appendChild(body);
+      queueRoomChatList.appendChild(item);
+    });
+    queueRoomChatList.scrollTop = queueRoomChatList.scrollHeight;
+  }
+
+  function renderQueueRoomTyping(typing) {
+    if (!queueRoomTyping) return;
+    const activeTyping = (Array.isArray(typing) ? typing : [])
+      .filter((item) => item && item.id && item.id !== queueRoomActorId);
+    if (!activeTyping.length) {
+      queueRoomTyping.hidden = true;
+      queueRoomTyping.textContent = "";
+      return;
+    }
+    queueRoomTyping.hidden = false;
+    if (activeTyping.length === 1) {
+      queueRoomTyping.textContent = `${activeTyping[0].name || "Quelqu'un"} est en train d'écrire...`;
+      return;
+    }
+    queueRoomTyping.textContent = `${activeTyping.length} personnes sont en train d'écrire...`;
+  }
+
+  function setQueueRoomChatVisible(visible) {
+    if (!queueRoomChat) return;
+    queueRoomChat.classList.toggle("hidden", !visible);
+    queueRoomChat.setAttribute("aria-hidden", visible ? "false" : "true");
+  }
+
+  function resetQueueRoomSession(message, toastMessage) {
+    activeQueueRoomCode = "";
+    queueRoomIsOwner = false;
+    queueRoomSeenEventIds = new Set();
+    persistQueueRoomCode();
+    if (queueRoomTimer) {
+      clearInterval(queueRoomTimer);
+      queueRoomTimer = null;
+    }
+    if (queueRoomSyncTimer) {
+      clearTimeout(queueRoomSyncTimer);
+      queueRoomSyncTimer = null;
+    }
+    if (queueRoomCloseBtn) queueRoomCloseBtn.classList.add("hidden");
+    if (queueRoomParticipants) queueRoomParticipants.textContent = "";
+    setQueueRoomChatVisible(false);
+    renderQueueRoomChat([]);
+    renderQueueRoomTyping([]);
+    queueRoomSetStatus(message || "Lecture normale hors file live.", "");
+    if (toastMessage) showPlaylistToast(toastMessage, "success");
+  }
+
+  function syncQueueRoomSocial(data, announce = true) {
+    if (!data || typeof data !== "object") return;
+    if (data.actor_id) queueRoomActorId = String(data.actor_id);
+    queueRoomIsOwner = data.is_owner === true;
+    setQueueRoomChatVisible(Boolean(activeQueueRoomCode && data.ok && !data.closed));
+    if (queueRoomCloseBtn) queueRoomCloseBtn.classList.toggle("hidden", !queueRoomIsOwner || !activeQueueRoomCode);
+    if (queueRoomParticipants) {
+      const count = Number(data.participant_count || 0);
+      queueRoomParticipants.textContent = count > 1 ? `${count} participants` : `${count || 1} participant`;
+    }
+
+    const events = Array.isArray(data.events) ? data.events : [];
+    events.forEach((event) => {
+      const eventId = String((event && event.id) || "");
+      if (!eventId || queueRoomSeenEventIds.has(eventId)) return;
+      queueRoomSeenEventIds.add(eventId);
+      if (!announce || !event || event.actor_id === queueRoomActorId) return;
+      if (event.type === "join") {
+        showPlaylistToast(`${event.actor_name || "Quelqu'un"} a rejoint la file live.`, "success");
+      }
+    });
+
+    renderQueueRoomChat(data.chat);
+    renderQueueRoomTyping(data.typing);
+  }
+
+  function handleQueueRoomClosed(data) {
+    rememberClosedQueueRoom((data && data.code) || activeQueueRoomCode);
+    removeQueueRoomFromUrl();
+    const message = (data && data.message) || "Le propriétaire a fermé la file live.";
+    resetQueueRoomSession("File live fermée. Lecture normale restaurée.", message);
+  }
+
+  function persistQueueRoomCode() {
+    try {
+      if (activeQueueRoomCode) localStorage.setItem("pulsebeat_queue_room_code_v1", activeQueueRoomCode);
+      else localStorage.removeItem("pulsebeat_queue_room_code_v1");
+    } catch (_e) {}
+  }
+
+  function rememberClosedQueueRoom(code) {
+    const cleanCode = String(code || "").trim().toUpperCase();
+    if (!cleanCode) return;
+    try {
+      const list = JSON.parse(sessionStorage.getItem(CLOSED_QUEUE_ROOMS_KEY) || "[]");
+      const next = Array.from(new Set([cleanCode].concat(Array.isArray(list) ? list : []))).slice(0, 20);
+      sessionStorage.setItem(CLOSED_QUEUE_ROOMS_KEY, JSON.stringify(next));
+    } catch (_e) {}
+  }
+
+  function isClosedQueueRoomRemembered(code) {
+    const cleanCode = String(code || "").trim().toUpperCase();
+    if (!cleanCode) return false;
+    try {
+      const list = JSON.parse(sessionStorage.getItem(CLOSED_QUEUE_ROOMS_KEY) || "[]");
+      return Array.isArray(list) && list.includes(cleanCode);
+    } catch (_e) {
+      return false;
+    }
+  }
+
+  function removeQueueRoomFromUrl() {
+    try {
+      const url = new URL(window.location.href);
+      if (!url.searchParams.has("queue_room")) return;
+      url.searchParams.delete("queue_room");
+      window.history.replaceState(window.history.state, "", url.toString());
+    } catch (_e) {}
+  }
+
+  function scheduleQueueRoomSync() {
+    if (!activeQueueRoomCode || queueRoomApplyingRemote) return;
+    if (queueRoomSyncTimer) clearTimeout(queueRoomSyncTimer);
+    queueRoomSyncTimer = setTimeout(() => {
+      syncQueueRoom();
+    }, 650);
+  }
+
+  function queueRoomPayload() {
+    const song = currentSong();
+    return {
+      queue: Array.isArray(state.queue) ? state.queue : [],
+      index: Number(state.index || 0),
+      title: song ? `${song.title || i18n.playerUntitled || "PulseBeat"} - ${song.artist || ""}` : "PulseBeat session",
+    };
+  }
+
+  async function createQueueRoom() {
+    queueRoomSetStatus("Création de la session...");
+    try {
+      const res = await fetch("/queue-rooms", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: jsonHeaders(true),
+        body: JSON.stringify(queueRoomPayload()),
+      });
+      const data = res.ok ? await res.json() : null;
+      if (!data || !data.ok || !data.code) throw new Error("room");
+      activeQueueRoomCode = data.code;
+      queueRoomSeenEventIds = new Set();
+      persistQueueRoomCode();
+      syncQueueRoomSocial(data, false);
+      queueRoomSetStatus("Session active. Les changements de file peuvent être synchronisés.", activeQueueRoomCode);
+      startQueueRoomPolling();
+    } catch (_e) {
+      queueRoomSetStatus("Impossible de créer la session pour le moment.");
+    }
+  }
+
+  async function joinQueueRoom(code) {
+    const cleanCode = String(code || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+    if (!cleanCode) {
+      queueRoomSetStatus("Entre un code de session.");
+      return;
+    }
+    if (isClosedQueueRoomRemembered(cleanCode)) {
+      resetQueueRoomSession("Cette file live a été fermée. Lecture normale hors file live.", "");
+      return;
+    }
+    queueRoomSetStatus("Connexion à la session...", cleanCode);
+    try {
+      const res = await fetch(`/queue-rooms/${encodeURIComponent(cleanCode)}`, {
+        credentials: "same-origin",
+        headers: jsonHeaders(false),
+      });
+      const data = await res.json().catch(() => null);
+      if (data && data.closed) {
+        handleQueueRoomClosed(data);
+        return;
+      }
+      if (!res.ok) throw new Error("join");
+      if (!data || !data.ok) throw new Error("join");
+      activeQueueRoomCode = cleanCode;
+      queueRoomSeenEventIds = new Set();
+      persistQueueRoomCode();
+      if (Array.isArray(data.queue) && data.queue.length) {
+        queueRoomApplyingRemote = true;
+        setQueue(data.queue, Number(data.index || 0), "playlist", false);
+        queueRoomApplyingRemote = false;
+      }
+      syncQueueRoomSocial(data, false);
+      queueRoomSetStatus("Session rejointe. La file locale suit cette session.", activeQueueRoomCode);
+      startQueueRoomPolling();
+    } catch (_e) {
+      queueRoomSetStatus("Session introuvable ou indisponible.", cleanCode);
+    }
+  }
+
+  async function syncQueueRoom() {
+    if (!activeQueueRoomCode) {
+      await createQueueRoom();
+      return;
+    }
+    queueRoomSetStatus("Synchronisation de la file...", activeQueueRoomCode);
+    try {
+      const res = await fetch(`/queue-rooms/${encodeURIComponent(activeQueueRoomCode)}`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: jsonHeaders(true),
+        body: JSON.stringify(queueRoomPayload()),
+      });
+      const data = await res.json().catch(() => null);
+      if (data && data.closed) {
+        handleQueueRoomClosed(data);
+        return;
+      }
+      if (!res.ok) throw new Error("sync");
+      if (!data || !data.ok) throw new Error("sync");
+      syncQueueRoomSocial(data, false);
+      queueRoomSetStatus("File synchronisée avec la session.", activeQueueRoomCode);
+    } catch (_e) {
+      queueRoomSetStatus("Impossible de synchroniser la session.", activeQueueRoomCode);
+    }
+  }
+
+  async function closeQueueRoom() {
+    if (!activeQueueRoomCode || !queueRoomIsOwner) return;
+    queueRoomSetStatus("Fermeture de la file live...", activeQueueRoomCode);
+    try {
+      const res = await fetch(`/queue-rooms/${encodeURIComponent(activeQueueRoomCode)}/close`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: jsonHeaders(true),
+        body: JSON.stringify({}),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok && !(data && data.closed)) throw new Error("close");
+      handleQueueRoomClosed(data || { message: "File live fermée." });
+    } catch (_e) {
+      queueRoomSetStatus("Impossible de fermer la file live pour le moment.", activeQueueRoomCode);
+    }
+  }
+
+  async function pollQueueRoom(expectedCode) {
+    const roomCode = String(expectedCode || activeQueueRoomCode || "").trim().toUpperCase();
+    if (!roomCode || roomCode !== activeQueueRoomCode || queueRoomPolling) return;
+    queueRoomPolling = true;
+    try {
+      const res = await fetch(`/queue-rooms/${encodeURIComponent(roomCode)}`, {
+        credentials: "same-origin",
+        cache: "no-store",
+        headers: jsonHeaders(false),
+      });
+      const data = await res.json().catch(() => null);
+      if (roomCode !== activeQueueRoomCode) return;
+      if (data && data.closed) {
+        handleQueueRoomClosed(data);
+        return;
+      }
+      if (!res.ok) throw new Error("poll");
+      if (data && data.ok && Array.isArray(data.queue) && data.queue.length) {
+        syncQueueRoomSocial(data, true);
+        const localIds = (state.queue || []).map((item) => normalizeSongId(item && item.id)).join(",");
+        const remoteIds = data.queue.map((item) => normalizeSongId(item && item.id)).join(",");
+        if (localIds !== remoteIds) {
+          queueRoomApplyingRemote = true;
+          state.queue = getUniqueQueue(data.queue);
+          state.index = Math.max(0, Math.min(Number(data.index || 0), state.queue.length - 1));
+          sanitizeQueueState();
+          renderQueueEditor();
+          saveState();
+          queueRoomApplyingRemote = false;
+          queueRoomSetStatus("La file a été mise à jour depuis la session.", activeQueueRoomCode);
+        }
+      } else if (data && data.ok) {
+        syncQueueRoomSocial(data, true);
+      }
+    } catch (_e) {
+    } finally {
+      queueRoomPolling = false;
+    }
+  }
+
+  function startQueueRoomPolling() {
+    if (queueRoomTimer) clearInterval(queueRoomTimer);
+    if (!activeQueueRoomCode) return;
+    const roomCode = activeQueueRoomCode;
+    pollQueueRoom(roomCode);
+    queueRoomTimer = setInterval(() => {
+      if (!activeQueueRoomCode || activeQueueRoomCode !== roomCode) {
+        clearInterval(queueRoomTimer);
+        queueRoomTimer = null;
+        return;
+      }
+      pollQueueRoom(roomCode);
+    }, 8000);
+  }
+
+  async function setQueueRoomTyping(isTyping, force = false) {
+    if (!activeQueueRoomCode) return;
+    const now = Date.now();
+    if (!force && isTyping && now - queueRoomLastTypingSentAt < 1800) return;
+    queueRoomLastTypingSentAt = now;
+    queueRoomTypingActive = !!isTyping;
+    try {
+      const res = await fetch(`/queue-rooms/${encodeURIComponent(activeQueueRoomCode)}/typing`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: jsonHeaders(true),
+        body: JSON.stringify({ typing: !!isTyping }),
+      });
+      const data = await res.json().catch(() => null);
+      if (data && data.closed) {
+        handleQueueRoomClosed(data);
+        return;
+      }
+      if (data && data.ok) syncQueueRoomSocial(data, false);
+    } catch (_e) {}
+  }
+
+  function scheduleQueueRoomTyping() {
+    if (!activeQueueRoomCode) return;
+    if (queueRoomTypingTimer) clearTimeout(queueRoomTypingTimer);
+    queueRoomTypingTimer = setTimeout(() => {
+      setQueueRoomTyping(true).catch(() => {});
+    }, 120);
+    if (queueRoomTypingIdleTimer) clearTimeout(queueRoomTypingIdleTimer);
+    queueRoomTypingIdleTimer = setTimeout(() => {
+      if (!queueRoomTypingActive) return;
+      setQueueRoomTyping(false, true).catch(() => {});
+    }, 2600);
+  }
+
+  async function sendQueueRoomChat() {
+    const message = queueRoomChatInput ? queueRoomChatInput.value.trim() : "";
+    if (!message) return;
+    if (!activeQueueRoomCode) {
+      queueRoomSetStatus("Crée ou rejoins une session live avant d'envoyer un message.");
+      return;
+    }
+    try {
+      const res = await fetch(`/queue-rooms/${encodeURIComponent(activeQueueRoomCode)}/chat`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: jsonHeaders(true),
+        body: JSON.stringify({ message }),
+      });
+      const data = await res.json().catch(() => null);
+      if (data && data.closed) {
+        handleQueueRoomClosed(data);
+        return;
+      }
+      if (!res.ok) throw new Error("chat");
+      if (!data || !data.ok) throw new Error("chat");
+      if (queueRoomChatInput) queueRoomChatInput.value = "";
+      if (queueRoomTypingIdleTimer) clearTimeout(queueRoomTypingIdleTimer);
+      setQueueRoomTyping(false, true).catch(() => {});
+      syncQueueRoomSocial(data, false);
+    } catch (_e) {
+      queueRoomSetStatus("Impossible d'envoyer le message pour le moment.", activeQueueRoomCode);
+    }
+  }
+
+  async function copyQueueRoomLink() {
+    if (!activeQueueRoomCode) {
+      await createQueueRoom();
+    }
+    if (!activeQueueRoomCode) return;
+    const url = new URL(window.location.href);
+    url.searchParams.set("queue_room", activeQueueRoomCode);
+    try {
+      await navigator.clipboard.writeText(url.toString());
+      queueRoomSetStatus("Lien copié. Les invités pourront rejoindre la session.", activeQueueRoomCode);
+    } catch (_e) {
+      queueRoomSetStatus(`Code de session: ${activeQueueRoomCode}`, activeQueueRoomCode);
+    }
+  }
+
   function moveQueueItem(fromIndex, toIndex) {
     if (!Array.isArray(state.queue) || !state.queue.length) return;
     if (fromIndex < 0 || fromIndex >= state.queue.length) return;
@@ -1378,6 +1840,7 @@
     saveState();
     renderQueueEditor();
     showPlaylistToast(i18n.playerQueueMoved || "Queue reordered.", "success");
+    scheduleQueueRoomSync();
   }
 
   function removeQueueItem(index) {
@@ -1395,6 +1858,7 @@
     saveState();
     renderQueueEditor();
     showPlaylistToast(i18n.playerQueueRemoved || "Removed from queue.", "success");
+    scheduleQueueRoomSync();
   }
 
   function jumpToQueueIndex(index) {
@@ -2478,6 +2942,7 @@
     playerShellAnimateOnNextReveal = Boolean(manualStart && !playerShellVisible);
     applySong(true, { manual: manualStart }).catch(() => {});
     saveState();
+    scheduleQueueRoomSync();
   }
 
   function pickRandomIndex(exceptIndex) {
@@ -2930,6 +3395,18 @@
     });
   }
 
+  window.addEventListener("pulsebeat:play-song", (event) => {
+    const song = event.detail && event.detail.song;
+    if (!song || !song.id) return;
+    const pageQueue = Array.isArray(window.PAGE_SONG_OBJECTS) ? window.PAGE_SONG_OBJECTS : [];
+    const index = pageQueue.findIndex((item) => normalizeSongId(item && item.id) === normalizeSongId(song.id));
+    setQueue(index >= 0 ? pageQueue : [song], index >= 0 ? index : 0, "auto", true);
+  });
+
+  window.addEventListener("pulsebeat:focus-mode", () => {
+    setViewMode("fullscreen", true);
+  });
+
   playPauseBtn.addEventListener("click", togglePlayPause);
 
   if (likeBtn) {
@@ -3052,6 +3529,49 @@
       state.index = 0;
       saveState();
       renderQueueEditor();
+      scheduleQueueRoomSync();
+    });
+  }
+  if (queueRoomCreateBtn) {
+    queueRoomCreateBtn.addEventListener("click", () => {
+      queueRoomSetVisible(true);
+      createQueueRoom();
+    });
+  }
+  if (queueRoomJoinBtn) {
+    queueRoomJoinBtn.addEventListener("click", () => joinQueueRoom(queueRoomJoinCode ? queueRoomJoinCode.value : ""));
+  }
+  if (queueRoomJoinCode) {
+    queueRoomJoinCode.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        joinQueueRoom(queueRoomJoinCode.value);
+      }
+    });
+  }
+  if (queueRoomCopyBtn) {
+    queueRoomCopyBtn.addEventListener("click", () => copyQueueRoomLink());
+  }
+  if (queueRoomCloseBtn) {
+    queueRoomCloseBtn.addEventListener("click", () => closeQueueRoom());
+  }
+  if (queueRoomChatForm) {
+    queueRoomChatForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      sendQueueRoomChat();
+    });
+  }
+  if (queueRoomChatInput) {
+    queueRoomChatInput.addEventListener("input", () => {
+      if (queueRoomChatInput.value.trim()) {
+        scheduleQueueRoomTyping();
+      } else {
+        setQueueRoomTyping(false, true).catch(() => {});
+      }
+    });
+    queueRoomChatInput.addEventListener("blur", () => {
+      setQueueRoomTyping(false, true).catch(() => {});
     });
   }
   if (queueCrossfadeToggle) {
@@ -3132,6 +3652,7 @@
   prevBtn.addEventListener("click", invokePrevTrack);
   if (modeBtn) modeBtn.addEventListener("click", cycleMode);
   if (playerViewBtn) playerViewBtn.addEventListener("click", cycleViewMode);
+  if (playerFocusBtn) playerFocusBtn.addEventListener("click", () => setViewMode("fullscreen", true));
 
   if (mobilePlayerMediaQuery) {
     const onPlayerViewportChange = () => syncViewModeToViewport();
@@ -3415,6 +3936,30 @@
   }
 
   initTabGuard();
+
+  try {
+    const bootUrl = new URL(window.location.href);
+    const bootRoomCode = bootUrl.searchParams.get("queue_room") || "";
+    if (bootRoomCode) {
+      if (isClosedQueueRoomRemembered(bootRoomCode)) {
+        removeQueueRoomFromUrl();
+      } else {
+        queueRoomSetVisible(true);
+        joinQueueRoom(bootRoomCode);
+      }
+    } else {
+      const savedRoomCode = String(localStorage.getItem("pulsebeat_queue_room_code_v1") || "").trim();
+      if (savedRoomCode) {
+        if (isClosedQueueRoomRemembered(savedRoomCode)) {
+          localStorage.removeItem("pulsebeat_queue_room_code_v1");
+        } else {
+          activeQueueRoomCode = savedRoomCode;
+          queueRoomSetStatus("Session collaborative restaurée.", activeQueueRoomCode);
+          startQueueRoomPolling();
+        }
+      }
+    }
+  } catch (_e) {}
 
   initializePlayerState().catch(() => {
     updateMeta(currentSong());

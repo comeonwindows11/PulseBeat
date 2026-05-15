@@ -335,8 +335,6 @@
   const shareWhatsappLink = document.getElementById("share-whatsapp-link");
   const shareEmailLink = document.getElementById("share-email-link");
   const tempEmailModal = document.getElementById("temp-email-modal");
-  const tempEmailProceed = document.getElementById("temp-email-proceed");
-  const tempEmailCancel = document.getElementById("temp-email-cancel");
   const reportTitle = document.getElementById("report-modal-title");
   const reportForm = document.getElementById("report-modal-form");
   const reportCancel = document.getElementById("report-modal-cancel");
@@ -889,36 +887,63 @@
 
   let pendingLyricsCandidate = null;
 
+  function currentAddSongLyricsElements() {
+    return {
+      songFileInput: document.getElementById("song-file-input"),
+      songTitleInput: document.getElementById("song-title-input"),
+      songArtistInput: document.getElementById("song-artist-input"),
+      songGenreInput: document.getElementById("song-genre-input"),
+      songSubmit: document.getElementById("add-song-submit"),
+      retryLyricsBtn: document.getElementById("retry-lyrics-btn"),
+      id3Status: document.getElementById("id3-status"),
+      lyricsStatus: document.getElementById("lyrics-status"),
+      lyricsTextInput: document.getElementById("song-lyrics-text-input"),
+      lyricsSourceInput: document.getElementById("song-lyrics-source-input"),
+      lyricsFileWrap: document.getElementById("lyrics-file-wrap"),
+      lyricsFileInput: document.getElementById("lyrics-file-input"),
+      lyricsCandidateMeta: document.getElementById("lyrics-candidate-meta"),
+      lyricsCandidatePreview: document.getElementById("lyrics-candidate-preview"),
+      lyricsCandidateModal: document.getElementById("lyrics-candidate-modal"),
+      lyricsLoadingModal: document.getElementById("lyrics-loading-modal"),
+      lyricsLoadingStep: document.getElementById("lyrics-loading-step"),
+    };
+  }
+
   function setSongFieldsLocked(locked) {
-    [songTitleInput, songArtistInput, songGenreInput, songSubmit].forEach((el) => {
+    const els = currentAddSongLyricsElements();
+    [els.songTitleInput, els.songArtistInput, els.songGenreInput, els.songSubmit].forEach((el) => {
       if (el) el.disabled = locked;
     });
-    if (lyricsFileInput) lyricsFileInput.disabled = locked;
+    if (els.lyricsFileInput) els.lyricsFileInput.disabled = locked;
   }
 
   function clearLyricsCandidate() {
+    const els = currentAddSongLyricsElements();
     pendingLyricsCandidate = null;
-    if (lyricsCandidateMeta) lyricsCandidateMeta.textContent = "";
-    if (lyricsCandidatePreview) lyricsCandidatePreview.textContent = "";
+    if (els.lyricsCandidateMeta) els.lyricsCandidateMeta.textContent = "";
+    if (els.lyricsCandidatePreview) els.lyricsCandidatePreview.textContent = "";
   }
 
   function setLyricsFileWrapVisible(visible) {
+    const { lyricsFileWrap } = currentAddSongLyricsElements();
     if (!lyricsFileWrap) return;
     lyricsFileWrap.classList.toggle("hidden", !visible);
   }
 
   function setLyricsFromDetected(textValue, sourceValue) {
+    const { lyricsTextInput, lyricsSourceInput } = currentAddSongLyricsElements();
     if (lyricsTextInput) lyricsTextInput.value = textValue || "";
     if (lyricsSourceInput) lyricsSourceInput.value = sourceValue || "";
   }
 
   function showLyricsLoading(stepText) {
-    if (lyricsLoadingStep) lyricsLoadingStep.textContent = stepText || (i18n.appLyricsLoadingStepMetadata || "Loading...");
-    showModal(lyricsLoadingModal);
+    const { lyricsLoadingModal: modal, lyricsLoadingStep: step } = currentAddSongLyricsElements();
+    if (step) step.textContent = stepText || (i18n.appLyricsLoadingStepMetadata || "Loading...");
+    showModal(modal);
   }
 
   function hideLyricsLoading() {
-    hideModal(lyricsLoadingModal);
+    hideModal(document.getElementById("lyrics-loading-modal"));
   }
 
   async function enrichMetadataFromTitle(title) {
@@ -933,10 +958,11 @@
   }
 
   function updateRetryLyricsButtonState() {
-    if (!retryLyricsBtn) return;
-    const hasArtist = Boolean((songArtistInput && songArtistInput.value || "").trim());
-    const hasTitle = Boolean((songTitleInput && songTitleInput.value || "").trim());
-    retryLyricsBtn.disabled = !(hasArtist && hasTitle);
+    const { retryLyricsBtn: retryBtn, songArtistInput: artistInput, songTitleInput: titleInput } = currentAddSongLyricsElements();
+    if (!retryBtn) return;
+    const hasArtist = Boolean((artistInput && artistInput.value || "").trim());
+    const hasTitle = Boolean((titleInput && titleInput.value || "").trim());
+    retryBtn.disabled = !(hasArtist && hasTitle);
   }
 
   function titleHintFromFileName(fileName) {
@@ -950,8 +976,9 @@
   }
 
   async function runLyricsLookupFromForm({ keepLoading = false, requireArtist = true, fallbackTitle = "", forceArtistEmpty = false } = {}) {
-    let title = songTitleInput ? songTitleInput.value.trim() : "";
-    let artist = songArtistInput ? songArtistInput.value.trim() : "";
+    const els = currentAddSongLyricsElements();
+    let title = els.songTitleInput ? els.songTitleInput.value.trim() : "";
+    let artist = els.songArtistInput ? els.songArtistInput.value.trim() : "";
     if (!title && fallbackTitle) {
       title = String(fallbackTitle || "").trim();
     }
@@ -964,33 +991,34 @@
     }
 
     if (!keepLoading) showLyricsLoading(i18n.appLyricsLoadingStepOnline || "Searching subtitles online...");
-    if (lyricsStatus) lyricsStatus.textContent = i18n.appLyricsSearchingOnline || "Searching subtitles online...";
+    if (els.lyricsStatus) els.lyricsStatus.textContent = i18n.appLyricsSearchingOnline || "Searching subtitles online...";
 
     try {
       const candidate = await searchLyricsOnline(title, artist);
       if (candidate && candidate.lyrics_text) {
         pendingLyricsCandidate = candidate;
-        if (lyricsCandidateMeta) {
-          lyricsCandidateMeta.textContent = `${candidate.title || title} - ${candidate.artist || artist}`;
+        const currentEls = currentAddSongLyricsElements();
+        if (currentEls.lyricsCandidateMeta) {
+          currentEls.lyricsCandidateMeta.textContent = `${candidate.title || title} - ${candidate.artist || artist}`;
         }
-        if (lyricsCandidatePreview) {
+        if (currentEls.lyricsCandidatePreview) {
           const preview = String(candidate.lyrics_text || "").split(/\r?\n/).slice(0, 18).join("\n");
-          lyricsCandidatePreview.textContent = preview;
+          currentEls.lyricsCandidatePreview.textContent = preview;
         }
         hideLyricsLoading();
-        showModal(lyricsCandidateModal);
-        if (lyricsStatus) lyricsStatus.textContent = i18n.appLyricsCandidateTitle || "Subtitles found online.";
+        showModal(currentEls.lyricsCandidateModal);
+        if (currentEls.lyricsStatus) currentEls.lyricsStatus.textContent = i18n.appLyricsCandidateTitle || "Subtitles found online.";
         showClientNotice(i18n.appLyricsAutoSuccess || "Subtitles detected automatically.", "success");
         return true;
       }
 
       setLyricsFileWrapVisible(true);
-      if (lyricsStatus) lyricsStatus.textContent = i18n.appLyricsSearchNone || "No subtitles found online.";
+      if (els.lyricsStatus) els.lyricsStatus.textContent = i18n.appLyricsSearchNone || "No subtitles found online.";
       showClientNotice(i18n.appLyricsAutoFail || "No automatic subtitles found.", "warning");
       return false;
     } catch (_e) {
       setLyricsFileWrapVisible(true);
-      if (lyricsStatus) lyricsStatus.textContent = i18n.appLyricsSearchNone || "No subtitles found online.";
+      if (els.lyricsStatus) els.lyricsStatus.textContent = i18n.appLyricsSearchNone || "No subtitles found online.";
       showClientNotice(i18n.appLyricsAutoFail || "No automatic subtitles found.", "danger");
       return false;
     } finally {
@@ -1053,23 +1081,25 @@
 
   if (lyricsCandidateAccept) {
     lyricsCandidateAccept.addEventListener("click", () => {
+      const { lyricsStatus: currentLyricsStatus, lyricsCandidateModal: currentLyricsCandidateModal } = currentAddSongLyricsElements();
       if (pendingLyricsCandidate && pendingLyricsCandidate.lyrics_text) {
         setLyricsFromDetected(pendingLyricsCandidate.lyrics_text, "online_auto");
-        if (lyricsStatus) lyricsStatus.textContent = i18n.appTagsDone || "Subtitles loaded.";
+        if (currentLyricsStatus) currentLyricsStatus.textContent = i18n.appTagsDone || "Subtitles loaded.";
         setLyricsFileWrapVisible(false);
       }
       clearLyricsCandidate();
-      hideModal(lyricsCandidateModal);
+      hideModal(currentLyricsCandidateModal);
     });
   }
 
   if (lyricsCandidateReject) {
     lyricsCandidateReject.addEventListener("click", () => {
+      const { lyricsStatus: currentLyricsStatus, lyricsCandidateModal: currentLyricsCandidateModal } = currentAddSongLyricsElements();
       setLyricsFromDetected("", "");
       setLyricsFileWrapVisible(true);
-      if (lyricsStatus) lyricsStatus.textContent = i18n.appLyricsSearchNone || "No subtitles found online.";
+      if (currentLyricsStatus) currentLyricsStatus.textContent = i18n.appLyricsSearchNone || "No subtitles found online.";
       clearLyricsCandidate();
-      hideModal(lyricsCandidateModal);
+      hideModal(currentLyricsCandidateModal);
     });
   }
 
@@ -1165,6 +1195,118 @@
       }
     });
   }
+
+  async function handleDynamicAddSongFileChange(input) {
+    const file = input && input.files && input.files[0];
+    const els = currentAddSongLyricsElements();
+    clearLyricsCandidate();
+    setLyricsFromDetected("", "");
+    setLyricsFileWrapVisible(false);
+
+    if (!file) {
+      setSongFieldsLocked(false);
+      if (els.id3Status) els.id3Status.textContent = "";
+      if (els.lyricsStatus) els.lyricsStatus.textContent = "";
+      updateRetryLyricsButtonState();
+      return;
+    }
+
+    setSongFieldsLocked(true);
+    showLyricsLoading(i18n.appLyricsLoadingStepMetadata || "Checking audio metadata...");
+    if (els.id3Status) els.id3Status.textContent = i18n.appLoadingTags || "Reading ID3 tags...";
+    if (els.lyricsStatus) els.lyricsStatus.textContent = i18n.appLyricsDetecting || "Detecting subtitles from metadata...";
+
+    try {
+      const tags = await parseID3(file);
+      const hasId3Tags = Boolean(tags.title || tags.artist || tags.genre || tags.lyrics);
+
+      if (!hasId3Tags) {
+        const fileHint = titleHintFromFileName(file.name || "");
+        if (els.songTitleInput) els.songTitleInput.value = fileHint || "";
+        if (els.id3Status) els.id3Status.textContent = i18n.appTagsFail || "No ID3 tags found.";
+        if (els.lyricsStatus) els.lyricsStatus.textContent = i18n.appLyricsSearchingOnline || "Searching subtitles online...";
+        updateRetryLyricsButtonState();
+        showLyricsLoading(i18n.appLyricsLoadingStepOnline || "Searching subtitles online...");
+        await runLyricsLookupFromForm({
+          keepLoading: true,
+          requireArtist: false,
+          fallbackTitle: fileHint,
+          forceArtistEmpty: true,
+        });
+        return;
+      }
+
+      if (tags.title && els.songTitleInput) els.songTitleInput.value = tags.title;
+      if (tags.artist && els.songArtistInput) els.songArtistInput.value = tags.artist;
+      if (tags.genre && els.songGenreInput) els.songGenreInput.value = tags.genre;
+
+      if (els.id3Status) {
+        els.id3Status.textContent = (tags.title || tags.artist || tags.genre)
+          ? (i18n.appTagsDone || "ID3 tags loaded.")
+          : (i18n.appTagsFail || "No ID3 tags found.");
+      }
+
+      const titleNow = els.songTitleInput ? els.songTitleInput.value.trim() : "";
+      const artistNow = els.songArtistInput ? els.songArtistInput.value.trim() : "";
+      const genreNow = els.songGenreInput ? els.songGenreInput.value.trim() : "";
+
+      if (titleNow && (!artistNow || !genreNow)) {
+        showLyricsLoading(i18n.appMetadataEnriching || "Searching artist and genre online...");
+        try {
+          const enriched = await enrichMetadataFromTitle(titleNow);
+          if (enriched) {
+            if (els.songArtistInput && !els.songArtistInput.value.trim() && enriched.artist) els.songArtistInput.value = enriched.artist;
+            if (els.songGenreInput && !els.songGenreInput.value.trim() && enriched.genre) els.songGenreInput.value = enriched.genre;
+          }
+        } catch (_e) {}
+      }
+
+      updateRetryLyricsButtonState();
+
+      if (tags.lyrics) {
+        setLyricsFromDetected(tags.lyrics, "metadata");
+        if (els.lyricsStatus) els.lyricsStatus.textContent = i18n.appLyricsFoundMetadata || "Subtitles detected in metadata.";
+        setLyricsFileWrapVisible(false);
+      } else {
+        showLyricsLoading(i18n.appLyricsLoadingStepOnline || "Searching subtitles online...");
+        await runLyricsLookupFromForm({ keepLoading: true });
+      }
+    } catch (_e) {
+      if (els.id3Status) els.id3Status.textContent = i18n.appTagsFail || "ID3 read failed.";
+      setLyricsFileWrapVisible(true);
+      if (els.lyricsStatus) els.lyricsStatus.textContent = i18n.appLyricsSearchNone || "No subtitles found online.";
+    } finally {
+      hideLyricsLoading();
+      setSongFieldsLocked(false);
+      updateRetryLyricsButtonState();
+    }
+  }
+
+  function initSpaAddSongLyrics() {
+    const els = currentAddSongLyricsElements();
+    const form = document.getElementById("add-song-form");
+    if (!form || !els.songFileInput) return;
+    if (songFileInput && els.songFileInput === songFileInput) return;
+    if (form.dataset.lyricsSpaBound === "1") return;
+    form.dataset.lyricsSpaBound = "1";
+
+    els.songFileInput.addEventListener("change", () => {
+      handleDynamicAddSongFileChange(els.songFileInput);
+    });
+    if (els.songTitleInput) els.songTitleInput.addEventListener("input", updateRetryLyricsButtonState);
+    if (els.songArtistInput) els.songArtistInput.addEventListener("input", updateRetryLyricsButtonState);
+    if (els.retryLyricsBtn) {
+      els.retryLyricsBtn.addEventListener("click", async () => {
+        if (els.retryLyricsBtn.disabled) return;
+        await runLyricsLookupFromForm({ keepLoading: false });
+        updateRetryLyricsButtonState();
+      });
+      updateRetryLyricsButtonState();
+    }
+  }
+
+  initSpaAddSongLyrics();
+  document.addEventListener("pulsebeat:navigated", initSpaAddSongLyrics);
 
   if (songTitleInput) songTitleInput.addEventListener("input", updateRetryLyricsButtonState);
   if (songArtistInput) songArtistInput.addEventListener("input", updateRetryLyricsButtonState);
@@ -1409,15 +1551,27 @@
     const fullText = contentEl.getAttribute("data-full-text") || contentEl.textContent || "";
     contentEl.setAttribute("data-full-text", fullText);
 
-    const isLong = fullText.length > COMMENT_PREVIEW_LENGTH;
+    const normalizedFullText = fullText.trim();
+    const lineCount = normalizedFullText.split(/\r\n|\r|\n/).length;
+    const isLong = normalizedFullText.length > COMMENT_PREVIEW_LENGTH || lineCount > 5;
     const isExpanded = commentUiState.expandedCommentIds.has(commentId);
-    const visibleText = isLong && !isExpanded
-      ? `${fullText.slice(0, COMMENT_PREVIEW_LENGTH).trimEnd()}...`
-      : fullText;
+    let visibleText = normalizedFullText;
+    if (isLong && !isExpanded) {
+      if (normalizedFullText.length > COMMENT_PREVIEW_LENGTH) {
+        visibleText = `${normalizedFullText.slice(0, COMMENT_PREVIEW_LENGTH).trimEnd()}...`;
+      } else {
+        visibleText = `${normalizedFullText.split(/\r\n|\r|\n/).slice(0, 5).join("\n").trimEnd()}...`;
+      }
+    }
 
     appendCommentTextWithMentions(contentEl, visibleText);
     if (!toggleBtn) return;
     toggleBtn.hidden = !isLong;
+    toggleBtn.classList.toggle("hidden", !isLong);
+    if (!isLong) {
+      toggleBtn.setAttribute("aria-expanded", "false");
+      return;
+    }
     toggleBtn.textContent = isExpanded
       ? commentRootLabel(root, "data-comment-show-less", "Voir moins")
       : commentRootLabel(root, "data-comment-show-more", "Voir plus");
@@ -1452,6 +1606,27 @@
       target.hidden = !isOpen;
       updateRepliesToggle(button, root, isOpen);
     });
+
+    root.querySelectorAll("[data-comment-composer]").forEach((form) => {
+      syncCommentComposerState(form);
+    });
+  }
+
+  function commentComposerHasText(form) {
+    const input = form ? form.querySelector('textarea[name="content"]') : null;
+    return Boolean(input && input.value.trim());
+  }
+
+  function setCommentComposerExpanded(form, expanded) {
+    if (!form || !form.matches("[data-comment-composer]")) return;
+    const shouldExpand = !!expanded || commentComposerHasText(form);
+    form.classList.toggle("comment-composer--collapsed", !shouldExpand);
+  }
+
+  function syncCommentComposerState(form) {
+    if (!form || !form.matches("[data-comment-composer]")) return;
+    const hasFocus = form.contains(document.activeElement);
+    setCommentComposerExpanded(form, hasFocus || commentComposerHasText(form));
   }
 
   function replaceCommentsRoot(html) {
@@ -1541,40 +1716,75 @@
     });
   }
 
+  function currentAddSongStorageElements() {
+    return {
+      form: document.getElementById("add-song-form"),
+      storageTarget: document.getElementById("song-storage-target"),
+      modal: document.getElementById("database-audio-choice-modal"),
+      serverBtn: document.getElementById("database-audio-choice-server"),
+      databaseBtn: document.getElementById("database-audio-choice-database"),
+    };
+  }
+
   function resetSongStorageChoice() {
-    if (songStorageTargetInput) {
-      songStorageTargetInput.value = "server";
+    const { form, storageTarget } = currentAddSongStorageElements();
+    if (storageTarget) {
+      storageTarget.value = "server";
     }
-    if (addSongForm) {
-      delete addSongForm.dataset.storageChoiceConfirmed;
+    if (form) {
+      delete form.dataset.storageChoiceConfirmed;
     }
   }
 
-  function addSongWantsStorageChoice() {
-    if (!addSongForm || !databaseAudioChoiceModal || !songStorageTargetInput) return false;
-    if (addSongForm.dataset.dbStorageEnabled !== "1" || addSongForm.dataset.dbStorageAllowed !== "1") return false;
-    if (addSongForm.dataset.storageChoiceConfirmed === "1") return false;
+  function addSongWantsStorageChoice(form = document.getElementById("add-song-form")) {
+    const { modal, storageTarget } = currentAddSongStorageElements();
+    if (!form || !modal || !storageTarget) return false;
+    if (form.dataset.dbStorageEnabled !== "1" || form.dataset.dbStorageAllowed !== "1") return false;
+    if (form.dataset.storageChoiceConfirmed === "1") return false;
 
-    const visibilityField = document.getElementById(addSongForm.dataset.privateVisibility || "visibility-select");
+    const visibilityField = document.getElementById(form.dataset.privateVisibility || "visibility-select");
     if (!visibilityField || visibilityField.value !== "public") return false;
 
-    const fileField = document.getElementById(addSongForm.dataset.sourceFile || "song-file-input");
+    const fileField = document.getElementById(form.dataset.sourceFile || "song-file-input");
     if (!fileField || !fileField.files || !fileField.files.length) return false;
 
     return true;
   }
 
   function submitAddSongWithStorageTarget(target) {
-    if (!addSongForm || !songStorageTargetInput) return;
-    songStorageTargetInput.value = target === "database" ? "database" : "server";
-    addSongForm.dataset.storageChoiceConfirmed = "1";
-    hideModal(databaseAudioChoiceModal);
-    if (typeof addSongForm.requestSubmit === "function") addSongForm.requestSubmit();
-    else addSongForm.submit();
+    const { form, storageTarget, modal } = currentAddSongStorageElements();
+    if (!form || !storageTarget) return;
+    storageTarget.value = target === "database" ? "database" : "server";
+    form.dataset.storageChoiceConfirmed = "1";
+    hideModal(modal);
+    if (typeof form.requestSubmit === "function") form.requestSubmit();
+    else form.submit();
+  }
+
+  function initAddSongStorageChoice() {
+    const { form } = currentAddSongStorageElements();
+    if (!form || form.dataset.storageChoiceBound === "1") return;
+    form.dataset.storageChoiceBound = "1";
+    resetSongStorageChoice();
+
+    [currentAddSongLyricsElements().songFileInput, currentAddSongLyricsElements().songArtistInput, currentAddSongLyricsElements().songTitleInput, currentAddSongLyricsElements().songGenreInput].forEach((field) => {
+      if (!field) return;
+      field.addEventListener("change", resetSongStorageChoice);
+      field.addEventListener("input", resetSongStorageChoice);
+    });
+
+    const visibilityField = document.getElementById(form.dataset.privateVisibility || "visibility-select");
+    if (visibilityField) visibilityField.addEventListener("change", resetSongStorageChoice);
+
+    const urlField = document.getElementById(form.dataset.sourceUrl || "song-url-input");
+    if (urlField) {
+      urlField.addEventListener("input", resetSongStorageChoice);
+      urlField.addEventListener("change", resetSongStorageChoice);
+    }
   }
 
   if (addSongForm) {
-    resetSongStorageChoice();
+    initAddSongStorageChoice();
 
     addSongForm.addEventListener("submit", async (event) => {
       if (event.defaultPrevented) return;
@@ -1582,40 +1792,33 @@
       const ok = await validateForm(addSongForm);
       if (!ok) return;
       event.preventDefault();
-      showModal(databaseAudioChoiceModal);
+      showModal(document.getElementById("database-audio-choice-modal"));
     });
-
-    [songFileInput, songArtistInput, songTitleInput, songGenreInput].forEach((field) => {
-      if (!field) return;
-      field.addEventListener("change", resetSongStorageChoice);
-      field.addEventListener("input", resetSongStorageChoice);
-    });
-
-    const visibilityField = document.getElementById(addSongForm.dataset.privateVisibility || "visibility-select");
-    if (visibilityField) {
-      visibilityField.addEventListener("change", () => {
-        resetSongStorageChoice();
-      });
-    }
-
-    const urlField = document.getElementById(addSongForm.dataset.sourceUrl || "song-url-input");
-    if (urlField) {
-      urlField.addEventListener("input", resetSongStorageChoice);
-      urlField.addEventListener("change", resetSongStorageChoice);
-    }
   }
 
-  if (databaseAudioChoiceServer) {
-    databaseAudioChoiceServer.addEventListener("click", () => {
+  document.addEventListener("pulsebeat:navigated", initAddSongStorageChoice);
+
+  document.addEventListener("submit", async (event) => {
+    const form = event.target.closest && event.target.closest("#add-song-form");
+    if (!form || event.defaultPrevented) return;
+    if (!addSongWantsStorageChoice(form)) return;
+    const ok = await validateForm(form);
+    if (!ok) return;
+    event.preventDefault();
+    showModal(document.getElementById("database-audio-choice-modal"));
+  });
+
+  document.addEventListener("click", (event) => {
+    const serverChoice = event.target.closest && event.target.closest("#database-audio-choice-server");
+    if (serverChoice) {
       submitAddSongWithStorageTarget("server");
-    });
-  }
-
-  if (databaseAudioChoiceDatabase) {
-    databaseAudioChoiceDatabase.addEventListener("click", () => {
+      return;
+    }
+    const databaseChoice = event.target.closest && event.target.closest("#database-audio-choice-database");
+    if (databaseChoice) {
       submitAddSongWithStorageTarget("database");
-    });
-  }
+    }
+  });
 
   document.addEventListener("submit", async (event) => {
     if (event.defaultPrevented) return;
@@ -1767,6 +1970,9 @@
       if (form.classList.contains("comment-reply-form")) {
         form.classList.add("hidden");
       }
+      if (form.matches("[data-comment-composer]")) {
+        setCommentComposerExpanded(form, false);
+      }
       return;
     }
 
@@ -1813,32 +2019,61 @@
     if (!hasSongVotes && !hasComments) return;
 
     if (hasSongVotes) {
+      const voteRoot = document.getElementById("song-votes-root");
       refreshSongStats();
-      let statsPending = false;
-      setInterval(() => {
-        if (statsPending) return;
-        statsPending = true;
-        refreshSongStats().finally(() => {
-          statsPending = false;
-        });
-      }, 12000);
+      if (voteRoot && voteRoot.dataset.realtimeBound !== "1") {
+        voteRoot.dataset.realtimeBound = "1";
+        let statsPending = false;
+        setInterval(() => {
+          if (statsPending || !document.body.contains(voteRoot)) return;
+          statsPending = true;
+          refreshSongStats().finally(() => {
+            statsPending = false;
+          });
+        }, 12000);
+      }
     }
 
     if (hasComments) {
-      initCommentsUi();
-      let commentsPending = false;
-      setInterval(() => {
-        const root = getCommentsRoot();
-        if (!root || commentsPending) return;
-        if (root.contains(document.activeElement)) return;
-        commentsPending = true;
-        const page = root.getAttribute("data-comments-page") || "1";
-        refreshCommentsFragment(page, true).finally(() => {
-          commentsPending = false;
-        });
-      }, 15000);
+      const initialRoot = getCommentsRoot();
+      initCommentsUi(initialRoot);
+      if (initialRoot && initialRoot.dataset.realtimeBound !== "1") {
+        initialRoot.dataset.realtimeBound = "1";
+        let commentsPending = false;
+        setInterval(() => {
+          const root = getCommentsRoot();
+          if (!root || commentsPending) return;
+          if (root.dataset.songId !== initialRoot.dataset.songId) return;
+          if (root.contains(document.activeElement)) return;
+          commentsPending = true;
+          const page = root.getAttribute("data-comments-page") || "1";
+          refreshCommentsFragment(page, true).finally(() => {
+            commentsPending = false;
+          });
+        }, 15000);
+      }
     }
   }
+
+  document.addEventListener("focusin", (event) => {
+    const composer = event.target.closest && event.target.closest("[data-comment-composer]");
+    if (composer) setCommentComposerExpanded(composer, true);
+  });
+
+  document.addEventListener("focusout", (event) => {
+    const composer = event.target.closest && event.target.closest("[data-comment-composer]");
+    if (!composer) return;
+    setTimeout(() => syncCommentComposerState(composer), 80);
+  });
+
+  document.addEventListener("input", (event) => {
+    const composer = event.target.closest && event.target.closest("[data-comment-composer]");
+    if (composer) syncCommentComposerState(composer);
+  });
+
+  document.addEventListener("pulsebeat:navigated", () => {
+    initSongDetailRealtime();
+  });
 
   function visibilityLabelForSong(list, visibility) {
     if (visibility === "private") return list.getAttribute("data-vis-private") || "Private";
@@ -2041,6 +2276,177 @@
 
   initSongDetailRealtime();
   initHomeLiveSongs();
+
+  function initCommandPalette() {
+    const modal = document.getElementById("command-palette-modal");
+    const input = document.getElementById("command-palette-input");
+    const results = document.getElementById("command-palette-results");
+    if (!modal || !input || !results) return;
+
+    let items = [];
+    let activeIndex = 0;
+    let timer = null;
+
+    function baseCommands() {
+      const commands = [
+        { type: "link", title: "Accueil", subtitle: "Retourner au fil principal", href: "/" },
+        { type: "link", title: "Ajouter une chanson", subtitle: "Publier une nouvelle piste", href: "/songs/new" },
+        { type: "link", title: "Mes chansons", subtitle: "Ouvrir ta bibliothèque", href: "/songs/my" },
+        { type: "link", title: "Playlists", subtitle: "Gérer les playlists", href: "/playlists" },
+        { type: "link", title: "Historique", subtitle: "Reprendre une écoute récente", href: "/account/history" },
+        { type: "link", title: "Compte", subtitle: "Préférences et sécurité", href: "/account/manage" },
+        { type: "action", title: "Ouvrir la file", subtitle: "Voir et réordonner la file actuelle", action: "queue" },
+        { type: "action", title: "Mode Focus", subtitle: "Afficher le lecteur en ambiance plein écran", action: "focus" },
+      ];
+
+      const pageSongs = Array.isArray(window.PAGE_SONG_OBJECTS) ? window.PAGE_SONG_OBJECTS.slice(0, 8) : [];
+      pageSongs.forEach((song) => {
+        commands.push({
+          type: "song",
+          title: song.title || "Sans titre",
+          subtitle: song.artist || "Chanson sur cette page",
+          song,
+        });
+      });
+      return commands;
+    }
+
+    function matchCommand(command, query) {
+      if (!query) return true;
+      const haystack = `${command.title || ""} ${command.subtitle || ""}`.toLowerCase();
+      return haystack.includes(query.toLowerCase());
+    }
+
+    function render() {
+      results.innerHTML = "";
+      if (!items.length) {
+        const empty = document.createElement("div");
+        empty.className = "command-palette-empty";
+        empty.textContent = "Aucun résultat.";
+        results.appendChild(empty);
+        return;
+      }
+
+      items.forEach((item, index) => {
+        const row = document.createElement("button");
+        row.type = "button";
+        row.className = `command-palette-item${index === activeIndex ? " active" : ""}`;
+        row.setAttribute("role", "option");
+        row.setAttribute("aria-selected", index === activeIndex ? "true" : "false");
+        row.innerHTML = `
+          <span class="command-palette-icon">${item.type === "song" ? "♪" : item.type === "action" ? "⌁" : "↗"}</span>
+          <span class="command-palette-copy">
+            <strong></strong>
+            <small></small>
+          </span>
+        `;
+        row.querySelector("strong").textContent = item.title || "";
+        row.querySelector("small").textContent = item.subtitle || "";
+        row.addEventListener("click", () => runCommand(index));
+        results.appendChild(row);
+      });
+    }
+
+    async function fetchSongCommands(query) {
+      const searchUrl = input.getAttribute("data-song-search-url");
+      if (!searchUrl || !query || query.length < 2) return [];
+      const url = new URL(searchUrl, window.location.origin);
+      url.searchParams.set("q", query);
+      try {
+        const res = await fetch(url.toString(), { credentials: "same-origin", headers: jsonHeaders() });
+        const data = res.ok ? await res.json() : null;
+        return (Array.isArray(data && data.items) ? data.items : []).map((item) => ({
+          type: "link",
+          title: item.title || item.value || "Chanson",
+          subtitle: item.artist || "Résultat de recherche",
+          href: item.detail_url || (item.song_id ? `/songs/${encodeURIComponent(item.song_id)}` : ""),
+        })).filter((item) => item.href);
+      } catch (_e) {
+        return [];
+      }
+    }
+
+    async function refresh() {
+      const query = input.value.trim();
+      const localItems = baseCommands().filter((item) => matchCommand(item, query));
+      const remoteItems = await fetchSongCommands(query);
+      items = [...remoteItems, ...localItems].slice(0, 12);
+      activeIndex = Math.max(0, Math.min(activeIndex, items.length - 1));
+      render();
+    }
+
+    function openPalette() {
+      modal.classList.remove("hidden");
+      modal.setAttribute("aria-hidden", "false");
+      input.value = "";
+      activeIndex = 0;
+      refresh();
+      setTimeout(() => input.focus(), 20);
+    }
+
+    function closePalette() {
+      modal.classList.add("hidden");
+      modal.setAttribute("aria-hidden", "true");
+    }
+
+    function runCommand(index = activeIndex) {
+      const item = items[index];
+      if (!item) return;
+      closePalette();
+      if (item.type === "song" && item.song) {
+        window.dispatchEvent(new CustomEvent("pulsebeat:play-song", { detail: { song: item.song } }));
+        return;
+      }
+      if (item.type === "action" && item.action === "queue") {
+        document.getElementById("queue-editor-btn")?.click();
+        return;
+      }
+      if (item.type === "action" && item.action === "focus") {
+        window.dispatchEvent(new CustomEvent("pulsebeat:focus-mode"));
+        return;
+      }
+      if (item.href) {
+        window.dispatchEvent(new CustomEvent("pulsebeat:navigate", { detail: { href: item.href } }));
+      }
+    }
+
+    input.addEventListener("input", () => {
+      clearTimeout(timer);
+      timer = setTimeout(refresh, 120);
+    });
+
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closePalette();
+      } else if (event.key === "ArrowDown") {
+        event.preventDefault();
+        activeIndex = items.length ? (activeIndex + 1) % items.length : 0;
+        render();
+      } else if (event.key === "ArrowUp") {
+        event.preventDefault();
+        activeIndex = items.length ? (activeIndex - 1 + items.length) % items.length : 0;
+        render();
+      } else if (event.key === "Enter") {
+        event.preventDefault();
+        runCommand();
+      }
+    });
+
+    modal.addEventListener("click", (event) => {
+      if (event.target === modal) closePalette();
+    });
+
+    window.addEventListener("keydown", (event) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        openPalette();
+      }
+    });
+  }
+
+  initCommandPalette();
+
   function attachAutocomplete(input) {
     const url = input.getAttribute("data-autocomplete-url");
     if (!url) return;
@@ -2258,54 +2664,79 @@
     return ok;
   }
 
-  const registerForm = document.getElementById("register-form");
-  const registerEmail = document.getElementById("register-email");
-  const registerTempAck = document.getElementById("register-temp-email-ack");
-
-  function resetTempEmailAck() {
-    if (registerTempAck) registerTempAck.value = "0";
-    if (registerForm) delete registerForm.dataset.tempEmailConfirmed;
+  function getRegisterElements() {
+    return {
+      form: document.getElementById("register-form"),
+      email: document.getElementById("register-email"),
+      ack: document.getElementById("register-temp-email-ack"),
+      modal: document.getElementById("temp-email-modal"),
+      proceed: document.getElementById("temp-email-proceed"),
+      cancel: document.getElementById("temp-email-cancel"),
+    };
   }
 
-  if (registerEmail) {
-    registerEmail.addEventListener("input", () => {
-      resetTempEmailAck();
-    });
+  function resetTempEmailAck(form) {
+    const { ack } = getRegisterElements();
+    if (ack) ack.value = "0";
+    if (form) delete form.dataset.tempEmailConfirmed;
   }
 
-  if (registerForm) {
-    registerForm.addEventListener("submit", (event) => {
-      if (!registerEmail) return;
-      const alreadyConfirmed = registerForm.dataset.tempEmailConfirmed === "1";
+  function initTempEmailWarning() {
+    const { form, email, modal, proceed, cancel } = getRegisterElements();
+    if (!form || form.dataset.tempEmailWarningBound === "1") return;
+    form.dataset.tempEmailWarningBound = "1";
+
+    if (email) {
+      email.addEventListener("input", () => {
+        resetTempEmailAck(form);
+      });
+    }
+
+    form.addEventListener("submit", (event) => {
+      const current = getRegisterElements();
+      if (!current.email) return;
+      const alreadyConfirmed = form.dataset.tempEmailConfirmed === "1";
       if (alreadyConfirmed) return;
-      if (!isDisposableEmail(registerEmail.value)) {
-        resetTempEmailAck();
+      if (!isDisposableEmail(current.email.value)) {
+        resetTempEmailAck(form);
         return;
       }
       event.preventDefault();
-      if (registerTempAck) registerTempAck.value = "0";
-      showModal(tempEmailModal);
+      if (current.ack) current.ack.value = "0";
+      showModal(current.modal);
     });
+
+    if (proceed) {
+      proceed.addEventListener("click", () => {
+        const current = getRegisterElements();
+        if (!current.form) return;
+        current.form.dataset.tempEmailConfirmed = "1";
+        if (current.ack) current.ack.value = "1";
+        hideModal(current.modal);
+        if (typeof current.form.requestSubmit === "function") current.form.requestSubmit();
+        else current.form.submit();
+      });
+    }
+
+    if (cancel) {
+      cancel.addEventListener("click", () => {
+        const current = getRegisterElements();
+        resetTempEmailAck(current.form);
+        hideModal(current.modal);
+        if (current.email && typeof current.email.focus === "function") current.email.focus();
+      });
+    }
+
+    if (modal && modal.dataset.tempEmailBackdropBound !== "1") {
+      modal.dataset.tempEmailBackdropBound = "1";
+      modal.addEventListener("click", (event) => {
+        if (event.target === modal) hideModal(modal);
+      });
+    }
   }
 
-  if (tempEmailProceed) {
-    tempEmailProceed.addEventListener("click", () => {
-      if (!registerForm) return;
-      registerForm.dataset.tempEmailConfirmed = "1";
-      if (registerTempAck) registerTempAck.value = "1";
-      hideModal(tempEmailModal);
-      if (typeof registerForm.requestSubmit === "function") registerForm.requestSubmit();
-      else registerForm.submit();
-    });
-  }
-
-  if (tempEmailCancel) {
-    tempEmailCancel.addEventListener("click", () => {
-      resetTempEmailAck();
-      hideModal(tempEmailModal);
-      if (registerEmail && typeof registerEmail.focus === "function") registerEmail.focus();
-    });
-  }
+  initTempEmailWarning();
+  document.addEventListener("pulsebeat:navigated", initTempEmailWarning);
 
   document.querySelectorAll("form").forEach((form) => {
     if (form.classList.contains("delete-song-form") || form.classList.contains("lang-form")) return;
@@ -2341,6 +2772,12 @@
     });
   });
 
+  document.addEventListener("click", (event) => {
+    const modal = event.target && event.target.classList && event.target.classList.contains("modal") ? event.target : null;
+    if (!modal || modal.classList.contains("force-modal") || modal.classList.contains("setup-modal-force")) return;
+    hideModal(modal);
+  });
+
   window.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
     setMenuOpen(false);
@@ -2348,10 +2785,15 @@
     hideModal(reportModal);
     hideModal(userPickerModal);
     hideModal(tempEmailModal);
+    hideModal(document.getElementById("temp-email-modal"));
     hideModal(lyricsCandidateModal);
     hideModal(shareModal);
     hideModal(profileSubscribersModal);
     hideModal(databaseAudioChoiceModal);
+    document.querySelectorAll(".modal:not(.hidden)").forEach((modal) => {
+      if (modal.classList.contains("force-modal") || modal.classList.contains("setup-modal-force")) return;
+      hideModal(modal);
+    });
     closeNotificationsPanel();
   });
 

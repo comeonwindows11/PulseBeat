@@ -1,7 +1,10 @@
 import os
 import re
+import secrets
+import string
+from datetime import datetime, timedelta
 from math import ceil
-from flask import Blueprint, abort, current_app, make_response, redirect, render_template, request, url_for
+from flask import Blueprint, abort, current_app, jsonify, make_response, redirect, render_template, request, session, url_for
 
 from auth_helpers import (
     InvalidStoredDocumentError,
@@ -26,6 +29,8 @@ SORT_MAP = {
     "artist": [("artist", 1), ("created_at", -1)],
 }
 
+QUEUE_ROOM_CODE_CHARS = string.ascii_uppercase + string.digits
+
 
 def song_to_public(song, user_oid):
     valid_song = validate_or_purge_document("songs", song, context="main.song_to_public")
@@ -47,6 +52,293 @@ def song_to_public(song, user_oid):
     else:
         item["created_ts"] = 0.0
     return item
+
+
+def _queue_rooms_col():
+    return extensions.queue_rooms_col
+
+
+def _new_queue_room_code():
+    for _ in range(12):
+        code = "".join(secrets.choice(QUEUE_ROOM_CODE_CHARS) for _ in range(6))
+        if not _queue_rooms_col().find_one({"code": code}, {"_id": 1}):
+            return code
+    return "".join(secrets.choice(QUEUE_ROOM_CODE_CHARS) for _ in range(8))
+
+
+def _sanitize_queue_item(item):
+    if not isinstance(item, dict):
+        return None
+    song_id = str(item.get("id", "") or "").strip()
+    title = str(item.get("title", "") or "").strip()
+    if not song_id or not title:
+        return None
+    return {
+        "id": song_id[:80],
+        "title": title[:220],
+        "artist": str(item.get("artist", "") or "").strip()[:220],
+        "url": str(item.get("url", "") or "").strip()[:500],
+        "detail_url": str(item.get("detail_url", "") or "").strip()[:500],
+        "source_type": str(item.get("source_type", "") or "").strip()[:80],
+        "source_url": str(item.get("source_url", "") or "").strip()[:500],
+        "external_provider": str(item.get("external_provider", "") or "").strip()[:80],
+        "youtube_video_id": str(item.get("youtube_video_id", "") or "").strip()[:120],
+        "playback_mode": str(item.get("playback_mode", "") or "").strip()[:80],
+        "is_available": item.get("is_available") is not False,
+        "is_audio_playable": item.get("is_audio_playable") is not False,
+        "visibility": str(item.get("visibility", "") or "").strip()[:80],
+    }
+
+
+def _sanitize_queue_items(items):
+    seen = set()
+    out = []
+    for raw in items if isinstance(items, list) else []:
+        item = _sanitize_queue_item(raw)
+        if not item:
+            continue
+        sid = item["id"]
+        if sid in seen:
+            continue
+        seen.add(sid)
+        out.append(item)
+        if len(out) >= 80:
+            break
+    return out
+
+
+def _queue_items_for_viewer(items, user_oid):
+    object_ids = []
+    order = []
+    for item in items if isinstance(items, list) else []:
+        song_oid = parse_object_id(str((item or {}).get("id", "") or ""))
+        if not song_oid:
+            continue
+        object_ids.append(song_oid)
+        order.append(str(song_oid))
+    if not object_ids:
+        return []
+
+    query = {"$and": [visible_song_filter(user_oid), {"_id": {"$in": object_ids}}]}
+    by_id = {
+        str(song["_id"]): song
+        for song in extensions.songs_col.find(query)
+    }
+    visible_items = []
+    seen = set()
+    for sid in order:
+        if sid in seen:
+            continue
+        seen.add(sid)
+        item = song_to_public(by_id.get(sid), user_oid)
+        if item:
+            visible_items.append(item)
+    return visible_items
+
+
+def _queue_room_actor(user_oid):
+    if user_oid:
+        user = extensions.users_col.find_one({"_id": user_oid}, {"username": 1, "email": 1}) or {}
+        return {
+            "id": str(user_oid),
+            "name": str(user.get("username") or user.get("email") or "Utilisateur").strip()[:80],
+        }
+
+    guest_id = session.get("queue_room_guest_id")
+    if not guest_id:
+        guest_id = secrets.token_urlsafe(6)
+        session["queue_room_guest_id"] = guest_id
+    return {"id": f"guest:{guest_id}", "name": "Invité"}
+
+
+def _serialize_queue_room_timestamp(value):
+    return value.isoformat() if value else ""
+
+
+def _sanitize_queue_room_events(events):
+    out = []
+    for event in events if isinstance(events, list) else []:
+        if not isinstance(event, dict):
+            continue
+        out.append(
+            {
+                "id": str(event.get("id", "") or "")[:40],
+                "type": str(event.get("type", "") or "")[:40],
+                "actor_id": str(event.get("actor_id", "") or "")[:120],
+                "actor_name": str(event.get("actor_name", "") or "Utilisateur")[:80],
+                "created_at": _serialize_queue_room_timestamp(event.get("created_at")),
+            }
+        )
+    return out[-40:]
+
+
+def _sanitize_queue_room_chat(messages):
+    out = []
+    for message in messages if isinstance(messages, list) else []:
+        if not isinstance(message, dict):
+            continue
+        body = str(message.get("body", "") or "").strip()
+        if not body:
+            continue
+        out.append(
+            {
+                "id": str(message.get("id", "") or "")[:40],
+                "actor_id": str(message.get("actor_id", "") or "")[:120],
+                "actor_name": str(message.get("actor_name", "") or "Utilisateur")[:80],
+                "body": body[:500],
+                "created_at": _serialize_queue_room_timestamp(message.get("created_at")),
+            }
+        )
+    return out[-60:]
+
+
+def _sanitize_queue_room_typing(typing):
+    now = datetime.utcnow()
+    out = []
+    for item in typing if isinstance(typing, list) else []:
+        if not isinstance(item, dict):
+            continue
+        expires_at = item.get("expires_at")
+        if expires_at and expires_at <= now:
+            continue
+        actor_id = str(item.get("id", "") or "")[:120]
+        if not actor_id:
+            continue
+        out.append(
+            {
+                "id": actor_id,
+                "name": str(item.get("name", "") or "Utilisateur")[:80],
+                "expires_at": _serialize_queue_room_timestamp(expires_at),
+            }
+        )
+    return out[-12:]
+
+
+def _queue_room_participant_count(room):
+    participants = room.get("participants", []) if isinstance(room, dict) else []
+    if not isinstance(participants, list):
+        return 0
+    return len({str(item.get("id", "") or "") for item in participants if isinstance(item, dict) and item.get("id")})
+
+
+def _queue_room_owner_id(room):
+    owner_id = str((room or {}).get("owner_actor_id", "") or "").strip()
+    if owner_id:
+        return owner_id
+    created_by = (room or {}).get("created_by")
+    return str(created_by) if created_by else ""
+
+
+def _queue_room_closed_payload(room, actor):
+    closed_by = str((room or {}).get("closed_by_name", "") or "Le propriétaire").strip()
+    return {
+        "ok": False,
+        "closed": True,
+        "code": (room or {}).get("code", ""),
+        "actor_id": actor["id"],
+        "message": f"{closed_by} a fermé la file live.",
+    }
+
+
+def _touch_queue_room_participant(clean_code, room, actor, heartbeat=False):
+    participants = room.get("participants", []) if isinstance(room, dict) else []
+    participant_ids = {
+        str(item.get("id", "") or "")
+        for item in participants if isinstance(item, dict)
+    }
+    now = datetime.utcnow()
+    if actor["id"] in participant_ids:
+        if heartbeat:
+            _queue_rooms_col().update_one(
+                {"code": clean_code, "participants.id": actor["id"]},
+                {"$set": {"participants.$.last_seen_at": now}},
+            )
+        return
+
+    event = {
+        "id": secrets.token_hex(8),
+        "type": "join",
+        "actor_id": actor["id"],
+        "actor_name": actor["name"],
+        "created_at": now,
+    }
+    _queue_rooms_col().update_one(
+        {"code": clean_code},
+        {
+            "$push": {
+                "participants": {
+                    "id": actor["id"],
+                    "name": actor["name"],
+                    "joined_at": now,
+                    "last_seen_at": now,
+                },
+                "events": {"$each": [event], "$slice": -40},
+            },
+            "$set": {"updated_at": now},
+        },
+    )
+
+
+def _set_queue_room_typing(clean_code, actor, typing):
+    now = datetime.utcnow()
+    _queue_rooms_col().update_one(
+        {"code": clean_code},
+        {
+            "$pull": {
+                "typing": {
+                    "$or": [
+                        {"id": actor["id"]},
+                        {"expires_at": {"$lte": now}},
+                    ]
+                }
+            },
+            "$set": {"updated_at": now},
+        },
+    )
+    if typing:
+        _queue_rooms_col().update_one(
+            {"code": clean_code},
+            {
+                "$push": {
+                    "typing": {
+                        "$each": [
+                            {
+                                "id": actor["id"],
+                                "name": actor["name"],
+                                "expires_at": now + timedelta(seconds=5),
+                            }
+                        ],
+                        "$slice": -12,
+                    }
+                },
+                "$set": {"updated_at": now},
+            },
+        )
+    return _queue_rooms_col().find_one({"code": clean_code})
+
+
+def _queue_room_response(room, user_oid):
+    actor = _queue_room_actor(user_oid)
+    if room.get("closed"):
+        return _queue_room_closed_payload(room, actor)
+
+    queue = _queue_items_for_viewer(room.get("queue", []) or [], user_oid)
+    stored_index = int(room.get("index", 0) or 0)
+    index = max(0, min(stored_index, len(queue) - 1)) if queue else 0
+    updated_at = room.get("updated_at")
+    return {
+        "ok": True,
+        "code": room.get("code", ""),
+        "queue": queue,
+        "index": index,
+        "updated_at": updated_at.isoformat() if updated_at else "",
+        "actor_id": actor["id"],
+        "is_owner": actor["id"] == _queue_room_owner_id(room),
+        "participant_count": _queue_room_participant_count(room),
+        "events": _sanitize_queue_room_events(room.get("events", []) or []),
+        "chat": _sanitize_queue_room_chat(room.get("chat", []) or []),
+        "typing": _sanitize_queue_room_typing(room.get("typing", []) or []),
+    }
 
 
 def recommendation_filters_for_user(user_oid):
@@ -262,6 +554,164 @@ def build_recommendations(user_oid, exclude_song_ids=None, limit=20):
                     break
 
     return recs[:limit]
+
+
+@bp.route("/queue-rooms", methods=["POST"])
+def create_queue_room():
+    user_oid = get_session_user_oid()
+    payload = request.get_json(silent=True) or {}
+    items = _sanitize_queue_items(payload.get("queue", []))
+    index = int(payload.get("index", 0) or 0)
+    index = max(0, min(index, len(items) - 1)) if items else 0
+    now = datetime.utcnow()
+    code = _new_queue_room_code()
+    actor = _queue_room_actor(user_oid)
+    _queue_rooms_col().insert_one(
+        {
+            "code": code,
+            "created_by": user_oid,
+            "owner_actor_id": actor["id"],
+            "created_at": now,
+            "updated_at": now,
+            "queue": items,
+            "index": index,
+            "title": str(payload.get("title", "") or "PulseBeat session").strip()[:120],
+            "participants": [
+                {
+                    "id": actor["id"],
+                    "name": actor["name"],
+                    "joined_at": now,
+                    "last_seen_at": now,
+                }
+            ],
+            "events": [],
+            "chat": [],
+            "typing": [],
+        }
+    )
+    room = _queue_rooms_col().find_one({"code": code}) or {"code": code, "queue": items, "index": index, "updated_at": now}
+    return jsonify(_queue_room_response(room, user_oid))
+
+
+@bp.route("/queue-rooms/<code>", methods=["GET", "POST"])
+def queue_room(code):
+    user_oid = get_session_user_oid()
+    clean_code = re.sub(r"[^A-Z0-9]", "", str(code or "").upper())[:12]
+    if not clean_code:
+        return jsonify({"ok": False}), 404
+    room = _queue_rooms_col().find_one({"code": clean_code})
+    if not room:
+        return jsonify({"ok": False}), 404
+    if room.get("closed"):
+        return jsonify(_queue_room_closed_payload(room, _queue_room_actor(user_oid)))
+    actor = _queue_room_actor(user_oid)
+    _touch_queue_room_participant(clean_code, room, actor)
+    room = _queue_rooms_col().find_one({"code": clean_code}) or room
+
+    if request.method == "POST":
+        payload = request.get_json(silent=True) or {}
+        if room.get("closed"):
+            return jsonify(_queue_room_closed_payload(room, actor))
+        items = _sanitize_queue_items(payload.get("queue", []))
+        index = int(payload.get("index", 0) or 0)
+        index = max(0, min(index, len(items) - 1)) if items else 0
+        _queue_rooms_col().update_one(
+            {"code": clean_code},
+            {"$set": {"queue": items, "index": index, "updated_at": datetime.utcnow()}},
+        )
+        room = _queue_rooms_col().find_one({"code": clean_code}) or {"code": clean_code, "queue": items, "index": index, "updated_at": datetime.utcnow()}
+        return jsonify(_queue_room_response(room, user_oid))
+
+    return jsonify(_queue_room_response(room, user_oid))
+
+
+@bp.route("/queue-rooms/<code>/chat", methods=["POST"])
+def queue_room_chat(code):
+    user_oid = get_session_user_oid()
+    clean_code = re.sub(r"[^A-Z0-9]", "", str(code or "").upper())[:12]
+    if not clean_code:
+        return jsonify({"ok": False}), 404
+    room = _queue_rooms_col().find_one({"code": clean_code})
+    if not room:
+        return jsonify({"ok": False}), 404
+    if room.get("closed"):
+        return jsonify(_queue_room_closed_payload(room, _queue_room_actor(user_oid)))
+
+    payload = request.get_json(silent=True) or {}
+    body = str(payload.get("message", "") or "").strip()
+    if not body:
+        return jsonify({"ok": False, "message": "Message vide."}), 400
+
+    actor = _queue_room_actor(user_oid)
+    _touch_queue_room_participant(clean_code, room, actor, heartbeat=True)
+    now = datetime.utcnow()
+    message = {
+        "id": secrets.token_hex(8),
+        "actor_id": actor["id"],
+        "actor_name": actor["name"],
+        "body": body[:500],
+        "created_at": now,
+    }
+    _queue_rooms_col().update_one(
+        {"code": clean_code},
+        {
+            "$push": {"chat": {"$each": [message], "$slice": -60}},
+            "$set": {"updated_at": now},
+        },
+    )
+    room = _queue_rooms_col().find_one({"code": clean_code}) or room
+    return jsonify(_queue_room_response(room, user_oid))
+
+
+@bp.route("/queue-rooms/<code>/typing", methods=["POST"])
+def queue_room_typing(code):
+    user_oid = get_session_user_oid()
+    clean_code = re.sub(r"[^A-Z0-9]", "", str(code or "").upper())[:12]
+    if not clean_code:
+        return jsonify({"ok": False}), 404
+    room = _queue_rooms_col().find_one({"code": clean_code})
+    if not room:
+        return jsonify({"ok": False}), 404
+    if room.get("closed"):
+        return jsonify(_queue_room_closed_payload(room, _queue_room_actor(user_oid)))
+
+    payload = request.get_json(silent=True) or {}
+    actor = _queue_room_actor(user_oid)
+    _touch_queue_room_participant(clean_code, room, actor, heartbeat=True)
+    room = _set_queue_room_typing(clean_code, actor, bool(payload.get("typing")))
+    return jsonify(_queue_room_response(room or {}, user_oid))
+
+
+@bp.route("/queue-rooms/<code>/close", methods=["POST"])
+def close_queue_room(code):
+    user_oid = get_session_user_oid()
+    clean_code = re.sub(r"[^A-Z0-9]", "", str(code or "").upper())[:12]
+    if not clean_code:
+        return jsonify({"ok": False}), 404
+    room = _queue_rooms_col().find_one({"code": clean_code})
+    if not room:
+        return jsonify({"ok": False}), 404
+
+    actor = _queue_room_actor(user_oid)
+    if actor["id"] != _queue_room_owner_id(room):
+        return jsonify({"ok": False, "message": "Seul le propriétaire peut fermer cette file live."}), 403
+
+    now = datetime.utcnow()
+    _queue_rooms_col().update_one(
+        {"code": clean_code},
+        {
+            "$set": {
+                "closed": True,
+                "closed_at": now,
+                "closed_by_actor_id": actor["id"],
+                "closed_by_name": actor["name"],
+                "updated_at": now,
+            },
+            "$unset": {"typing": ""},
+        },
+    )
+    room = _queue_rooms_col().find_one({"code": clean_code}) or room
+    return jsonify(_queue_room_closed_payload(room, actor))
 
 
 @bp.route("/")

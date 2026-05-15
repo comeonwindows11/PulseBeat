@@ -131,7 +131,7 @@
   </div>
 
   {% if can_comment %}
-    <form method="post" action="{{ url_for('songs.add_comment', song_id=song.id) }}" class="comment-composer song-comment-form" data-ajax-comment-form>
+    <form method="post" action="{{ url_for('songs.add_comment', song_id=song.id) }}" class="comment-composer comment-composer--collapsed song-comment-form" data-ajax-comment-form data-comment-composer>
       <input type="hidden" name="comments_page" value="{{ comments_page }}">
       <label class="visually-hidden" for="song-root-comment">{{ t('song.add_comment') }}</label>
       <textarea id="song-root-comment" name="content" required rows="3" placeholder="{{ t('song.comment_placeholder') }}"></textarea>

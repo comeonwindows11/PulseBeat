@@ -1045,6 +1045,12 @@ def create_app():
     )
     extensions.user_notifications_col.create_index([("recipient_user_id", 1), ("created_at", -1)], name="idx_user_notifications_recipient_created")
     extensions.user_notifications_col.create_index([("recipient_user_id", 1), ("is_read", 1), ("created_at", -1)], name="idx_user_notifications_recipient_read")
+    extensions.queue_rooms_col.create_index("code", unique=True, name="uniq_queue_rooms_code")
+    try:
+        extensions.queue_rooms_col.drop_index("idx_queue_rooms_updated")
+    except PyMongoError:
+        pass
+    extensions.queue_rooms_col.create_index("updated_at", expireAfterSeconds=86400, name="ttl_queue_rooms_updated")
     extensions.listening_events_col.create_index([("user_id", 1), ("created_at", -1)], name="idx_listening_events_user_created")
     extensions.listening_events_col.create_index([("user_id", 1), ("song_id", 1), ("created_at", -1)], name="idx_listening_events_user_song_created")
     _ensure_unique_index_with_dedupe(

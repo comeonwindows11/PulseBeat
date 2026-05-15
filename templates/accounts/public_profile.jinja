@@ -34,12 +34,39 @@
         <button type="button" class="btn secondary" data-open-modal="profile-subscribers-modal">{{ t('profile.view_subscribers') }}</button>
       </div>
       {% endif %}
+      {% if songs %}
+      <div class="hero-actions">
+        <button type="button" class="queue-all btn secondary" data-source="profile" data-context="auto">{{ t('main.queue_all') }}</button>
+      </div>
+      {% endif %}
     </div>
     <div class="hero-panel">
       <div class="hero-stat-card"><span class="hero-stat-label">{{ t('profile.visible_song_count_label') }}</span><strong>{{ visible_song_count }}</strong></div>
       <div class="hero-stat-card"><span class="hero-stat-label">{{ t('profile.visible_playlist_count_label') }}</span><strong>{{ visible_playlist_count }}</strong></div>
       <div class="hero-stat-card"><span class="hero-stat-label">{{ t('profile.comment_count_label') }}</span><strong>{{ comment_count }}</strong></div>
       <div class="hero-stat-card"><span class="hero-stat-label">{{ t('profile.subscriber_count_label') }}</span><strong>{{ profile.subscriber_count }}</strong></div>
+    </div>
+  </section>
+  <section class="profile-mini-grid">
+    <div class="profile-mini-card">
+      <span>{{ app_name }}</span>
+      <strong>{{ profile_spotlight.top_genre }}</strong>
+      <p>{{ profile_spotlight.catalog_mood }}</p>
+    </div>
+    <div class="profile-mini-card">
+      <span>{{ t('main.field.artist') }}</span>
+      <strong>{{ profile_spotlight.top_artist }}</strong>
+      <p>{{ visible_song_count }} titres visibles</p>
+    </div>
+    <div class="profile-mini-card">
+      <span>{{ t('home.latest_title') }}</span>
+      <strong>{{ profile_spotlight.latest_title or '-' }}</strong>
+      <p>{{ profile_spotlight.latest_artist or app_name }}</p>
+    </div>
+    <div class="profile-mini-card">
+      <span>{{ t('nav.playlists') }}</span>
+      <strong>{{ profile_spotlight.playlist_tracks }}</strong>
+      <p>morceaux organisés</p>
     </div>
   </section>
   <section class="grid two-cols">

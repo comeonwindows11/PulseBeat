@@ -241,6 +241,7 @@
   document.addEventListener("submit", (event) => {
     const form = event.target;
     if (!form || typeof form.getAttribute !== "function") return;
+    if (form.closest("[data-spa-ignore]")) return;
     const method = String(form.getAttribute("method") || "get").trim().toLowerCase();
     if (method !== "get") return;
     const targetName = String(form.getAttribute("target") || "").trim().toLowerCase();
@@ -259,6 +260,14 @@
   window.addEventListener("popstate", () => {
     loadUrl(window.location.href, { history: "replace" }).catch(() => {
       window.location.reload();
+    });
+  });
+
+  window.addEventListener("pulsebeat:navigate", (event) => {
+    const href = event.detail && event.detail.href;
+    if (!href) return;
+    loadUrl(href).catch(() => {
+      window.location.assign(href);
     });
   });
 

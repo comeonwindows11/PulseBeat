@@ -4774,6 +4774,32 @@ def _merge_profile_playlist_lists(base_items, extra_items, limit=50):
     return sorted(merged.values(), key=lambda row: float(row.get("updated_ts", 0) or 0), reverse=True)[:limit]
 
 
+def _build_profile_spotlight(songs, playlists):
+    genre_counts = {}
+    artist_counts = {}
+    for song in songs or []:
+        genre = str(song.get("genre", "") or "").strip()
+        if genre:
+            genre_counts[genre] = genre_counts.get(genre, 0) + 1
+        artist = str(song.get("artist", "") or "").strip()
+        if artist:
+            artist_counts[artist] = artist_counts.get(artist, 0) + 1
+
+    top_genre = max(genre_counts.items(), key=lambda row: (row[1], row[0].lower()))[0] if genre_counts else tr("defaults.unknown_artist")
+    top_artist = max(artist_counts.items(), key=lambda row: (row[1], row[0].lower()))[0] if artist_counts else tr("defaults.unknown_artist")
+    latest_song = (songs or [None])[0] if songs else None
+    total_playlist_tracks = sum(int(row.get("song_count", 0) or 0) for row in playlists or [])
+
+    return {
+        "top_genre": top_genre,
+        "top_artist": top_artist,
+        "latest_title": latest_song.get("title", "") if latest_song else "",
+        "latest_artist": latest_song.get("artist", "") if latest_song else "",
+        "playlist_tracks": total_playlist_tracks,
+        "catalog_mood": "Curateur actif" if len(songs or []) >= 10 else "Profil en croissance",
+    }
+
+
 @bp.route("/users/<username>")
 def public_profile(username):
     viewer_oid = get_session_user_oid()
@@ -4892,6 +4918,7 @@ def public_profile(username):
             playlists = _merge_profile_playlist_lists(playlists, extra_playlists, limit=50)
 
     viewer_subscription = get_creator_subscription(target["_id"], viewer_oid) if viewer_oid and not is_self else None
+    profile_spotlight = _build_profile_spotlight(songs, playlists)
 
     return render_template(
         "accounts/public_profile.jinja",
@@ -4914,6 +4941,7 @@ def public_profile(username):
         visible_song_count=len(songs),
         visible_playlist_count=len(playlists),
         comment_count=comment_count,
+        profile_spotlight=profile_spotlight,
     )
 
 

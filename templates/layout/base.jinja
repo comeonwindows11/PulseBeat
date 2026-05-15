@@ -243,6 +243,26 @@
     </div>
   </div>
 
+  {% if not hide_global_chrome %}
+  <div id="command-palette-modal" class="command-palette-modal hidden" aria-hidden="true" role="dialog" aria-modal="true">
+    <div class="command-palette-card">
+      <div class="command-palette-search">
+        <span aria-hidden="true">⌘</span>
+        <input
+          id="command-palette-input"
+          type="search"
+          autocomplete="off"
+          placeholder="{{ t('main.search_placeholder') }}"
+          data-song-search-url="{{ url_for('songs.search_suggest') }}"
+        >
+        <kbd>Esc</kbd>
+      </div>
+      <div id="command-palette-results" class="command-palette-results" role="listbox"></div>
+      <p class="command-palette-hint muted small">Ctrl+K · Entrée</p>
+    </div>
+  </div>
+  {% endif %}
+
   {% if not hide_global_player %}
   <div class="player-shell player-shell-hidden" aria-hidden="true">
     <div id="youtube-player-host" class="youtube-player-host" aria-hidden="true"></div>
@@ -324,6 +344,11 @@
           </svg>
           <svg class="icon view-fullscreen" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M7 3H3v4h2V5h2V3zm14 0h-4v2h2v2h2V3zM5 17H3v4h4v-2H5v-2zm16 0h-2v2h-2v2h4v-4z"></path>
+          </svg>
+        </button>
+        <button id="player-focus-btn" class="player-focus-btn" type="button" aria-label="{{ t('player.view.fullscreen') }}" title="{{ t('player.view.fullscreen') }}">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 3l2.4 5.2L20 9l-4.1 3.9 1 5.6L12 15.8 7.1 18.5l1-5.6L4 9l5.6-.8L12 3z"></path>
           </svg>
         </button>
         <button id="play-mode-btn" class="mode-btn" type="button" aria-label="{{ t('player.mode.normal') }}" data-mode="normal" title="{{ t('player.mode.normal') }}">
@@ -438,6 +463,34 @@
       <p id="player-queue-empty" class="muted small hidden">{{ t('player.queue_empty') }}</p>
       <div class="row-actions top-gap">
         <button type="button" id="queue-clear-btn" class="btn secondary">{{ t('player.queue_clear') }}</button>
+        <button type="button" id="queue-room-create-btn" class="btn secondary">{{ t('player.queue') }} live</button>
+      </div>
+      <div id="queue-room-panel" class="queue-room-panel hidden" aria-live="polite">
+        <div class="queue-room-panel__head">
+          <div>
+            <strong>{{ t('player.queue') }} live</strong>
+            <p id="queue-room-status" class="muted small">{{ t('share.link_label') }}</p>
+          </div>
+          <span id="queue-room-code" class="queue-room-code"></span>
+        </div>
+        <div class="row-actions">
+          <input id="queue-room-join-code" type="text" maxlength="12" autocomplete="off" placeholder="Code">
+          <button type="button" id="queue-room-join-btn" class="btn secondary">{{ t('modal.apply') }}</button>
+          <button type="button" id="queue-room-copy-btn" class="btn secondary">{{ t('share.copy_link') }}</button>
+          <button type="button" id="queue-room-close-btn" class="btn secondary hidden">Fermer</button>
+        </div>
+        <div id="queue-room-chat" class="queue-room-chat hidden" aria-live="polite">
+          <div class="queue-room-chat__head">
+            <strong>Chat live</strong>
+            <span id="queue-room-participants" class="muted small"></span>
+          </div>
+          <ul id="queue-room-chat-list" class="queue-room-chat__list"></ul>
+          <form id="queue-room-chat-form" class="queue-room-chat__form" method="post" action="#" data-spa-ignore="1">
+            <input id="queue-room-chat-input" type="text" maxlength="500" autocomplete="off" placeholder="Message temporaire">
+            <button type="submit" class="btn secondary">Envoyer</button>
+          </form>
+          <p id="queue-room-typing" class="queue-room-typing muted small" hidden></p>
+        </div>
       </div>
       <div class="top-gap stack">
         <label class="row-actions">

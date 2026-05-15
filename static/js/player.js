@@ -90,6 +90,7 @@
   const playerActionToast = document.getElementById("player-action-toast");
   const playerActionToastText = document.getElementById("player-action-toast-text");
   const playerActionToastUndo = document.getElementById("player-action-toast-undo");
+  const playerActionToastConfirm = document.getElementById("player-action-toast-confirm");
   const speedSelect = document.getElementById("speed-select");
   const currentTimeEl = document.getElementById("time-current");
   const remainingTimeEl = document.getElementById("time-remaining");
@@ -177,6 +178,7 @@
   let toastTimer = null;
   let actionToastTimer = null;
   let pendingUndoAction = null;
+  let pendingToastConfirmAction = null;
   let lyricsState = { songId: "", text: "", cues: [], autoSync: false };
   let playerVoteState = { likes: 0, dislikes: 0, user_vote: 0 };
   const youtubeErrorAttempts = new Map();
@@ -1229,7 +1231,10 @@
     if (!playerActionToast) return;
     playerActionToast.classList.add("hidden");
     pendingUndoAction = null;
+    pendingToastConfirmAction = null;
     clearTimeout(actionToastTimer);
+    if (playerActionToastUndo) playerActionToastUndo.classList.remove("hidden");
+    if (playerActionToastConfirm) playerActionToastConfirm.classList.add("hidden");
   }
 
   async function runUndoAction() {
@@ -1240,16 +1245,30 @@
     hideActionToast();
   }
 
-  function showActionToast(message, undoAction) {
+  async function runToastConfirmAction() {
+    if (!pendingToastConfirmAction) return;
+    const action = pendingToastConfirmAction;
+    pendingToastConfirmAction = null;
+    hideActionToast();
+    await action();
+  }
+
+  function showActionToast(message, undoAction, confirmAction = null, confirmLabel = "", durationMs = 10000) {
     if (!playerActionToast || !playerActionToastText) return;
     playerActionToastText.textContent = message || "";
     pendingUndoAction = undoAction || null;
+    pendingToastConfirmAction = typeof confirmAction === "function" ? confirmAction : null;
+    if (playerActionToastUndo) playerActionToastUndo.classList.toggle("hidden", !pendingUndoAction);
+    if (playerActionToastConfirm) {
+      playerActionToastConfirm.textContent = confirmLabel || "OK";
+      playerActionToastConfirm.classList.toggle("hidden", !pendingToastConfirmAction);
+    }
     playerActionToast.classList.remove("hidden");
 
     clearTimeout(actionToastTimer);
     actionToastTimer = setTimeout(() => {
       hideActionToast();
-    }, 10000);
+    }, durationMs);
   }
 
   function normalizeArtistName(value) {
@@ -2007,7 +2026,8 @@
     }
   }
 
-  async function addCurrentSongToPlaylist(playlistId) {
+  async function addCurrentSongToPlaylist(playlistId, options = {}) {
+    const force = options && options.force === true;
     if (!isAuthenticated) {
       showPlaylistToast(i18n.authRequired || "Login required.", "error");
       return;
@@ -2022,8 +2042,8 @@
       const res = await fetch("/playlists/quick-add", {
         method: "POST",
         credentials: "same-origin",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ playlist_id: playlistId, song_id: song.id }),
+        headers: jsonHeaders(true),
+        body: JSON.stringify({ playlist_id: playlistId, song_id: song.id, force }),
       });
       const data = await res.json();
       if (!res.ok || !data.ok) {
@@ -2036,12 +2056,20 @@
           ? (i18n.playerPlaylistExists || data.message || "Already in playlist")
           : (i18n.playerPlaylistAdded || data.message || "Added");
       }
-      showPlaylistToast(
-        data.already_exists
-          ? (i18n.playerPlaylistExists || data.message || "Already in playlist")
-          : (i18n.playerPlaylistAdded || data.message || "Added"),
-        data.already_exists ? "error" : "success"
-      );
+      if (data.already_exists) {
+        const message = i18n.playerPlaylistExists || data.message || "Cette chanson se trouve déjà dans cette playlist.";
+        setPlaylistModalOpen(false);
+        showActionToast(
+          message,
+          null,
+          () => addCurrentSongToPlaylist(playlistId, { force: true }),
+          "Ajouter quand même"
+        );
+        showPlaylistToast(message, "error");
+        return;
+      }
+      setPlaylistModalOpen(false);
+      showActionToast(i18n.playerPlaylistAdded || data.message || "Chanson ajoutée à la playlist.", null, null, "", 5000);
     } catch (_e) {
       if (playlistStatus) playlistStatus.textContent = i18n.playerPlaylistError || "Error";
       showPlaylistToast(i18n.playerPlaylistError || "Error", "error");
@@ -3390,7 +3418,11 @@
       const targetHref = song.detail_url;
       setViewMode("normal", true);
       window.setTimeout(() => {
-        window.location.assign(targetHref);
+        if (window.__PULSEBEAT_SPA__) {
+          window.dispatchEvent(new CustomEvent("pulsebeat:navigate", { detail: { href: targetHref } }));
+        } else {
+          window.location.assign(targetHref);
+        }
       }, 220);
     });
   }
@@ -3454,6 +3486,12 @@
     playerActionToastUndo.addEventListener("click", (event) => {
       event.preventDefault();
       runUndoAction();
+    });
+  }
+  if (playerActionToastConfirm) {
+    playerActionToastConfirm.addEventListener("click", (event) => {
+      event.preventDefault();
+      runToastConfirmAction();
     });
   }
 

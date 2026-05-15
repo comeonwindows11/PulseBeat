@@ -1435,10 +1435,12 @@
 
 
   function jsonHeaders() {
-    return {
+    const headers = {
       "X-Requested-With": "XMLHttpRequest",
       Accept: "application/json",
     };
+    if (window.CSRF_TOKEN) headers["X-CSRF-Token"] = window.CSRF_TOKEN;
+    return headers;
   }
 
   function setVoteButtonActive(button, active) {
@@ -1905,6 +1907,32 @@
         showClientNotice("Unable to save comment.", "danger");
       } finally {
         setFormDisabled(commentsForm, false);
+      }
+    }
+
+    const playlistRemoveForm = event.target.closest("form[data-playlist-remove-form]");
+    if (playlistRemoveForm) {
+      event.preventDefault();
+      setFormDisabled(playlistRemoveForm, true);
+      try {
+        const res = await fetch(playlistRemoveForm.action, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: jsonHeaders(),
+          body: new FormData(playlistRemoveForm),
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data || !data.ok) {
+          showClientNotice((data && data.message) || "Unable to remove song.", "danger");
+          return;
+        }
+        showClientNotice(data.message || "Song removed from playlist.", "success");
+        const href = window.location.href;
+        window.dispatchEvent(new CustomEvent("pulsebeat:navigate", { detail: { href } }));
+      } catch (_e) {
+        showClientNotice("Unable to remove song.", "danger");
+      } finally {
+        setFormDisabled(playlistRemoveForm, false);
       }
     }
   });

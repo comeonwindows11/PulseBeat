@@ -104,6 +104,7 @@
         {% for song in songs %}
           <li
             data-song-id="{{ song.id }}"
+            data-playlist-position="{{ song.playlist_position }}"
             class="{% if not song.is_available %}song-unavailable{% endif %}{% if playlist_reorder_enabled %} playlist-sort-item{% endif %}"
             {% if playlist_reorder_enabled %}draggable="true"{% endif %}
           >
@@ -125,7 +126,8 @@
                 data-song='{{ {"id": song.id, "title": song.title, "artist": song.artist, "url": song.url, "detail_url": url_for('songs.song_detail', song_id=song.id), "source_type": song.source_type, "source_url": song.source_url, "external_provider": song.external_provider, "youtube_video_id": song.youtube_video_id, "playback_mode": song.playback_mode, "is_available": song.is_available, "is_audio_playable": song.is_audio_playable, "visibility": song.visibility}|tojson|safe }}'
               >{{ t('main.play') }}</button>
               {% if playlist.is_owner or playlist.is_collaborator %}
-              <form method="post" action="{{ url_for('playlists.remove_song_from_playlist', playlist_id=playlist.id, song_id=song.id) }}">
+              <form method="post" action="{{ url_for('playlists.remove_song_from_playlist', playlist_id=playlist.id, song_id=song.id) }}" data-playlist-remove-form="1">
+                <input type="hidden" name="playlist_position" value="{{ song.playlist_position }}">
                 <button type="submit" class="btn-danger">{{ t('playlist.remove') }}</button>
               </form>
               {% endif %}

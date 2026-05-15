@@ -315,6 +315,7 @@ def quick_add_song_to_playlist():
     payload = request.get_json(silent=True) or {}
     playlist_oid = parse_object_id(payload.get("playlist_id", ""))
     song_oid = parse_object_id(payload.get("song_id", ""))
+    force = bool(payload.get("force"))
 
     if not playlist_oid or not song_oid:
         return jsonify({"ok": False, "message": tr("flash.songs.invalid_request")}), 400
@@ -327,7 +328,7 @@ def quick_add_song_to_playlist():
     if not song or not can_access_song(song, user_oid):
         return jsonify({"ok": False, "message": tr("flash.playlists.song_inaccessible")}), 404
 
-    if song_oid in playlist.get("song_ids", []):
+    if song_oid in playlist.get("song_ids", []) and not force:
         return jsonify({"ok": True, "already_exists": True, "message": tr("flash.playlists.song_exists")})
 
     extensions.playlists_col.update_one(
@@ -495,11 +496,13 @@ def playlist_detail(playlist_id):
         base_song_map = {str(item.get("id")): item for item in cached_payload.get("songs", []) if item.get("id")}
         extra_song_map = _playlist_extra_song_map(song_ids, user_oid)
         ordered_items = []
-        for sid in song_ids:
+        for position, sid in enumerate(song_ids):
             key = str(sid)
             item = extra_song_map.get(key) or base_song_map.get(key)
             if item:
-                ordered_items.append(item)
+                row = dict(item)
+                row["playlist_position"] = position
+                ordered_items.append(row)
         total_playlist_songs = len(ordered_items)
         songs_pages = max(1, ceil(total_playlist_songs / per_page)) if total_playlist_songs else 1
         if songs_page > songs_pages:
@@ -513,12 +516,12 @@ def playlist_detail(playlist_id):
         if song_ids:
             raw_songs = list(extensions.songs_col.find({"_id": {"$in": song_ids}}))
             songs_by_id = {song["_id"]: song for song in raw_songs}
-            ordered = [songs_by_id[sid] for sid in song_ids if sid in songs_by_id]
+            ordered = [(position, songs_by_id[sid]) for position, sid in enumerate(song_ids) if sid in songs_by_id]
             if songs_q:
                 compiled_pattern = re.compile(build_special_insensitive_search_pattern(songs_q, max_len=120), re.IGNORECASE)
                 ordered = [
-                    song
-                    for song in ordered
+                    (position, song)
+                    for position, song in ordered
                     if compiled_pattern.search(song.get("title", ""))
                     or compiled_pattern.search(song.get("artist", ""))
                     or compiled_pattern.search(song.get("genre", ""))
@@ -531,10 +534,11 @@ def playlist_detail(playlist_id):
             start = (songs_page - 1) * per_page
             end = start + per_page
             ordered = ordered[start:end]
-            for song in ordered:
+            for position, song in ordered:
                 if can_access_song(song, user_oid):
                     item = _playlist_song_item(song, user_oid)
                     if item:
+                        item["playlist_position"] = position
                         songs.append(item)
         else:
             songs_pages = 1
@@ -680,20 +684,45 @@ def remove_song_from_playlist(playlist_id, song_id):
     user_oid = get_session_user_oid()
     playlist_oid = parse_object_id(playlist_id)
     song_oid = parse_object_id(song_id)
+    wants_json = request.headers.get("X-Requested-With", "").strip().lower() == "xmlhttprequest" or "application/json" in (request.headers.get("Accept", "") or "").lower()
     if not playlist_oid or not song_oid:
+        if wants_json:
+            return jsonify({"ok": False, "message": tr("flash.songs.invalid_request")}), 400
         flash(tr("flash.songs.invalid_request"), "danger")
         return redirect(url_for("playlists.list_playlists"))
 
     playlist = extensions.playlists_col.find_one({"_id": playlist_oid})
     if not playlist or playlist_hidden_by_feature_toggle(playlist) or not can_edit_playlist(playlist, user_oid):
+        if wants_json:
+            return jsonify({"ok": False, "message": tr("flash.playlists.not_found")}), 404
         flash(tr("flash.playlists.not_found"), "danger")
         return redirect(url_for("playlists.list_playlists"))
 
+    song_ids = list(playlist.get("song_ids", []) or [])
+    position_raw = str(request.form.get("playlist_position", "") or "").strip()
+    updated_song_ids = None
+    if position_raw.isdigit():
+        position = int(position_raw)
+        if 0 <= position < len(song_ids) and str(song_ids[position]) == str(song_oid):
+            updated_song_ids = song_ids[:position] + song_ids[position + 1:]
+
+    if updated_song_ids is None:
+        updated_song_ids = list(song_ids)
+        try:
+            updated_song_ids.remove(song_oid)
+        except ValueError:
+            if wants_json:
+                return jsonify({"ok": False, "message": tr("flash.playlists.song_inaccessible")}), 404
+            flash(tr("flash.playlists.song_inaccessible"), "warning")
+            return redirect(url_for("playlists.playlist_detail", playlist_id=playlist_id))
+
     extensions.playlists_col.update_one(
         {"_id": playlist_oid},
-        {"$pull": {"song_ids": song_oid}, "$set": {"updated_at": datetime.utcnow()}},
+        {"$set": {"song_ids": updated_song_ids, "updated_at": datetime.utcnow()}},
     )
     invalidate_playlist_related_caches(playlist)
+    if wants_json:
+        return jsonify({"ok": True, "message": tr("flash.playlists.song_removed"), "redirect_url": url_for("playlists.playlist_detail", playlist_id=playlist_id)})
     flash(tr("flash.playlists.song_removed"), "success")
     return redirect(url_for("playlists.playlist_detail", playlist_id=playlist_id))
 

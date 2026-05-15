@@ -61,6 +61,12 @@
   {% if not hide_global_chrome %}
   <header class="topbar">
     <a href="{% if current_user and current_user.require_password_change %}{{ url_for('accounts.manage_account') }}{% elif current_user %}{{ url_for('main.index') }}{% else %}{{ url_for('accounts.login') }}{% endif %}" class="logo">{{ app_name }}</a>
+    {% if not current_user or not current_user.require_password_change %}
+    <button id="command-palette-trigger" class="command-trigger" type="button" aria-label="{{ t('main.search_placeholder') }}">
+      <span>Rechercher et plus d'options</span>
+      <kbd>Ctrl+K</kbd>
+    </button>
+    {% endif %}
     <button id="menu-toggle" class="menu-toggle" type="button" aria-label="{{ t('lang.switch') }}" aria-expanded="false">
       <span></span><span></span><span></span>
     </button>

@@ -2,6 +2,19 @@
 {% block title %}{{ playlist.name }} - {{ app_name }}{% endblock %}
 
 {% block content %}
+<script>
+  window.PULSEBEAT_SEARCH_CONTEXT = {
+    action: {{ url_for('playlists.playlist_detail', playlist_id=playlist.id)|tojson }},
+    autocompleteUrl: {{ url_for('playlists.playlist_search_suggest', playlist_id=playlist.id)|tojson }},
+    queryParam: "songs_q",
+    value: {{ songs_q|tojson }},
+    submitOnSelect: true,
+    hidden: [
+      { name: "songs_page", value: "1" },
+      { name: "add_page", value: {{ add_page|tojson }} }
+    ]
+  };
+</script>
 <section class="grid two-cols">
   <div class="card">
     <h1>{{ playlist.name }}</h1>

@@ -150,6 +150,7 @@
 
     window.PAGE_SONG_OBJECTS = [];
     window.PAGE_RECOMMENDED_SONGS = [];
+    window.PULSEBEAT_SEARCH_CONTEXT = null;
 
     document.title = nextDocument.title || document.title;
     document.documentElement.lang = nextDocument.documentElement.lang || document.documentElement.lang;

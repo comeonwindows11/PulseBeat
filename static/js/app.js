@@ -2375,18 +2375,24 @@
       });
     }
 
+    function commandSearchUrl() {
+      const context = window.PULSEBEAT_SEARCH_CONTEXT || {};
+      return context.autocompleteUrl || input.getAttribute("data-song-search-url") || "";
+    }
+
     async function fetchSongCommands(query) {
-      const searchUrl = input.getAttribute("data-song-search-url");
+      const searchUrl = commandSearchUrl();
       if (!searchUrl || !query || query.length < 2) return [];
       const url = new URL(searchUrl, window.location.origin);
       url.searchParams.set("q", query);
+      const inPlaylist = !!(window.PULSEBEAT_SEARCH_CONTEXT && window.PULSEBEAT_SEARCH_CONTEXT.autocompleteUrl);
       try {
         const res = await fetch(url.toString(), { credentials: "same-origin", headers: jsonHeaders() });
         const data = res.ok ? await res.json() : null;
         return (Array.isArray(data && data.items) ? data.items : []).map((item) => ({
           type: "link",
           title: item.title || item.value || "Chanson",
-          subtitle: item.artist || "Résultat de recherche",
+          subtitle: item.artist || (inPlaylist ? "Résultat dans cette playlist" : "Résultat de recherche"),
           href: item.detail_url || (item.song_id ? `/songs/${encodeURIComponent(item.song_id)}` : ""),
         })).filter((item) => item.href);
       } catch (_e) {
@@ -2471,17 +2477,40 @@
         openPalette();
       }
     });
+
+    document.getElementById("command-palette-trigger")?.addEventListener("click", openPalette);
   }
 
   initCommandPalette();
 
+  function ensureAutocompleteHost(input) {
+    if (input.parentElement && input.parentElement.classList.contains("autocomplete-host")) {
+      return input.parentElement;
+    }
+    if (input.parentElement && input.parentElement.matches("form")) {
+      const host = document.createElement("div");
+      host.className = "autocomplete-host search-input-shell";
+      input.parentElement.insertBefore(host, input);
+      host.appendChild(input);
+      return host;
+    }
+    if (input.parentElement) {
+      input.parentElement.classList.add("autocomplete-host");
+      return input.parentElement;
+    }
+    return null;
+  }
+
   function attachAutocomplete(input) {
-    const url = input.getAttribute("data-autocomplete-url");
-    if (!url) return;
+    if (!input.getAttribute("data-autocomplete-url")) return;
+    if (input.dataset.autocompleteBound === "1") return;
+    input.dataset.autocompleteBound = "1";
+    const host = ensureAutocompleteHost(input);
 
     const box = document.createElement("div");
-    box.className = "autocomplete-box";
-    input.insertAdjacentElement("afterend", box);
+    box.className = "autocomplete-box search-autocomplete-box hidden";
+    if (host) host.appendChild(box);
+    else input.insertAdjacentElement("afterend", box);
 
     let items = [];
     let index = -1;
@@ -2489,13 +2518,18 @@
 
     function render() {
       box.innerHTML = "";
+      box.classList.toggle("hidden", !items.length);
       items.forEach((item, i) => {
         const btn = document.createElement("button");
         btn.type = "button";
         btn.className = `autocomplete-item${i === index ? " active" : ""}`;
-        btn.textContent = item.value || item.title || "";
+        const title = item.value || item.title || "";
+        const detail = item.artist || item.subtitle || item.email || "";
+        btn.innerHTML = "<span></span><small></small>";
+        btn.querySelector("span").textContent = title;
+        btn.querySelector("small").textContent = detail;
         btn.addEventListener("click", () => {
-          input.value = item.value || item.title || "";
+          input.value = title;
           const targetHiddenId = input.getAttribute("data-target-hidden");
           if (targetHiddenId) {
             const hidden = document.getElementById(targetHiddenId);
@@ -2504,6 +2538,15 @@
           box.innerHTML = "";
           items = [];
           index = -1;
+
+          if (input.getAttribute("data-navigate-on-select") === "1" && item.detail_url) {
+            if (window.PulseBeatSPA && typeof window.PulseBeatSPA.navigate === "function") {
+              window.PulseBeatSPA.navigate(item.detail_url);
+            } else {
+              window.location.assign(item.detail_url);
+            }
+            return;
+          }
 
           if (input.getAttribute("data-submit-on-select") === "1") {
             const form = input.closest("form");
@@ -2523,7 +2566,9 @@
         render();
         return;
       }
-      fetch(`${url}?q=${encodeURIComponent(q)}`, { credentials: "same-origin" })
+      const url = input.getAttribute("data-autocomplete-url");
+      if (!url) return;
+      fetch(`${url}?q=${encodeURIComponent(q)}`, { credentials: "same-origin", headers: jsonHeaders() })
         .then((res) => (res.ok ? res.json() : { items: [] }))
         .then((data) => {
           items = Array.isArray(data.items) ? data.items : [];
@@ -2571,10 +2616,62 @@
       render();
     });
   }
-  document.querySelectorAll("input[data-autocomplete-url]").forEach((input) => {
-    if (input.id === "user-picker-search") return;
-    attachAutocomplete(input);
-  });
+
+  function syncSiteSearchContext() {
+    const form = document.getElementById("site-search-form");
+    const input = document.getElementById("site-search-input");
+    if (!form || !input) return;
+
+    const context = window.PULSEBEAT_SEARCH_CONTEXT || {};
+    const action = context.action || form.getAttribute("data-global-action") || "/";
+    const autocompleteUrl = context.autocompleteUrl || form.getAttribute("data-global-autocomplete-url") || "";
+    const queryParam = context.queryParam || "q";
+    let value = typeof context.value === "string" ? context.value : "";
+    if (!window.PULSEBEAT_SEARCH_CONTEXT) {
+      const actionUrl = new URL(action, window.location.origin);
+      if (actionUrl.pathname === window.location.pathname) {
+        value = new URLSearchParams(window.location.search).get(queryParam) || "";
+      }
+    }
+
+    form.action = action;
+    input.name = queryParam;
+    input.value = value;
+    input.setAttribute("data-autocomplete-url", autocompleteUrl);
+
+    if (context.submitOnSelect) input.setAttribute("data-submit-on-select", "1");
+    else input.removeAttribute("data-submit-on-select");
+
+    if (context.submitOnSelect) input.removeAttribute("data-navigate-on-select");
+    else input.setAttribute("data-navigate-on-select", "1");
+
+    form.querySelectorAll(".site-search-context-hidden").forEach((node) => node.remove());
+    const autocompleteBox = form.querySelector(".search-autocomplete-box");
+    if (autocompleteBox) {
+      autocompleteBox.innerHTML = "";
+      autocompleteBox.classList.add("hidden");
+    }
+    (Array.isArray(context.hidden) ? context.hidden : []).forEach((field) => {
+      if (!field || !field.name) return;
+      const hidden = document.createElement("input");
+      hidden.type = "hidden";
+      hidden.name = field.name;
+      hidden.value = field.value == null ? "" : String(field.value);
+      hidden.className = "site-search-context-hidden";
+      form.appendChild(hidden);
+    });
+  }
+
+  function initAutocompleteInputs() {
+    syncSiteSearchContext();
+    document.querySelectorAll("input[data-autocomplete-url]").forEach((input) => {
+      if (input.id === "user-picker-search" || input.id === "admin-user-picker-search") return;
+      attachAutocomplete(input);
+    });
+  }
+
+  initAutocompleteInputs();
+  document.addEventListener("pulsebeat:navigated", initAutocompleteInputs);
 
   const passwordPolicyRe = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{6,}$/;
 
